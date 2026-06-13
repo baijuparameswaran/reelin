@@ -1,0 +1,25 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[packages]
+click = "*"
+rich = "*"
+pyyaml = "*"
+moviepy = "*"
+pillow = "*"
+httpx = "*"
+pydantic = "*"
+diffusers = "*"
+transformers = "*"
+torch = "*"
+accelerate = "*"
+
+[dev-packages]
+pytest = "*"
+pytest-asyncio = "*"
+ruff = "*"
+
+[requires]
+python_version = "3.14"
