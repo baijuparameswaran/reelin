@@ -1,0 +1,13 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Runtime output / generated artifacts
+output/
+*.log
+
+# Editor/OS
+.DS_Store
+.idea/
+.vscode/
