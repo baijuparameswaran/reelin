@@ -1,0 +1,51 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Local model configuration for the reel screenplay-conversion agents.
+#
+# Agents request a *profile* (a quality tier), never a hard-coded model name.
+# This keeps the whole pipeline model-agnostic: swap a bigger model the day a
+# GPU/cloud box is available by editing this file only.
+#
+# If a profile's preferred `model` isn't pulled yet, the client transparently
+# falls back to the first installed entry in `fallbacks`, so the pipeline always
+# runs on whatever local models exist. Run `scripts/update-models.sh` to pull
+# the preferred models (and keep them current on a cadence).
+# ─────────────────────────────────────────────────────────────────────────────
+
+ollama_host: http://localhost:11434
+
+# Runtime behavior.
+runtime:
+  # How many agents may call models concurrently. On CPU-only / low-RAM hosts a
+  # single model serves requests sequentially and loading two different models
+  # at once OOMs, so keep this at 1 here. Raise it on a GPU/multi-model box to
+  # actually parallelize the independent branches (structure ‖ characters).
+  max_parallel_agents: 1
+
+# Qwen3 requires a newer Ollama than 0.6.5. The update script checks this and
+# tells you how to upgrade if needed. (Soft floor; updater always pulls latest.)
+min_ollama_version: "0.7.0"
+
+profiles:
+  # Fast tier — default for iteration on modest CPU-only hardware.
+  fast:
+    model: qwen3:4b
+    fallbacks: [qwen2.5:latest, mistral:7b-instruct, phi3:mini]
+    options:
+      temperature: 0.7
+      num_ctx: 4096
+
+  # Quality tier — slower, better structure/instruction-following.
+  # Comfortable after bumping WSL RAM to ~12 GB (see CLAUDE.md).
+  quality:
+    model: qwen3:8b
+    fallbacks: [llama3:8b, qwen2:7b-instruct-q5_K_M, qwen2.5:latest]
+    options:
+      temperature: 0.8
+      num_ctx: 4096
+
+# Default profile each agent uses (override per run with `--profile`).
+agent_profiles:
+  structure:  quality
+  characters: fast
+  scenes:     fast
+  screenplay: quality
