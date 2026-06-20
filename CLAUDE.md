@@ -25,11 +25,14 @@ and a Fountain draft. A human-in-the-loop gate reviews/iterates each stage.
   `with_feedback`), `pipeline.py` (orchestration + per-stage gates), `gate.py`
   (human-in-the-loop review gate), `imagegen.py` (pluggable text-to-image +
   img2img backend for casting renders), `stock.py` (free CC stock-photo lookup
-  via Openverse — actor identity references), `cli.py` (entry), `manifest.py`
-  (model list for the updater), `agents/` (ingest, structure, characters,
-  casting, scenes, soundscape, visuals, cinematography, storyboard, screenplay).
+  via Openverse — actor identity references), `i2v.py` (pluggable image-to-video
+  backend — render storyboard frames into clips on a GPU/remote host), `cli.py`
+  (entry), `manifest.py` (model list for the updater), `agents/` (ingest,
+  structure, characters, casting, scenes, soundscape, visuals, cinematography,
+  storyboard, screenplay).
 - `config/models.yaml` — model profiles, per-agent profile map, `hitl` gate
-  knobs, `image` block (backend/model/stock/img2img knobs), runtime knobs.
+  knobs, `image` block (backend/model/stock/img2img), `video` block
+  (image-to-video backend/model/continuity), runtime knobs.
 - `scripts/` — `update-models.sh` (cadence), `install-cron.sh`, `model-updates.log`.
 - `samples/` — bundled test story. `output/` — generated artifacts (gitignored).
 - Entry points via `Makefile`: `setup`, `demo`, `run`, `models`, `update`,
@@ -93,6 +96,17 @@ original 7.6 GB cap. 4 GB swap. 872 GB disk.
   `output/casting/CREDITS.json`. All best-effort: no torch/network/stock hit →
   it degrades (text→image, or skip) without breaking the run. Framing is left
   open (not forced full-length) so img2img can follow the reference photo.
+- **Scene rendering = image-to-video (next phase, scaffolded):** after storyboard
+  + screenplay, the pipeline renders each storyboard frame to a still (reusing
+  `imagegen`, identity-anchored on the casting images) then animates each still
+  into a clip via `i2v` (`pipeline._render_scene_frames` → `output/video/`).
+  **Continuity:** clips chain from the previous frame's last image *within* a
+  scene; scene boundaries reset the chain (a cut). Model-agnostic, best-effort
+  pluggable backend (`video` block): `diffusers` (LTX-Video/Wan/CogVideoX on a
+  **GPU** host, via `pipeline_class`), `comfyui`/`http` (offload to a remote GPU
+  endpoint — render stills locally, motion remote), or `none`. **Video needs a
+  GPU (~12 GB+ VRAM) — a no-op on this CPU host**; stills still render where
+  `imagegen` is available, clips are skipped with a hint.
 - On this host prefer `--profile fast` (one model, no 5 GB reloads between agents).
 - Update cadence lives in `scripts/update-models.sh` (pull + version-check +
   smoke test + log), wired weekly/monthly via `make install-cron`, runnable
@@ -123,14 +137,36 @@ original 7.6 GB cap. 4 GB swap. 872 GB disk.
   end-to-end pass to validate the expanded pipeline. *(WSL RAM already raised to
   ~12 GB — done.)* The storyboard stage timed out on a run at the old 300 s
   inactivity window (slow time-to-first-token); raised default to 600 s.
-- **Next up (next iterations):** render storyboard `image_prompt`s through the
-  image model (reuse `imagegen`, anchor on the casting actor images for
-  cross-shot identity consistency); input chunking for long texts (currently
-  truncated at ~12k chars); draft *all* scenes not just first N; richer ingest
-  (PDF/EPUB/.fdx); then the *next phase* of the larger pipeline (shot list /
-  edit / etc.).
+- **Scene rendering (image-to-video) — scaffolded, GPU-gated.** `i2v.py` +
+  `pipeline._render_scene_frames` render each storyboard frame to a still
+  (reusing `imagegen`) then animate it into a clip with continuity → `output/
+  video/`. Pluggable backends (diffusers LTX/Wan on GPU, comfyui/http remote,
+  none). On this CPU host it renders the per-frame **stills** (verified: 2-frame
+  scene with continuity carried forward) and **skips clips** (no GPU). Recommended
+  efficient open models: **LTX-Video/LTX-2** (fastest, ~12-16 GB) or **Wan 2.x**
+  (Apache-2.0, first+last-frame). Needs a GPU/remote endpoint to actually produce
+  video. Clip assembly per scene (ffmpeg concat) is not done yet.
+- **Next up (next iterations):** wire a real GPU/remote `video.backend` and do a
+  full scene-render pass (stills→clips→per-scene concat); input chunking for long
+  texts (currently truncated at ~12k chars); draft *all* scenes not just first N;
+  richer ingest (PDF/EPUB/.fdx); then the *next phase* (shot list / edit / sound
+  mix / final cut).
 
 ## Session log
+- 2026-06-20 (later) — **Scene rendering scaffold (image-to-video).** Added
+  `i2v.py`: pluggable, model-agnostic image-to-video backend (`diffusers` for
+  LTX-Video/Wan/CogVideoX on a GPU via `pipeline_class`; `comfyui`/`http` to
+  offload to a remote GPU; `none`), best-effort + GPU-gated. Added
+  `pipeline._render_scene_frames`, run after storyboard+screenplay: renders each
+  storyboard frame to a still (reusing `imagegen`, identity-anchored on casting
+  images) then animates it into a clip, **chaining clips from the previous frame's
+  last image for continuity** (scene boundary = reset = cut); writes
+  `output/video/scene_NN/frame_MM.{png,mp4}` + `manifest.json`, idempotent. New
+  `video` config block. Web-searched current open I2V SOTA (June 2026): LTX-2,
+  Wan 2.x, HunyuanVideo 1.5 — LTX/Wan are the efficient picks; all need a GPU.
+  Verified the stills+continuity path on CPU (2-frame Edith scene; frame 2 img2img
+  from frame 1 — same person, continuous look); clips correctly skipped (no GPU).
+  *(Uncommitted at time of writing.)*
 - 2026-06-20 — **Image rendering for casting, with actor/character identity.**
   Added `imagegen.py` (pluggable text-to-image: `diffusers` / `auto1111` / none,
   best-effort, lazy-imported optional deps) and wired it into the casting stage

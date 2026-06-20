@@ -60,6 +60,31 @@ image:
     reference_strength: 0.4       # actor render from the stock reference (lower = closer to the real face)
     candidates: 8                 # stock results to try before giving up
 
+# Scene rendering — image-to-video (the next phase, after storyboard + screenplay).
+# Renders each storyboard frame to a still then animates it into a clip, chaining
+# clips for continuity within a scene. Heavy modality: the efficient open models
+# (LTX-Video/LTX-2, Wan 2.x, CogVideoX-I2V) all want a GPU (~12 GB+ VRAM), so this
+# is a no-op on this CPU-only host — see reel/i2v.py. Best-effort: with no backend
+# the run still keeps each frame's still + prompt.
+#   backend: diffusers -> in-process on a GPU host. Model-agnostic via pipeline_class:
+#                         LTXImageToVideoPipeline / WanImageToVideoPipeline / etc.
+#            comfyui|http-> POST keyframe image(s)+prompt to a remote GPU endpoint
+#                         (recommended from here: render stills locally, motion remote).
+#            none       -> disabled (default on this host).
+video:
+  enabled: true                   # attempt scene rendering once storyboard+screenplay are done
+  backend: none                   # none on this CPU host; set diffusers/comfyui on a GPU host
+  model: Lightricks/LTX-Video     # diffusers backend (GPU); swap to a Wan I2V checkpoint, etc.
+  pipeline_class: LTXImageToVideoPipeline   # model-agnostic diffusers class
+  host: http://localhost:8188     # comfyui / remote endpoint base URL
+  endpoint: ""                    # full POST URL (defaults to <host>/i2v)
+  seconds: 4
+  fps: 24
+  size: 768
+  continuity: true                # chain each clip from the previous frame's last image
+  style_suffix: "cinematic, smooth natural motion, consistent character"
+  timeout_seconds: 1200
+
 # Runtime behavior.
 runtime:
   # How many agents may call models concurrently. On CPU-only / low-RAM hosts a

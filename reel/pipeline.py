@@ -18,6 +18,12 @@ Creative crew roles:
   cinematography — Director of Photography (shot types, angles, movement, lens)
   storyboard    — fuses casting + art + camera + score into a visual image per moment
 
+After storyboard + screenplay, an optional scene-render phase
+(`_render_scene_frames` → `output/video/`) renders each storyboard frame to a
+still then animates it into a clip (image-to-video via `reel.i2v`), chaining clips
+for continuity within a scene. GPU-gated and best-effort: a no-op on CPU-only
+hosts (stills still render where the image backend is available).
+
 Each LLM stage passes through a human-in-the-loop gate: the operator can
 approve the result, supply revision feedback, or let it auto-approve on
 timeout. Parallel branches are gated independently after all complete.
@@ -46,6 +52,7 @@ from .gate import Gate
 from . import llm
 from . import imagegen
 from . import stock
+from . import i2v
 
 
 def _log(msg: str) -> None:
@@ -286,6 +293,86 @@ def _render_casting_images(casting: dict, out: Path) -> int:
     return n
 
 
+def _frame_char_anchor(frame: dict, cast_index: dict, out: Path) -> Path | None:
+    """The casting image of the first in-frame character — the identity anchor for
+    a frame's still (so the right actor shows up, consistently)."""
+    for name in frame.get("characters_in_frame", []):
+        rel = cast_index.get(name)
+        if rel and (out / rel).exists():
+            return out / rel
+    return None
+
+
+def _render_scene_frames(storyboard: dict, casting: dict, out: Path) -> dict:
+    """Next phase (after storyboard + screenplay): render each storyboard frame to
+    a still — identity-anchored on the casting images — then image-to-video each
+    still into a clip, **chaining each clip from the previous frame's last image**
+    so motion is continuous within a scene. Scene boundaries reset the chain (a
+    cut). Best-effort and idempotent (skips files already on disk); the per-frame
+    stills are kept whether or not clips render. Returns a render manifest.
+    """
+    if not i2v.enabled():
+        _log(f"      scene render skipped — {i2v.unavailable_hint()}")
+        return {}
+    clips_ok = i2v.available()
+    if not clips_ok:
+        _log(f"      clips skipped ({i2v.unavailable_hint()}); rendering frame stills only")
+    continuity = bool(i2v._cfg().get("continuity", True))
+
+    cast_index = {}
+    for c in casting.get("casting", []):
+        ch = c.get("character", c)
+        rel = ch.get("image_path") or c.get("image_path")
+        if rel:
+            cast_index[c.get("name")] = rel
+
+    vdir = out / "video"
+    vdir.mkdir(exist_ok=True)
+    manifest = {"continuity": continuity, "stills": 0, "clips": 0, "scenes": []}
+
+    for scene in storyboard.get("storyboard", []):
+        snum = scene.get("scene_number", "x")
+        sdir = vdir / f"scene_{snum:02d}" if isinstance(snum, int) else vdir / f"scene_{snum}"
+        sdir.mkdir(exist_ok=True)
+        prev_tail = None                      # reset each scene → hard cut between scenes
+        frames_out = []
+        for fr in scene.get("frames", []):
+            fnum = fr.get("frame", len(frames_out) + 1)
+            prompt = fr.get("image_prompt") or fr.get("image") or fr.get("moment", "")
+            tag = f"{int(fnum):02d}" if isinstance(fnum, int) else str(fnum)
+
+            # 1) still: continue from the previous frame's tail (carries the look
+            #    forward); first frame of a scene anchors on the character casting image.
+            still = sdir / f"frame_{tag}.png"
+            anchor = prev_tail if (prev_tail and continuity) else _frame_char_anchor(fr, cast_index, out)
+            if not still.exists() and imagegen.enabled():
+                if imagegen.generate_image_from(anchor, prompt, still):
+                    manifest["stills"] += 1
+
+            # 2) clip: image-to-video from the still, with the prior tail as a second
+            #    keyframe for continuity when the model supports it.
+            clip = sdir / f"frame_{tag}.mp4"
+            if clips_ok and still.exists() and not clip.exists():
+                keys = [k for k in ([prev_tail, still] if (prev_tail and continuity) else [still]) if k]
+                if i2v.generate_clip(keys, prompt, clip):
+                    manifest["clips"] += 1
+                    if continuity:
+                        prev_tail = i2v.last_frame(clip, sdir / f"frame_{tag}_tail.png") or still
+            elif still.exists() and continuity:
+                prev_tail = still                  # no clip — carry the still forward
+
+            frames_out.append({
+                "frame": fnum,
+                "moment": fr.get("moment"),
+                "still": str(still.relative_to(out)) if still.exists() else None,
+                "clip": str(clip.relative_to(out)) if clip.exists() else None,
+            })
+        manifest["scenes"].append({"scene_number": snum, "frames": frames_out})
+
+    (vdir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2))
+    return manifest
+
+
 def _checkpoint_load(out: Path, name: str) -> dict | None:
     """Load a previously-approved stage artifact, or None if absent/unreadable."""
     f = out / f"{name}.json"
@@ -483,6 +570,17 @@ def run(
     ])
     storyboard = g["storyboard"]
 
+    # Next phase: with storyboard + screenplay done, render scenes frame by frame
+    # (still per frame → image-to-video clip), chaining clips for continuity. Best-
+    # effort: a no-op on hosts without a video backend (see config `video`).
+    scene_render = {}
+    if i2v.enabled():
+        _log("      rendering scenes frame by frame …")
+        scene_render = _render_scene_frames(storyboard, casting, out)
+        if scene_render:
+            _log(f"      frames → {out}/video/ "
+                 f"({scene_render.get('stills',0)} stills, {scene_render.get('clips',0)} clips)")
+
     # ── 10/10  assemble artifacts ─────────────────────────────────────────────
     # Per-stage JSON + screenplay.fountain are already written above (incremental,
     # crash-safe). Here we add the per-character files and the combined manifest.
@@ -506,6 +604,7 @@ def run(
         "cinematography": cinematography,
         "storyboard": storyboard,
         "screenplay_draft": draft,
+        "scene_render": scene_render,
         "models": {"fast": fast_model, "quality": quality_model},
         "elapsed_seconds": round(time.time() - t0, 1),
     }

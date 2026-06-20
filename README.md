@@ -124,6 +124,41 @@ the run continues and just keeps each character's text `visual_prompt` (or falls
 back to a plain text-to-image render). Set `image.enabled: false` to skip
 rendering entirely.
 
+## Scene rendering (image-to-video)
+
+Once the storyboard and screenplay are done, the pipeline can render **scenes
+frame by frame with continuity** (the next phase). For each storyboard frame it:
+
+1. renders a **still** (reusing the image backend, identity-anchored on the
+   casting images so the right actor appears, consistently), then
+2. animates that still into a short **clip** via an image-to-video model, with
+   each clip **chained from the previous frame's last image** so motion is
+   continuous within a scene. A scene boundary resets the chain (a cut).
+
+Output lands in `output/video/scene_NN/frame_MM.{png,mp4}` plus a `manifest.json`.
+
+Video is a heavy modality — the efficient open models (**LTX-Video / LTX-2**,
+**Wan 2.x**, CogVideoX-I2V) all need a **GPU (~12 GB+ VRAM)** — so this is a
+**no-op on a CPU-only host** (it renders the frame stills where possible and
+skips clips). Configure it in the `video` block of `config/models.yaml`:
+
+```yaml
+video:
+  enabled: true
+  backend: none              # none (CPU) | diffusers (GPU) | comfyui/http (remote GPU)
+  model: Lightricks/LTX-Video
+  pipeline_class: LTXImageToVideoPipeline   # or WanImageToVideoPipeline, etc.
+  host: http://localhost:8188               # comfyui / remote endpoint
+  seconds: 4
+  fps: 24
+  continuity: true           # chain each clip from the previous frame's last image
+```
+
+From a CPU host the recommended route is `backend: comfyui` / `http` pointed at a
+remote GPU endpoint: render stills locally, generate motion remotely. The
+`diffusers` backend is model-agnostic via `pipeline_class`, so swapping LTX for a
+Wan I2V checkpoint is a config-only change. See `reel/i2v.py`.
+
 ## Quick start
 
 ```bash
