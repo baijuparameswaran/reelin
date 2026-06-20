@@ -77,6 +77,8 @@ for m in "${MODELS[@]}"; do
 done
 
 # 4. Smoke test — confirms the agents still run end-to-end after updates.
+# Headless run: the human-in-the-loop gates auto-approve on EOF (no TTY here),
+# so the pipeline passes straight through without blocking.
 if [ "$RUN_TEST" = 1 ]; then
   echo "── smoke test"
   if "$PY" -m reel.cli samples/sample_story.txt --out /tmp/reel_smoke --max-scenes 1 >/tmp/reel_smoke.log 2>&1; then

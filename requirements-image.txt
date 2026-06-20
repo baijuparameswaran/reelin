@@ -1,0 +1,16 @@
+# Optional dependencies for the casting-stage text-to-image renders
+# (config image.backend: diffusers). Install with:
+#
+#     .venv/bin/pip install -r requirements-image.txt
+#
+# CPU-only host: torch pulls the CPU build automatically on most platforms; if
+# not, install it first from the CPU index:
+#     pip install torch --index-url https://download.pytorch.org/whl/cpu
+#
+# Default model is stabilityai/sd-turbo (~2.5 GB, downloaded on first render to
+# the HuggingFace cache). Swap to SDXL / FLUX.1-schnell on a GPU box via config.
+diffusers>=0.27
+transformers>=4.40
+accelerate>=0.30
+safetensors>=0.4
+pillow>=10.0

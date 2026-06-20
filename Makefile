@@ -2,7 +2,7 @@
 PY := .venv/bin/python
 PIP := .venv/bin/pip
 
-.PHONY: help setup run demo models update update-all install-cron clean
+.PHONY: help setup setup-image run demo models update update-all install-cron clean
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -14,11 +14,15 @@ setup: ## Create venv and install dependencies
 	$(PIP) install -q -r requirements.txt
 	@echo "setup complete"
 
-demo: ## Run the pipeline on the bundled sample story (fast, 2 scenes)
-	$(PY) -m reel.cli samples/sample_story.txt --max-scenes 2
+setup-image: ## Install optional deps for casting image rendering (diffusers/torch)
+	$(PIP) install -r requirements-image.txt
+	@echo "image rendering deps installed (image.backend: diffusers)"
 
-run: ## Run on your own file:  make run SRC=path/to/story.txt [SCENES=3]
-	$(PY) -m reel.cli $(SRC) --max-scenes $(or $(SCENES),3)
+demo: ## Run the bundled sample story (fast profile, 2 scenes) [RESUME=1 to continue]
+	$(PY) -m reel.cli samples/sample_story.txt --profile fast --max-scenes 2 $(if $(RESUME),--resume,)
+
+run: ## Run on your own file:  make run SRC=path/to/story.txt [SCENES=3] [RESUME=1]
+	$(PY) -m reel.cli $(SRC) --max-scenes $(or $(SCENES),3) $(if $(RESUME),--resume,)
 
 models: ## Show local model / profile status
 	$(PY) -m reel.cli --list-models

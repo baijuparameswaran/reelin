@@ -7,6 +7,12 @@ __pycache__/
 output/
 *.log
 
+# Local archives / scratch (not part of the project)
+*.tgz
+*.zip
+output.*/
+resume
+
 # Editor/OS
 .DS_Store
 .idea/

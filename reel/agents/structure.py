@@ -6,6 +6,7 @@ concurrently.
 from __future__ import annotations
 
 from .. import llm
+from ..llm import MAX_CHARS
 
 SYSTEM = (
     "You are a veteran story analyst and screenwriter. You read source material "
@@ -36,12 +37,14 @@ SOURCE MATERIAL (title: {title}):
 \"\"\"
 """
 
-# Cap text sent to small local models to stay within context + memory limits.
-MAX_CHARS = 12000
 
-
-def analyze_structure(source: dict, profile: str | None = None) -> dict:
+def analyze_structure(
+    source: dict, profile: str | None = None, feedback: str | None = None
+) -> dict:
     profile = profile or llm.agent_profile("structure")
-    prompt = PROMPT.format(title=source["title"], text=source["text"][:MAX_CHARS])
+    prompt = llm.with_feedback(
+        PROMPT.format(title=source["title"], text=source["text"][:MAX_CHARS]),
+        feedback,
+    )
     raw = llm.generate(prompt, profile=profile, system=SYSTEM, as_json=True)
     return llm.safe_json(raw)
