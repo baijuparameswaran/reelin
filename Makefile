@@ -1,0 +1,36 @@
+# reel — common tasks. Run `make help` for the list.
+PY := .venv/bin/python
+PIP := .venv/bin/pip
+
+.PHONY: help setup run demo models update update-all install-cron clean
+
+help:
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
+	  awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
+
+setup: ## Create venv and install dependencies
+	python3 -m venv .venv
+	$(PIP) install -q --upgrade pip
+	$(PIP) install -q -r requirements.txt
+	@echo "setup complete"
+
+demo: ## Run the bundled sample story (fast profile, 2 scenes) [RESUME=1 to continue]
+	$(PY) -m reel.cli samples/sample_story.txt --profile fast --max-scenes 2 $(if $(RESUME),--resume,)
+
+run: ## Run on your own file:  make run SRC=path/to/story.txt [SCENES=3] [RESUME=1]
+	$(PY) -m reel.cli $(SRC) --max-scenes $(or $(SCENES),3) $(if $(RESUME),--resume,)
+
+models: ## Show local model / profile status
+	$(PY) -m reel.cli --list-models
+
+update: ## Pull/refresh the agents' models + smoke test (the cadence job)
+	scripts/update-models.sh
+
+update-all: ## Same as update, but also pull fallback models
+	scripts/update-models.sh --all
+
+install-cron: ## Install weekly + monthly model-update cron jobs
+	@bash scripts/install-cron.sh
+
+clean: ## Remove generated output
+	rm -rf output /tmp/reel_smoke

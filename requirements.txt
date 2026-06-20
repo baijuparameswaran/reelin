@@ -1,0 +1,4 @@
+# reel — runtime dependencies (kept intentionally minimal for robustness).
+# The Ollama client uses only the Python stdlib (urllib); the sole 3rd-party
+# dependency is PyYAML for the human-editable model config.
+PyYAML>=6.0
