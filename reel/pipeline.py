@@ -3,19 +3,32 @@
 Phase graph:
 
     ingest ─┬─▶ structure ──┐
-            └─▶ characters ──┼─▶ scenes ─▶ screenplay ─▶ assemble
-                             │
-   (structure & characters run concurrently)
+            └─▶ characters ──┴─▶ scenes ─┬─▶ soundscape ─────┐
+                            └─▶ casting   ├─▶ visuals ─────────┼─▶ storyboard ─┐
+                                          └─▶ cinematography ──┘               ├─▶ assemble
+                                                              screenplay ──────┘
+   (structure & characters concurrent; scenes & casting concurrent)
+   (soundscape, visuals, cinematography concurrent)
 
-Note on parallelism: the two independent branches are submitted concurrently.
-On this CPU-only host a single model serves requests sequentially, so they won't
-*speed up* here — but the design is honest about the dependency graph and will
-parallelize for real once a second model/GPU/remote backend is available.
+Creative crew roles:
+  casting       — locks each character's visual form as actor + character layers
+                  (image-ready); can render them (stock photo → actor → character)
+  soundscape    — background score / sound design
+  visuals       — art production (color, props, production design)
+  cinematography — Director of Photography (shot types, angles, movement, lens)
+  storyboard    — fuses casting + art + camera + score into a visual image per moment
+
+Each LLM stage passes through a human-in-the-loop gate: the operator can
+approve the result, supply revision feedback, or let it auto-approve on
+timeout. Parallel branches are gated independently after all complete.
+HITL is controlled via `config/models.yaml` under the `hitl` key.
 """
 from __future__ import annotations
 
 import json
+import re
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -23,79 +36,480 @@ from .agents.ingest import ingest
 from .agents.structure import analyze_structure
 from .agents.characters import extract_characters
 from .agents.scenes import segment_scenes
+from .agents.casting import cast_characters
+from .agents.soundscape import design_soundscape
+from .agents.visuals import design_visuals
+from .agents.cinematography import plan_cinematography
+from .agents.storyboard import plan_storyboard
 from .agents.screenplay import draft_screenplay, to_fountain
+from .gate import Gate
 from . import llm
+from . import imagegen
+from . import stock
 
 
 def _log(msg: str) -> None:
     print(f"[reel] {msg}", flush=True)
 
 
+# ── per-stage gate summarizers ────────────────────────────────────────────────
+
+def _summarize_structure(r: dict) -> str:
+    lines = [
+        f"Logline:  {r.get('logline', '?')[:100]}",
+        f"Genre:    {r.get('genre', '?')}  |  Tone: {r.get('tone', '?')}",
+        f"Themes:   {', '.join(r.get('themes', []))}",
+        f"Conflict: {r.get('central_conflict', '?')[:100]}",
+    ]
+    for act, beats in r.get("three_act", {}).items():
+        lines.append(f"  {act}:")
+        for b in (beats or [])[:3]:
+            lines.append(f"    · {b}")
+    return "\n".join(lines)
+
+
+def _summarize_characters(r: dict) -> str:
+    rows = []
+    for c in r.get("characters", []):
+        rows.append(
+            f"  · {c.get('name','?')} ({c.get('role','?')}): "
+            f"{c.get('description','?')[:80]}"
+        )
+    return "\n".join(rows) or "  (none)"
+
+
+def _summarize_scenes(r: dict) -> str:
+    rows = []
+    for s in r.get("scenes", []):
+        rows.append(f"  {s.get('number','?'):>2}. {s.get('slugline','?')}")
+        rows.append(f"      {s.get('summary','?')[:80]}")
+    return "\n".join(rows) or "  (none)"
+
+
+def _summarize_casting(r: dict) -> str:
+    rows = []
+    for c in r.get("casting", []):
+        actor = c.get("actor", c)
+        character = c.get("character", c)
+        brief = actor.get("casting_brief", "?")
+        rows.append(f"  · {c.get('name','?')}: {brief[:70]}")
+        pf = character.get("physical_form", "")
+        if pf:
+            rows.append(f"      {pf[:80]}")
+    return "\n".join(rows) or "  (none)"
+
+
+def _summarize_soundscape(r: dict) -> str:
+    rows = [f"Audio palette: {r.get('audio_palette', '?')}"]
+    for s in r.get("soundscapes", []):
+        bed = s.get("ambient_bed") or "(silence)"
+        rows.append(f"  {s.get('scene_number','?'):>2}. {bed[:70]}")
+        fn = s.get("emotional_function", "")
+        if fn:
+            rows.append(f"      → {fn[:80]}")
+    return "\n".join(rows)
+
+
+def _summarize_visuals(r: dict) -> str:
+    rows = [
+        f"Visual palette: {r.get('visual_palette', '?')}",
+        f"Color language: {r.get('color_language', '?')[:80]}",
+    ]
+    for s in r.get("scenes", []):
+        rows.append(f"  {s.get('scene_number','?'):>2}. {s.get('color_palette','?')[:70]}")
+        vf = s.get("visual_filter", "")
+        if vf:
+            rows.append(f"      filter: {vf}")
+    return "\n".join(rows)
+
+
+def _summarize_cinematography(r: dict) -> str:
+    rows = [
+        f"Style: {r.get('cinematography_style', '?')}",
+        f"Movement: {r.get('dominant_movement', '?')}",
+    ]
+    for s in r.get("scenes", []):
+        shots = s.get("shots", [])
+        first = shots[0] if shots else {}
+        shot_preview = (
+            f"{first.get('type','')} {first.get('movement','')}".strip()
+            if first else "—"
+        )
+        rows.append(
+            f"  {s.get('scene_number','?'):>2}. {s.get('coverage','?')[:60]}"
+            f"  [{len(shots)} shots, opens: {shot_preview}]"
+        )
+    return "\n".join(rows)
+
+
+def _summarize_storyboard(r: dict) -> str:
+    rows = [f"Board style: {r.get('storyboard_style', '?')}"]
+    for s in r.get("storyboard", []):
+        frames = s.get("frames", [])
+        rows.append(f"  Scene {s.get('scene_number','?'):>2}: {len(frames)} frames")
+        for f in frames[:2]:
+            rows.append(
+                f"      f{f.get('frame','?')} {f.get('moment','?')[:50]}"
+                f"  [{f.get('emotional_attribute','')[:24]} / "
+                f"{f.get('audio_attribute','')[:24]}]"
+            )
+    return "\n".join(rows)
+
+
+def _summarize_screenplay(r: dict) -> str:
+    rows = [f"Drafted: {r.get('drafted_count', 0)} of {r.get('total_scenes', 0)} scenes"]
+    for s in r.get("scenes", []):
+        preview = s.get("fountain", "")[:200].replace("\n", " ↵ ")
+        rows.append(f"  Scene {s.get('number','?')}: {preview} …")
+    return "\n".join(rows)
+
+
+# ── stop / resume support ─────────────────────────────────────────────────────
+
+class PipelineStopped(Exception):
+    """Raised when the operator pauses the run at a review gate."""
+
+    def __init__(self, stage: str):
+        super().__init__(f"stopped at stage '{stage}'")
+        self.stage = stage
+
+
+def _slug(name: str) -> str:
+    return re.sub(r"[^\w]+", "_", (name or "").lower()).strip("_") or "character"
+
+
+_AGE_CUES = [("elderly", "elderly"), ("seventies", "elderly"), ("sixties", "older"),
+             ("old", "older"), ("aged", "older"), ("middle-aged", "middle aged"),
+             ("fifties", "middle aged"), ("forties", "middle aged"),
+             ("young", "young"), ("thirties", "young"), ("twenties", "young"),
+             ("teen", "teenage"), ("child", "child"), ("baby", "baby")]
+_GENDER_CUES = [("actress", "woman"), ("woman", "woman"), ("women", "woman"),
+                ("female", "woman"), ("girl", "young woman"), ("lady", "woman"),
+                ("fisherman", "man"), ("men", "man"), ("man", "man"),
+                ("actor", "man"), ("male", "man"), ("boy", "young man"),
+                ("dog", "dog"), ("cat", "cat"), ("bird", "bird"), ("horse", "horse")]
+
+
+def _actor_query(actor: dict, c: dict) -> str:
+    """Distil the performer into a short, searchable stock query — age + gender +
+    'portrait' — since long, specific phrases return no stock results."""
+    text = f"{actor.get('casting_brief','')} {actor.get('features','')} {c.get('name','')}".lower()
+    age = next((v for k, v in _AGE_CUES if k in text), "")
+    subject = next((v for k, v in _GENDER_CUES if k in text), "person")
+    return " ".join(w for w in (age, subject, "portrait") if w)
+
+
+def _render_casting_images(casting: dict, out: Path) -> int:
+    """Best-effort, per entry: source the ACTOR as a real CC stock photo (identity
+    anchor) then render the CHARACTER *from that photo* (img2img) so it's the same
+    person, aged/costumed into the role. Falls back to generating the actor from
+    text when no stock photo is found, and to text->image when img2img is
+    unavailable. Stores image paths (+ CC attribution) back on each entry and
+    collects credits. Idempotent (skips files already on disk) for cheap --resume.
+
+    Tolerates the older flat schema (top-level visual_prompt) too.
+    """
+    if not imagegen.available():
+        _log(f"      image renders skipped — {imagegen.unavailable_hint()}")
+        return 0
+    cast_dir = out / "casting"
+    cast_dir.mkdir(exist_ok=True)
+    n = 0
+    credits = []
+    for c in casting.get("casting", []):
+        slug = _slug(c.get("name", "character"))
+        actor = c.get("actor") or {}
+        character = c.get("character") or {}
+
+        # 1) Actor identity. Find a real CC stock photo and use it as a *reference*
+        #    to GENERATE the actual actor image (grounded in a real face but AI-made
+        #    and license-clean). 'direct' mode uses the photo itself; with no photo
+        #    (or no stock) we fall back to a plain text->image actor render.
+        actor_img = cast_dir / f"{slug}_actor.png"
+        ref_img = cast_dir / f"{slug}_actor_ref.png"
+        use_as = stock._cfg().get("use_as", "reference")
+        ref_strength = stock._cfg().get("reference_strength", 0.4)
+        if actor or character:
+            if actor_img.exists():
+                actor["actor_image_path"] = str(actor_img.relative_to(out))
+                n += 1
+            else:
+                attrib = (stock.fetch_actor(_actor_query(actor, c), ref_img, imagegen._dims())
+                          if not ref_img.exists() else actor.get("attribution"))
+                if attrib:
+                    actor["reference"] = {"image_path": str(ref_img.relative_to(out)),
+                                          "attribution": attrib}
+                    _log(f"        {c.get('name','?')}: actor reference ← stock "
+                         f"({attrib.get('license','?')}, {attrib.get('creator','?')})")
+                made = False
+                prompt = actor.get("visual_prompt") or character.get("physical_form", "")
+                if ref_img.exists() and use_as == "direct":
+                    # use the stock photo itself as the actor image
+                    actor_img.write_bytes(ref_img.read_bytes())
+                    actor["source"] = "stock"
+                    made = True
+                elif ref_img.exists() and prompt and \
+                        imagegen.generate_image_from(ref_img, prompt, actor_img, ref_strength):
+                    actor["source"] = "stock-reference"  # AI actor grounded in the real photo
+                    made = True
+                elif prompt and imagegen.generate_image(prompt, actor_img):
+                    actor["source"] = "generated"       # no stock — pure text->image
+                    made = True
+                if made:
+                    actor["actor_image_path"] = str(actor_img.relative_to(out))
+                    n += 1
+            if actor.get("reference", {}).get("attribution"):
+                credits.append({"name": c.get("name"), "used_as": "actor reference",
+                                **actor["reference"]["attribution"]})
+
+        # 2) Character — render FROM the actor photo (identity-consistent) when we
+        #    have one; otherwise a plain render.
+        char_prompt = (character.get("visual_prompt")
+                       or character.get("physical_form")
+                       or c.get("visual_prompt") or c.get("physical_form")
+                       or c.get("name", ""))
+        char_target = character if character else c
+        char_img = cast_dir / (f"{slug}_character.png" if (actor or character) else f"{slug}.png")
+        if char_prompt:
+            if char_img.exists():
+                char_target["image_path"] = str(char_img.relative_to(out))
+                n += 1
+            else:
+                init = actor_img if actor.get("actor_image_path") else None
+                if imagegen.generate_image_from(init, char_prompt, char_img):
+                    char_target["image_path"] = str(char_img.relative_to(out))
+                    n += 1
+
+    if credits:
+        (cast_dir / "CREDITS.json").write_text(
+            json.dumps({"actor_stock_images": credits}, ensure_ascii=False, indent=2))
+    return n
+
+
+def _checkpoint_load(out: Path, name: str) -> dict | None:
+    """Load a previously-approved stage artifact, or None if absent/unreadable."""
+    f = out / f"{name}.json"
+    if not f.exists():
+        return None
+    try:
+        return json.loads(f.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _spec(name: str, compute: Callable, summarize: Callable, rerun: Callable) -> dict:
+    """Describe one stage: how to compute it, summarize it, and re-run it."""
+    return {"name": name, "compute": compute, "summarize": summarize, "rerun": rerun}
+
+
+# ── gate loop helper ──────────────────────────────────────────────────────────
+
+def _gated(
+    gate: Gate,
+    name: str,
+    initial_result: dict,
+    summarize_fn: Callable,
+    rerun_fn: Callable,  # rerun_fn(feedback: str) -> dict
+) -> dict:
+    """Show gate for initial_result; re-run with feedback until approved.
+
+    Raises PipelineStopped if the operator chooses to pause at the gate.
+    """
+    result = initial_result
+    while True:
+        decision = gate.review(name, result, summarize_fn)
+        if decision.approved:
+            return result
+        if decision.stop:
+            raise PipelineStopped(name)
+        _log(f"      re-running {name} with feedback …")
+        result = rerun_fn(decision.feedback)
+
+
+# ── main pipeline ─────────────────────────────────────────────────────────────
+
 def run(
     input_path: str,
     out_dir: str = "output",
     max_scenes: int = 3,
     profile_override: str | None = None,
+    resume: bool = False,
 ) -> dict:
-    """Run the full screenplay-material phase and write artifacts to `out_dir`."""
+    """Run the full screenplay-material phase and write artifacts to `out_dir`.
+
+    Pause anytime by typing 'stop' at a review gate (or Ctrl-C); every stage
+    already approved stays on disk. Re-run with `resume=True` to load those
+    checkpoints and continue from the first stage that hasn't been completed.
+    """
     t0 = time.time()
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    # Resolve which model each tier maps to, for the run manifest.
+    # Persist each stage as soon as it's approved, so a failure, timeout, or pause
+    # in a later (slow) stage never discards completed work.
+    def save(name: str, data: dict) -> None:
+        _write_json(out / f"{name}.json", data)
+
+    gate = Gate.from_config(llm.config())
+    parallel = llm.config().get("runtime", {}).get("max_parallel_agents", 1) > 1
+
+    def run_group(label_num: str, label: str, specs: list[dict]) -> dict:
+        """Compute/gate/save a set of stages, loading any already-checkpointed.
+
+        Cached members (present on disk when resuming) skip both compute and the
+        gate. Remaining members compute concurrently when the host allows it,
+        then gate sequentially. Returns {name: approved_result}.
+        """
+        loaded = {s["name"]: c for s in specs
+                  if resume and (c := _checkpoint_load(out, s["name"])) is not None}
+        pending = [s for s in specs if s["name"] not in loaded]
+
+        if not pending:
+            _log(f"{label_num} {label} — resumed from checkpoints")
+            return {s["name"]: loaded[s["name"]] for s in specs}
+
+        concurrent = parallel and len(pending) > 1
+        note = f"  [resumed: {', '.join(loaded)}]" if loaded else ""
+        _log(f"{label_num} {label}{' (concurrent)' if concurrent else ''}{note} …")
+
+        raws: dict = {}
+        if concurrent:
+            with ThreadPoolExecutor(max_workers=len(pending)) as ex:
+                futs = {ex.submit(s["compute"]): s["name"] for s in pending}
+                for fut in futs:
+                    raws[futs[fut]] = fut.result()
+        else:
+            for s in pending:
+                raws[s["name"]] = s["compute"]()
+
+        results = {}
+        for s in specs:
+            nm = s["name"]
+            if nm in loaded:
+                results[nm] = loaded[nm]
+                continue
+            r = _gated(gate, nm, raws[nm], s["summarize"], s["rerun"])
+            save(nm, r)
+            results[nm] = r
+        return results
+
     fast_model = llm.resolve_model(llm.get_profile(profile_override or "fast"))
     quality_model = llm.resolve_model(llm.get_profile(profile_override or "quality"))
     _log(f"models — fast: {fast_model} | quality: {quality_model}")
+    if resume:
+        _log(f"resume: loading any completed stages from {out}/")
 
-    _log("1/5 ingest …")
+    # ── 1/10  ingest (deterministic — no gate) ───────────────────────────────
+    _log("1/10 ingest …")
     source = ingest(input_path)
     _log(f"      '{source['title']}' — {source['word_count']} words")
 
-    parallel = llm.config().get("runtime", {}).get("max_parallel_agents", 1) > 1
-    if parallel:
-        _log("2/5 structure ‖ characters (concurrent) …")
-        with ThreadPoolExecutor(max_workers=2) as ex:
-            f_struct = ex.submit(analyze_structure, source, profile_override)
-            f_chars = ex.submit(extract_characters, source, profile_override)
-            structure = f_struct.result()
-            characters = f_chars.result()
-    else:
-        # Sequential on CPU/low-RAM: two different models can't co-reside.
-        _log("2/5 structure → characters (sequential) …")
-        structure = analyze_structure(source, profile_override)
-        characters = extract_characters(source, profile_override)
+    # ── 2/10  structure + characters ─────────────────────────────────────────
+    g = run_group("2/10", "structure ‖ characters", [
+        _spec("structure",
+              lambda: analyze_structure(source, profile_override),
+              _summarize_structure,
+              lambda fb: analyze_structure(source, profile_override, feedback=fb)),
+        _spec("characters",
+              lambda: extract_characters(source, profile_override),
+              _summarize_characters,
+              lambda fb: extract_characters(source, profile_override, feedback=fb)),
+    ])
+    structure, characters = g["structure"], g["characters"]
     _log(f"      logline: {structure.get('logline', '(parse failed)')[:80]}")
     _log(f"      characters: {len(characters.get('characters', []))}")
 
-    _log("3/5 scene segmentation …")
-    scenes = segment_scenes(source, structure, profile=profile_override)
-    _log(f"      {len(scenes.get('scenes', []))} scenes")
+    # ── 3–4/10  scenes + casting (scenes←structure, casting←characters) ───────
+    g = run_group("3/10", "scenes ‖ casting", [
+        _spec("scenes",
+              lambda: segment_scenes(source, structure, profile=profile_override),
+              _summarize_scenes,
+              lambda fb: segment_scenes(source, structure, profile=profile_override, feedback=fb)),
+        _spec("casting",
+              lambda: cast_characters(structure, characters, profile_override),
+              _summarize_casting,
+              lambda fb: cast_characters(structure, characters, profile_override, feedback=fb)),
+    ])
+    scenes, casting = g["scenes"], g["casting"]
+    _log(f"      {len(scenes.get('scenes', []))} scenes; cast {len(casting.get('casting', []))}")
 
-    _log(f"4/5 screenplay draft (first {max_scenes} scenes) …")
-    draft = draft_screenplay(
-        source, structure, characters, scenes,
-        max_scenes=max_scenes, profile=profile_override,
-    )
+    # Render a basic portrait per character from its casting visual_prompt and
+    # store the path in the casting details (part of the casting stage).
+    if imagegen.enabled():
+        _log("      rendering character portraits …")
+        if _render_casting_images(casting, out):
+            save("casting", casting)
+            _log(f"      portraits → {out}/casting/")
 
-    _log("5/5 assemble artifacts …")
+    # ── 5–7/10  soundscape + visuals + cinematography ────────────────────────
+    g = run_group("5/10", "soundscape ‖ visuals ‖ cinematography", [
+        _spec("soundscape",
+              lambda: design_soundscape(structure, scenes, profile_override),
+              _summarize_soundscape,
+              lambda fb: design_soundscape(structure, scenes, profile_override, feedback=fb)),
+        _spec("visuals",
+              lambda: design_visuals(structure, scenes, profile_override),
+              _summarize_visuals,
+              lambda fb: design_visuals(structure, scenes, profile_override, feedback=fb)),
+        _spec("cinematography",
+              lambda: plan_cinematography(structure, scenes, profile_override),
+              _summarize_cinematography,
+              lambda fb: plan_cinematography(structure, scenes, profile_override, feedback=fb)),
+    ])
+    soundscape, visuals, cinematography = g["soundscape"], g["visuals"], g["cinematography"]
+
+    # ── 8/10  screenplay draft ────────────────────────────────────────────────
+    def _draft(fb=None):
+        return draft_screenplay(
+            source, structure, characters, scenes,
+            soundscape=soundscape, visuals=visuals, cinematography=cinematography,
+            max_scenes=max_scenes, profile=profile_override, feedback=fb,
+        )
+    g = run_group(f"8/10 screenplay (first {max_scenes} scenes)", "draft", [
+        _spec("screenplay", lambda: _draft(), _summarize_screenplay, _draft),
+    ])
+    draft = g["screenplay"]
     fountain = to_fountain(source, structure, draft)
+    (out / "screenplay.fountain").write_text(fountain, encoding="utf-8")
+
+    # ── 9/10  storyboard (fuses casting + art + camera + score per moment) ────
+    def _board(fb=None):
+        return plan_storyboard(
+            structure, scenes, casting, soundscape, visuals, cinematography,
+            profile=profile_override, feedback=fb,
+        )
+    g = run_group("9/10", "storyboard", [
+        _spec("storyboard", lambda: _board(), _summarize_storyboard, _board),
+    ])
+    storyboard = g["storyboard"]
+
+    # ── 10/10  assemble artifacts ─────────────────────────────────────────────
+    # Per-stage JSON + screenplay.fountain are already written above (incremental,
+    # crash-safe). Here we add the per-character files and the combined manifest.
+    _log("10/10 assemble artifacts …")
+
+    chars_dir = out / "characters"
+    chars_dir.mkdir(exist_ok=True)
+    for char in characters.get("characters", []):
+        _write_json(chars_dir / f"{_slug(char.get('name', 'unknown'))}.json", char)
+
     project = {
         "title": source["title"],
         "source": source["source_path"],
         "word_count": source["word_count"],
         "structure": structure,
         "characters": characters,
+        "casting": casting,
         "scenes": scenes,
+        "soundscape": soundscape,
+        "visuals": visuals,
+        "cinematography": cinematography,
+        "storyboard": storyboard,
         "screenplay_draft": draft,
         "models": {"fast": fast_model, "quality": quality_model},
         "elapsed_seconds": round(time.time() - t0, 1),
     }
-
-    _write_json(out / "structure.json", structure)
-    _write_json(out / "characters.json", characters)
-    _write_json(out / "scenes.json", scenes)
-    _write_json(out / "project.json", project)
-    (out / "screenplay.fountain").write_text(fountain, encoding="utf-8")
+    save("project", project)
 
     _log(f"done in {project['elapsed_seconds']}s → {out}/")
     return project

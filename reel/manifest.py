@@ -18,9 +18,7 @@ def models(include_fallbacks: bool = False) -> list[str]:
         tags.append(p.model)
         if include_fallbacks:
             tags.extend(p.fallbacks)
-    # de-dup, preserve order
-    seen: set[str] = set()
-    return [t for t in tags if not (t in seen or seen.add(t))]
+    return list(dict.fromkeys(tags))
 
 
 def main() -> None:
