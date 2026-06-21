@@ -51,7 +51,6 @@ from .agents.screenplay import draft_screenplay, to_fountain
 from .gate import Gate
 from . import llm
 from . import imagegen
-from . import stock
 from . import i2v
 
 
@@ -185,111 +184,35 @@ def _slug(name: str) -> str:
     return re.sub(r"[^\w]+", "_", (name or "").lower()).strip("_") or "character"
 
 
-_AGE_CUES = [("elderly", "elderly"), ("seventies", "elderly"), ("sixties", "older"),
-             ("old", "older"), ("aged", "older"), ("middle-aged", "middle aged"),
-             ("fifties", "middle aged"), ("forties", "middle aged"),
-             ("young", "young"), ("thirties", "young"), ("twenties", "young"),
-             ("teen", "teenage"), ("child", "child"), ("baby", "baby")]
-_GENDER_CUES = [("actress", "woman"), ("woman", "woman"), ("women", "woman"),
-                ("female", "woman"), ("girl", "young woman"), ("lady", "woman"),
-                ("fisherman", "man"), ("men", "man"), ("man", "man"),
-                ("actor", "man"), ("male", "man"), ("boy", "young man"),
-                ("dog", "dog"), ("cat", "cat"), ("bird", "bird"), ("horse", "horse")]
-
-
-def _actor_query(actor: dict, c: dict) -> str:
-    """Distil the performer into a short, searchable stock query — age + gender +
-    'portrait' — since long, specific phrases return no stock results."""
-    text = f"{actor.get('casting_brief','')} {actor.get('features','')} {c.get('name','')}".lower()
-    age = next((v for k, v in _AGE_CUES if k in text), "")
-    subject = next((v for k, v in _GENDER_CUES if k in text), "person")
-    return " ".join(w for w in (age, subject, "portrait") if w)
-
-
 def _render_casting_images(casting: dict, out: Path) -> int:
-    """Best-effort, per entry: source the ACTOR as a real CC stock photo (identity
-    anchor) then render the CHARACTER *from that photo* (img2img) so it's the same
-    person, aged/costumed into the role. Falls back to generating the actor from
-    text when no stock photo is found, and to text->image when img2img is
-    unavailable. Stores image paths (+ CC attribution) back on each entry and
-    collects credits. Idempotent (skips files already on disk) for cheap --resume.
+    """Render ONE image per character — the **character representation** — via the
+    image backend (Gemini). This is the only image generation in the pipeline; the
+    character image is the reference handed to the video stage for identity. Stores
+    the path on each entry. Idempotent (skips files on disk) for cheap --resume.
 
-    Tolerates the older flat schema (top-level visual_prompt) too.
+    The character look lives in the `character` block; older flat-schema casting
+    (top-level visual_prompt) is tolerated.
     """
     if not imagegen.available():
-        _log(f"      image renders skipped — {imagegen.unavailable_hint()}")
+        _log(f"      character renders skipped — {imagegen.unavailable_hint()}")
         return 0
     cast_dir = out / "casting"
     cast_dir.mkdir(exist_ok=True)
     n = 0
-    credits = []
     for c in casting.get("casting", []):
         slug = _slug(c.get("name", "character"))
-        actor = c.get("actor") or {}
         character = c.get("character") or {}
-
-        # 1) Actor identity. Find a real CC stock photo and use it as a *reference*
-        #    to GENERATE the actual actor image (grounded in a real face but AI-made
-        #    and license-clean). 'direct' mode uses the photo itself; with no photo
-        #    (or no stock) we fall back to a plain text->image actor render.
-        actor_img = cast_dir / f"{slug}_actor.png"
-        ref_img = cast_dir / f"{slug}_actor_ref.png"
-        use_as = stock._cfg().get("use_as", "reference")
-        ref_strength = stock._cfg().get("reference_strength", 0.4)
-        if actor or character:
-            if actor_img.exists():
-                actor["actor_image_path"] = str(actor_img.relative_to(out))
-                n += 1
-            else:
-                attrib = (stock.fetch_actor(_actor_query(actor, c), ref_img, imagegen._dims())
-                          if not ref_img.exists() else actor.get("attribution"))
-                if attrib:
-                    actor["reference"] = {"image_path": str(ref_img.relative_to(out)),
-                                          "attribution": attrib}
-                    _log(f"        {c.get('name','?')}: actor reference ← stock "
-                         f"({attrib.get('license','?')}, {attrib.get('creator','?')})")
-                made = False
-                prompt = actor.get("visual_prompt") or character.get("physical_form", "")
-                if ref_img.exists() and use_as == "direct":
-                    # use the stock photo itself as the actor image
-                    actor_img.write_bytes(ref_img.read_bytes())
-                    actor["source"] = "stock"
-                    made = True
-                elif ref_img.exists() and prompt and \
-                        imagegen.generate_image_from(ref_img, prompt, actor_img, ref_strength):
-                    actor["source"] = "stock-reference"  # AI actor grounded in the real photo
-                    made = True
-                elif prompt and imagegen.generate_image(prompt, actor_img):
-                    actor["source"] = "generated"       # no stock — pure text->image
-                    made = True
-                if made:
-                    actor["actor_image_path"] = str(actor_img.relative_to(out))
-                    n += 1
-            if actor.get("reference", {}).get("attribution"):
-                credits.append({"name": c.get("name"), "used_as": "actor reference",
-                                **actor["reference"]["attribution"]})
-
-        # 2) Character — render FROM the actor photo (identity-consistent) when we
-        #    have one; otherwise a plain render.
-        char_prompt = (character.get("visual_prompt")
-                       or character.get("physical_form")
-                       or c.get("visual_prompt") or c.get("physical_form")
-                       or c.get("name", ""))
-        char_target = character if character else c
-        char_img = cast_dir / (f"{slug}_character.png" if (actor or character) else f"{slug}.png")
-        if char_prompt:
-            if char_img.exists():
-                char_target["image_path"] = str(char_img.relative_to(out))
-                n += 1
-            else:
-                init = actor_img if actor.get("actor_image_path") else None
-                if imagegen.generate_image_from(init, char_prompt, char_img):
-                    char_target["image_path"] = str(char_img.relative_to(out))
-                    n += 1
-
-    if credits:
-        (cast_dir / "CREDITS.json").write_text(
-            json.dumps({"actor_stock_images": credits}, ensure_ascii=False, indent=2))
+        target = character if character else c
+        prompt = (character.get("visual_prompt")
+                  or character.get("physical_form")
+                  or c.get("visual_prompt") or c.get("physical_form")
+                  or c.get("name", ""))
+        if not prompt:
+            continue
+        img = cast_dir / f"{slug}.png"
+        if img.exists() or imagegen.generate_image(prompt, img):
+            target["image_path"] = str(img.relative_to(out))
+            n += 1
     return n
 
 
@@ -304,19 +227,20 @@ def _frame_char_anchor(frame: dict, cast_index: dict, out: Path) -> Path | None:
 
 
 def _render_scene_frames(storyboard: dict, casting: dict, out: Path) -> dict:
-    """Next phase (after storyboard + screenplay): render each storyboard frame to
-    a still — identity-anchored on the casting images — then image-to-video each
-    still into a clip, **chaining each clip from the previous frame's last image**
-    so motion is continuous within a scene. Scene boundaries reset the chain (a
-    cut). Best-effort and idempotent (skips files already on disk); the per-frame
-    stills are kept whether or not clips render. Returns a render manifest.
+    """Next phase (after storyboard + screenplay): render each storyboard frame as
+    a **video clip** (Veo image-to-video), seeded for the first frame of a scene by
+    the in-frame character's representation image (the reference from the image
+    stage), and **chained from the previous frame's last image** so motion is
+    continuous within the scene. Scene boundaries reset the chain (a cut). No
+    intermediate stills are generated — image generation is reserved for the
+    character representation. Best-effort, idempotent. Returns a render manifest.
     """
     if not i2v.enabled():
         _log(f"      scene render skipped — {i2v.unavailable_hint()}")
         return {}
-    clips_ok = i2v.available()
-    if not clips_ok:
-        _log(f"      clips skipped ({i2v.unavailable_hint()}); rendering frame stills only")
+    if not i2v.available():
+        _log(f"      scene render skipped — {i2v.unavailable_hint()}")
+        return {}
     continuity = bool(i2v._cfg().get("continuity", True))
 
     cast_index = {}
@@ -328,7 +252,7 @@ def _render_scene_frames(storyboard: dict, casting: dict, out: Path) -> dict:
 
     vdir = out / "video"
     vdir.mkdir(exist_ok=True)
-    manifest = {"continuity": continuity, "stills": 0, "clips": 0, "scenes": []}
+    manifest = {"continuity": continuity, "clips": 0, "scenes": []}
 
     for scene in storyboard.get("storyboard", []):
         snum = scene.get("scene_number", "x")
@@ -341,30 +265,21 @@ def _render_scene_frames(storyboard: dict, casting: dict, out: Path) -> dict:
             prompt = fr.get("image_prompt") or fr.get("image") or fr.get("moment", "")
             tag = f"{int(fnum):02d}" if isinstance(fnum, int) else str(fnum)
 
-            # 1) still: continue from the previous frame's tail (carries the look
-            #    forward); first frame of a scene anchors on the character casting image.
-            still = sdir / f"frame_{tag}.png"
-            anchor = prev_tail if (prev_tail and continuity) else _frame_char_anchor(fr, cast_index, out)
-            if not still.exists() and imagegen.enabled():
-                if imagegen.generate_image_from(anchor, prompt, still):
-                    manifest["stills"] += 1
-
-            # 2) clip: image-to-video from the still, with the prior tail as a second
-            #    keyframe for continuity when the model supports it.
+            # Seed: continue from the previous frame's tail (carries the look
+            # forward); the first frame of a scene seeds from the in-frame
+            # character's representation image (identity reference).
+            seed = prev_tail if (prev_tail and continuity) else _frame_char_anchor(fr, cast_index, out)
             clip = sdir / f"frame_{tag}.mp4"
-            if clips_ok and still.exists() and not clip.exists():
-                keys = [k for k in ([prev_tail, still] if (prev_tail and continuity) else [still]) if k]
-                if i2v.generate_clip(keys, prompt, clip):
+            if not clip.exists():
+                if i2v.generate_clip([seed] if seed else [], prompt, clip):
                     manifest["clips"] += 1
                     if continuity:
-                        prev_tail = i2v.last_frame(clip, sdir / f"frame_{tag}_tail.png") or still
-            elif still.exists() and continuity:
-                prev_tail = still                  # no clip — carry the still forward
+                        prev_tail = i2v.last_frame(clip, sdir / f"frame_{tag}_tail.png") or seed
 
             frames_out.append({
                 "frame": fnum,
                 "moment": fr.get("moment"),
-                "still": str(still.relative_to(out)) if still.exists() else None,
+                "seed": str(Path(seed).relative_to(out)) if seed and Path(seed).exists() else None,
                 "clip": str(clip.relative_to(out)) if clip.exists() else None,
             })
         manifest["scenes"].append({"scene_number": snum, "frames": frames_out})
@@ -575,11 +490,10 @@ def run(
     # effort: a no-op on hosts without a video backend (see config `video`).
     scene_render = {}
     if i2v.enabled():
-        _log("      rendering scenes frame by frame …")
+        _log("      rendering scenes frame by frame (image-to-video) …")
         scene_render = _render_scene_frames(storyboard, casting, out)
         if scene_render:
-            _log(f"      frames → {out}/video/ "
-                 f"({scene_render.get('stills',0)} stills, {scene_render.get('clips',0)} clips)")
+            _log(f"      clips → {out}/video/ ({scene_render.get('clips', 0)} clips)")
 
     # ── 10/10  assemble artifacts ─────────────────────────────────────────────
     # Per-stage JSON + screenplay.fountain are already written above (incremental,

@@ -28,7 +28,7 @@ Branches on the same column run concurrently where the host allows it
 | **ingest** | — | normalized text + metadata (`title`, word count) |
 | **structure** | story analyst | logline, genre, themes, tone, three-act beat sheet |
 | **characters** | script analyst | every character — humans **and** animals/birds/creatures — each defined individually (kind, role, want, arc, appearance, voice, mannerisms); undetailed background masses collapse to one `group` |
-| **casting** | casting director | two layers per character — an **actor** (own role-independent look) and the **character** (that actor aged/costumed into the role), each image-ready; optionally rendered (stock photo → actor → character, see [Casting image rendering](#casting-image-rendering)) |
+| **casting** | casting director | two layers per character — an **actor** (own role-independent look) and the **character** (that actor aged/costumed into the role); the **character** is rendered to an image via Gemini (see [Character image generation](#character-image-generation-gemini)) and used as the video identity reference |
 | **scenes** | screenwriter | numbered scene list (sluglines, summaries, purpose) |
 | **soundscape** | sound / score | per-scene ambient bed, audio cues, silence, emotional function |
 | **visuals** | art production | per-scene color palette, lighting, filters, key props |
@@ -39,8 +39,8 @@ Branches on the same column run concurrently where the host allows it
 Artifacts land in `output/`: `structure.json`, `characters.json`, `casting.json`,
 `scenes.json`, `soundscape.json`, `visuals.json`, `cinematography.json`,
 `storyboard.json`, `screenplay.fountain`, per-character files under
-`output/characters/`, casting renders under `output/casting/` (with a
-`CREDITS.json` of CC attributions), and a combined `project.json`.
+`output/characters/`, character images under `output/casting/`, scene clips under
+`output/video/`, and a combined `project.json`.
 
 ### Human-in-the-loop review
 
@@ -79,85 +79,63 @@ each completed `output/<stage>.json` and only recomputes the first stage that
 isn't done yet (and everything after it). A stage that was mid-flight when you
 stopped is never half-saved — it simply re-runs.
 
-## Casting image rendering
+## Character image generation (Gemini)
 
-The casting stage can render images, modelling **actor vs. character** the way a
-real production does:
-
-1. **Actor reference** — a free, Creative-Commons stock portrait is sourced from
-   [Openverse](https://openverse.org) (no API key; filtered to licenses that
-   permit modification). This is a real human face that anchors the identity.
-2. **Actor** — generated *from* that reference (img2img), so it's grounded in a
-   real face but AI-made and license-clean.
-3. **Character** — generated *from the actor image* (img2img), so the role is
-   recognizably the **same person**, aged / costumed / styled into the part.
-
-Outputs per character land in `output/casting/`: `<name>_actor_ref.png`,
-`<name>_actor.png`, `<name>_character.png`, plus `CREDITS.json` with the CC
-attribution (creator + license) for every sourced photo.
-
-Text-to-image is a different modality than Ollama, so it has its own backend
-(`reel/imagegen.py`) driven by the `image` block in `config/models.yaml`:
+The casting stage generates **one image per character — the character
+representation** — via the [Gemini image API](https://ai.google.dev/gemini-api/docs/image-generation)
+from each character's `visual_prompt`. This is the only image generation in the
+pipeline, and the resulting `output/casting/<name>.png` is the **identity
+reference** handed to the video stage.
 
 ```yaml
 image:
   enabled: true
-  backend: diffusers          # diffusers (in-process) | auto1111 (HTTP server) | none
-  model: stabilityai/sd-turbo # CPU-friendly; swap to SDXL/FLUX.1-schnell on a GPU
-  img2img_strength: 0.55      # character transform from the actor (lower = closer)
-  stock:
-    enabled: true
-    use_as: reference         # reference → generate actor from the photo; direct → use the photo itself
-    license_filter: modification
-    reference_strength: 0.4   # actor from the stock reference (lower = closer to the real face)
+  backend: gemini             # gemini | diffusers | auto1111 | none
+  model: gemini-3.1-flash-image   # gemini-3-pro-image | gemini-2.5-flash-image
+  aspect_ratio: "3:4"
+  image_size: "2K"            # 512 | 1K | 2K | 4K
 ```
 
-The `diffusers` backend needs optional, CPU-friendly deps (kept out of the core
-install):
+The Gemini backend needs **no extra Python deps** (stdlib REST) but does need an
+API key in the environment:
 
 ```bash
-.venv/bin/pip install -r requirements-image.txt   # diffusers + torch + pillow, etc.
+export GEMINIAPIKEY=…         # or GEMINI_API_KEY / GOOGLE_API_KEY
 ```
 
-Everything here is **best-effort**: with no torch, no network, or no stock match
-the run continues and just keeps each character's text `visual_prompt` (or falls
-back to a plain text-to-image render). Set `image.enabled: false` to skip
-rendering entirely.
+Best-effort: with no key the run continues and keeps each character's text
+`visual_prompt`. (The casting data still models *actor vs. character* — see the
+casting agent — but only the character is rendered.) The `diffusers`/`auto1111`
+backends remain available for local/self-hosted image models
+(`pip install -r requirements-image.txt` for diffusers).
 
-## Scene rendering (image-to-video)
+## Scene rendering (image-to-video, Veo)
 
-Once the storyboard and screenplay are done, the pipeline can render **scenes
-frame by frame with continuity** (the next phase). For each storyboard frame it:
+Once the storyboard and screenplay are done, the pipeline renders **scenes frame
+by frame with continuity** via the [Gemini Veo API](https://ai.google.dev/gemini-api/docs/video).
+For each storyboard frame it generates a short **clip** (image-to-video):
 
-1. renders a **still** (reusing the image backend, identity-anchored on the
-   casting images so the right actor appears, consistently), then
-2. animates that still into a short **clip** via an image-to-video model, with
-   each clip **chained from the previous frame's last image** so motion is
-   continuous within a scene. A scene boundary resets the chain (a cut).
+- the **first frame of a scene** is seeded from the in-frame character's
+  representation image (`output/casting/<name>.png`) — the identity reference;
+- **later frames** are seeded from the **previous frame's last image**, so motion
+  is continuous within the scene. A scene boundary resets the chain (a cut).
 
-Output lands in `output/video/scene_NN/frame_MM.{png,mp4}` plus a `manifest.json`.
-
-Video is a heavy modality — the efficient open models (**LTX-Video / LTX-2**,
-**Wan 2.x**, CogVideoX-I2V) all need a **GPU (~12 GB+ VRAM)** — so this is a
-**no-op on a CPU-only host** (it renders the frame stills where possible and
-skips clips). Configure it in the `video` block of `config/models.yaml`:
+Output lands in `output/video/scene_NN/frame_MM.mp4` plus a `manifest.json`.
 
 ```yaml
 video:
   enabled: true
-  backend: none              # none (CPU) | diffusers (GPU) | comfyui/http (remote GPU)
-  model: Lightricks/LTX-Video
-  pipeline_class: LTXImageToVideoPipeline   # or WanImageToVideoPipeline, etc.
-  host: http://localhost:8188               # comfyui / remote endpoint
-  seconds: 4
-  fps: 24
-  continuity: true           # chain each clip from the previous frame's last image
+  backend: gemini             # gemini/veo | diffusers (GPU) | comfyui/http | none
+  model: veo-3.1-fast-generate-preview
+  aspect_ratio: "16:9"
+  resolution: "720p"
+  continuity: true            # chain each clip from the previous frame's last image
 ```
 
-From a CPU host the recommended route is `backend: comfyui` / `http` pointed at a
-remote GPU endpoint: render stills locally, generate motion remotely. The
-`diffusers` backend is model-agnostic via `pipeline_class`, so swapping LTX for a
-Wan I2V checkpoint is a config-only change. See `reel/i2v.py`.
+Veo uses the same `GEMINIAPIKEY`. Best-effort: with no key the run finishes
+without clips. The `diffusers` (LTX-Video/Wan via `pipeline_class`) and
+`comfyui`/`http` backends remain as self-hosted/remote-GPU alternatives — see
+`reel/i2v.py`.
 
 ## Quick start
 

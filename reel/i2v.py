@@ -34,6 +34,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from . import gemini
 from . import llm
 
 
@@ -61,6 +62,8 @@ def available() -> bool:
     if not enabled():
         return False
     b = backend()
+    if b in ("gemini", "veo"):
+        return gemini.available()
     if b == "diffusers":
         if not all(importlib.util.find_spec(m) for m in ("torch", "diffusers")):
             return False
@@ -83,6 +86,8 @@ def available() -> bool:
 
 def unavailable_hint() -> str:
     b = backend()
+    if b in ("gemini", "veo"):
+        return gemini.key_hint()
     if b == "none":
         return ("no video backend — set video.backend (ltx/wan via diffusers on a "
                 "GPU host, or comfyui/http to a remote GPU endpoint)")
@@ -104,6 +109,21 @@ def _frames(c: dict) -> int:
 
 
 # ── backends ─────────────────────────────────────────────────────────────────
+
+def _gen_gemini(images: list[Path], prompt: str, out_path: Path) -> bool:
+    """Veo image-to-video via the Gemini API. Seeds from the last keyframe (the
+    reference image produced by the image stage); text-to-video if none given."""
+    c = _cfg()
+    return gemini.generate_video(
+        _full_prompt(prompt), Path(out_path),
+        image_path=images[-1] if images else None,
+        model=c.get("model", "veo-3.1-fast-generate-preview"),
+        aspect_ratio=c.get("aspect_ratio", "16:9"),
+        resolution=c.get("resolution", "720p"),
+        poll_seconds=c.get("poll_seconds", 10),
+        timeout_seconds=c.get("timeout_seconds", 1200) or 1200,
+    )
+
 
 _PIPE = None  # diffusers i2v pipeline, cached (load is very expensive)
 
@@ -177,10 +197,13 @@ def generate_clip(images, prompt: str, out_path: Path) -> bool:
     Returns success; never raises fatally."""
     imgs = [Path(p) for p in ([images] if isinstance(images, (str, Path)) else images) if p]
     imgs = [p for p in imgs if p.exists()]
-    if not imgs:
+    b = backend()
+    # Veo can do text-to-video; the other backends require a seed image.
+    if not imgs and b not in ("gemini", "veo"):
         return False
     try:
-        b = backend()
+        if b in ("gemini", "veo"):
+            return _gen_gemini(imgs, prompt, out_path)
         if b == "diffusers":
             return _gen_diffusers(imgs, prompt, out_path)
         if b in ("comfyui", "http"):
