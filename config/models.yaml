@@ -83,6 +83,16 @@ video:
   fps: 24
   size: 768
 
+# Story-fidelity checking. After each stage is approved, the fidelity agent checks
+# that stage's output stays consistent with the ORIGINAL story (runs on the OPEN
+# models, per policy — never Gemini). Per-stage reports land in output/fidelity/;
+# the aggregate score + verdict go in output/fidelity.json and project.json.
+#   Overall score = round(0.5*mean + 0.5*min) of the per-stage 0-100 scores
+#   (the weakest stage caps consistency). Verdict: >=85 aligned, 70-84 mostly
+#   aligned, 50-69 drifting, <50 misaligned.
+fidelity:
+  per_stage: true   # set false to skip per-stage checks (faster runs)
+
 # Runtime behavior.
 runtime:
   # How many agents may call models concurrently. On CPU-only / low-RAM hosts a

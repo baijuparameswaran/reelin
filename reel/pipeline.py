@@ -48,6 +48,7 @@ from .agents.visuals import design_visuals
 from .agents.cinematography import plan_cinematography
 from .agents.storyboard import plan_storyboard
 from .agents.screenplay import draft_screenplay, to_fountain
+from .agents import fidelity
 from .gate import Gate
 from . import llm
 from . import imagegen
@@ -355,6 +356,32 @@ def run(
     gate = Gate.from_config(llm.config())
     parallel = llm.config().get("runtime", {}).get("max_parallel_agents", 1) > 1
 
+    # Per-stage fidelity: after each stage is approved, check its output stays
+    # consistent with the original story (open model, per policy). Toggle via
+    # config `fidelity.per_stage`.
+    fid_cfg = llm.config().get("fidelity", {})
+    fid_on = bool(fid_cfg.get("per_stage", True))
+    fid_reports: dict = {}
+    _FID_STAGES = {"structure", "characters", "scenes", "casting", "soundscape",
+                   "visuals", "cinematography", "screenplay", "storyboard"}
+
+    def check_consistency(name: str, result: dict) -> None:
+        if not fid_on or name not in _FID_STAGES:
+            return
+        try:
+            rep = fidelity.check_stage(name, result, source.get("text", ""))
+        except Exception as e:                       # never block the pipeline
+            _log(f"      fidelity[{name}] skipped ({type(e).__name__})")
+            return
+        fid_reports[name] = rep
+        fdir = out / "fidelity"
+        fdir.mkdir(exist_ok=True)
+        _write_json(fdir / f"{name}.json", rep)
+        drift = rep.get("drift") or []
+        _log(f"      ✓ fidelity[{name}]: {rep.get('verdict', '?')} "
+             f"{rep.get('fidelity_score', '?')}/100"
+             + (f" — {drift[0][:70]}" if drift else ""))
+
     def run_group(label_num: str, label: str, specs: list[dict]) -> dict:
         """Compute/gate/save a set of stages, loading any already-checkpointed.
 
@@ -392,6 +419,7 @@ def run(
                 continue
             r = _gated(gate, nm, raws[nm], s["summarize"], s["rerun"])
             save(nm, r)
+            check_consistency(nm, r)
             results[nm] = r
         return results
 
@@ -496,6 +524,16 @@ def run(
         if scene_render:
             _log(f"      clips → {out}/video/ ({scene_render.get('clips', 0)} clips)")
 
+    # Aggregate the per-stage fidelity checks into one pipeline story-fidelity score.
+    fidelity_summary = {}
+    if fid_reports:
+        overall = fidelity.score_pipeline(fid_reports)
+        fidelity_summary = {"overall": overall, "per_stage": fid_reports}
+        save("fidelity", fidelity_summary)
+        _log(f"      story-fidelity: {overall.get('verdict')} "
+             f"{overall.get('overall_score')}/100"
+             + (f"; drift in {overall['drifting_stages']}" if overall.get("drifting_stages") else ""))
+
     # ── 10/10  assemble artifacts ─────────────────────────────────────────────
     # Per-stage JSON + screenplay.fountain are already written above (incremental,
     # crash-safe). Here we add the per-character files and the combined manifest.
@@ -520,6 +558,7 @@ def run(
         "storyboard": storyboard,
         "screenplay_draft": draft,
         "scene_render": scene_render,
+        "fidelity": fidelity_summary,
         "models": {"fast": fast_model, "quality": quality_model},
         "elapsed_seconds": round(time.time() - t0, 1),
     }

@@ -57,6 +57,92 @@ SHOT LIST / STORYBOARD (JSON, may be partial):
 """
 
 
+STAGE_PROMPT = """\
+You are checking ONE stage of an adaptation pipeline for fidelity to the ORIGINAL
+STORY. The '{stage}' stage produced the OUTPUT below (it transforms the story into
+{stage} material). Judge whether it stays consistent with the original story.
+
+Respond with JSON in exactly this shape:
+{{
+  "stage": "{stage}",
+  "consistent": true,
+  "fidelity_score": 0,
+  "drift": ["element that diverges from / isn't supported by the story"],
+  "omissions": ["essential story element this stage should keep but dropped"],
+  "contradictions": ["anything that changes or contradicts the story's facts/outcome"],
+  "verdict": "aligned | mostly aligned | drifting | misaligned",
+  "summary": "1-2 sentence assessment"
+}}
+
+`fidelity_score` is 0-100 (100 = faithful). Some invention is normal in adaptation
+(added dialogue, visual/sound detail, camera choices) — do NOT flag reasonable
+craft. Only flag real drift: changing or contradicting the story's premise,
+characters, key beats, or outcome, or dropping its essentials. Judge only against
+what the ORIGINAL STORY actually contains.
+
+ORIGINAL STORY:
+{story}
+
+'{stage}' STAGE OUTPUT (JSON):
+{artifact}
+"""
+
+
+def check_stage(stage: str, artifact: dict, story_text: str,
+                profile: str | None = None, feedback: str | None = None) -> dict:
+    """Consistency check for a SINGLE stage's output against the original story.
+    Runs on the open models (Ollama) via the model abstraction."""
+    prompt = STAGE_PROMPT.format(
+        stage=stage,
+        story=(story_text or "")[:8000],
+        artifact=json.dumps(artifact or {}, ensure_ascii=False)[:8000],
+    )
+    raw = models.text(prompt, system=SYSTEM,
+                      profile=profile or models.agent_profile("fidelity"),
+                      as_json=True, feedback=feedback)
+    report = models.safe_json(raw)
+    report.setdefault("stage", stage)
+    return report
+
+
+def _verdict_for(score: float) -> str:
+    return ("aligned" if score >= 85 else "mostly aligned" if score >= 70
+            else "drifting" if score >= 50 else "misaligned")
+
+
+def score_pipeline(reports: dict) -> dict:
+    """Aggregate the per-stage fidelity scores into ONE pipeline score.
+
+    Definition: each stage reports `fidelity_score` in 0-100 (100 = faithful to the
+    original story). The overall pipeline score is
+
+        overall = round(0.5 * mean(stage scores) + 0.5 * min(stage scores))
+
+    — i.e. half the average quality and half the weakest stage, because one badly
+    drifting stage breaks story consistency for everything downstream. Verdict
+    bands: >=85 aligned, 70-84 mostly aligned, 50-69 drifting, <50 misaligned.
+    """
+    scores = [r.get("fidelity_score") for r in reports.values()
+              if isinstance(r.get("fidelity_score"), (int, float))]
+    if not scores:
+        return {"overall_score": None, "verdict": "unknown",
+                "checked": list(reports), "drifting_stages": []}
+    mean = sum(scores) / len(scores)
+    overall = round(0.5 * mean + 0.5 * min(scores))
+    drifting = sorted(s for s, r in reports.items()
+                      if r.get("verdict") in ("drifting", "misaligned")
+                      or (isinstance(r.get("fidelity_score"), (int, float))
+                          and r["fidelity_score"] < 70))
+    return {
+        "overall_score": overall,
+        "verdict": _verdict_for(overall),
+        "mean_score": round(mean, 1),
+        "min_score": min(scores),
+        "checked": list(reports),
+        "drifting_stages": drifting,
+    }
+
+
 def check_alignment(
     story_text: str,
     screenplay_fountain: str,
