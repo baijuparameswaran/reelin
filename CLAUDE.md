@@ -79,11 +79,16 @@ original 7.6 GB cap. 4 GB swap. 872 GB disk.
   `open_backend` (diffusers/comfyui). `reel.models` is the front door
   (`text()`/`generate_image()`/`generate_clip()` + `providers()`); `reel.llm` is
   the open-text engine behind `models.text`. No Gemini text path exists by design.
-- **Story-fidelity at every stage (`reel/agents/fidelity.py`, open model):** after
-  each stage is approved, `fidelity.check_stage` compares that stage's output to the
-  **original story text** and returns a per-stage report (`fidelity_score` 0-100,
-  drift / omissions / contradictions, verdict) → `output/fidelity/<stage>.json`.
-  `fidelity.score_pipeline` aggregates them into one **pipeline score**:
+- **Story-fidelity at every stage (`reel/agents/fidelity.py`, open model):** each
+  stage's output is scored against the **original story text** by
+  `fidelity.check_stage` (`fidelity_score` 0-100, drift / omissions /
+  contradictions, verdict) → `output/fidelity/<stage>.json`. The score is computed
+  **before the review gate** and shown in the gate readout (`story fidelity:
+  DRIFTING 62/100 ⚠ below 70 — consider re-running with feedback`, with the top
+  drift items), so the operator can decide to approve or re-iterate the stage on
+  the spot; `_gated` returns `(result, report)`, the threshold is config
+  `fidelity.min_score` (default 70). `fidelity.score_pipeline` aggregates the
+  per-stage scores into one **pipeline score**:
   `overall = round(0.5·mean + 0.5·min)` of the per-stage scores (the weakest stage
   caps consistency); verdict bands >=85 aligned / 70-84 mostly aligned / 50-69
   drifting / <50 misaligned → `output/fidelity.json` + `project.json`. Runs on the
@@ -186,6 +191,14 @@ original 7.6 GB cap. 4 GB swap. 872 GB disk.
   mix / final cut).
 
 ## Session log
+- 2026-06-21 (later 5) — **Show fidelity score at the review gate.** Moved the
+  per-stage fidelity check to run *before* the HITL gate; `_gated` now computes the
+  score for each candidate result and folds it into the gate readout (verdict +
+  score/100, a "⚠ below N — consider re-running" hint under config
+  `fidelity.min_score`=70, and the top drift items), then returns
+  `(result, report)`. So the operator sees the story-consistency score when
+  deciding to approve vs. re-iterate a stage. Verified the readout formatting +
+  tuple flow (mock report; no Gemini). Docs updated (README, CLAUDE.md).
 - 2026-06-21 (later 4) — **Per-stage story-fidelity + defined score.** Generalized
   the fidelity agent: `check_stage(stage, artifact, story_text)` checks any one
   stage's output against the original story (open model) → per-stage report
