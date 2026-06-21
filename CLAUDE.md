@@ -191,6 +191,14 @@ original 7.6 GB cap. 4 GB swap. 872 GB disk.
   mix / final cut).
 
 ## Session log
+- 2026-06-21 (later 6) — **Scenes capped, shots never.** `--max-scenes` (demo: 2)
+  now limits drafting AND rendering to that many SCENES, but **every shot within a
+  rendered scene is always rendered**: `_render_scene_frames` gained `max_scenes`
+  (slices scenes, iterates all frames) and `run` passes it; `fountain.to_storyboard`
+  default `max_shots=None` → all action beats become shots; the storyboard agent
+  prompt now requires one frame per camera shot (cover every shot, no merge/drop).
+  Verified: fountain build emits all shots per scene (5, was capped 3). Docs +
+  Makefile/CLI help updated.
 - 2026-06-21 (later 5) — **Show fidelity score at the review gate.** Moved the
   per-stage fidelity check to run *before* the HITL gate; `_gated` now computes the
   score for each candidate result and folds it into the gate readout (verdict +

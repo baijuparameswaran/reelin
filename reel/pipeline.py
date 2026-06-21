@@ -227,7 +227,8 @@ def _frame_char_anchor(frame: dict, cast_index: dict, out: Path) -> Path | None:
     return None
 
 
-def _render_scene_frames(storyboard: dict, casting: dict, out: Path) -> dict:
+def _render_scene_frames(storyboard: dict, casting: dict, out: Path,
+                         max_scenes: int | None = None) -> dict:
     """Next phase (after storyboard + screenplay): render each storyboard frame as
     a **video clip** (Veo image-to-video), seeded for the first frame of a scene by
     the in-frame character's representation image (the reference from the image
@@ -235,6 +236,9 @@ def _render_scene_frames(storyboard: dict, casting: dict, out: Path) -> dict:
     continuous within the scene. Scene boundaries reset the chain (a cut). No
     intermediate stills are generated — image generation is reserved for the
     character representation. Best-effort, idempotent. Returns a render manifest.
+
+    `max_scenes` caps how many SCENES are rendered (e.g. the demo renders 2-3) —
+    but EVERY shot/frame within each rendered scene is always rendered.
     """
     if not i2v.enabled():
         _log(f"      scene render skipped — {i2v.unavailable_hint()}")
@@ -255,7 +259,10 @@ def _render_scene_frames(storyboard: dict, casting: dict, out: Path) -> dict:
     vdir.mkdir(exist_ok=True)
     manifest = {"continuity": continuity, "clips": 0, "scenes": []}
 
-    for scene in storyboard.get("storyboard", []):
+    board = storyboard.get("storyboard", [])
+    if max_scenes:
+        board = board[:max_scenes]              # limit scenes, never the shots within
+    for scene in board:
         snum = scene.get("scene_number", "x")
         sdir = vdir / f"scene_{snum:02d}" if isinstance(snum, int) else vdir / f"scene_{snum}"
         sdir.mkdir(exist_ok=True)
@@ -552,8 +559,9 @@ def run(
     # effort: a no-op on hosts without a video backend (see config `video`).
     scene_render = {}
     if i2v.enabled():
-        _log("      rendering scenes frame by frame (image-to-video) …")
-        scene_render = _render_scene_frames(storyboard, casting, out)
+        _log(f"      rendering scenes frame by frame (image-to-video; "
+             f"{max_scenes} scenes, all shots each) …")
+        scene_render = _render_scene_frames(storyboard, casting, out, max_scenes=max_scenes)
         if scene_render:
             _log(f"      clips → {out}/video/ ({scene_render.get('clips', 0)} clips)")
 

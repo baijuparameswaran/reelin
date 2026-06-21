@@ -92,7 +92,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("source", nargs="?", help="path to source text (book/story/script)")
     ap.add_argument("--out", default="output", help="output directory (default: output)")
     ap.add_argument("--max-scenes", type=int, default=3,
-                    help="how many scenes to fully draft (default: 3)")
+                    help="how many scenes to draft AND render (default: 3); every "
+                         "shot within each rendered scene is always rendered")
     ap.add_argument("--profile", choices=["fast", "quality"], default=None,
                     help="force a single quality tier for every agent")
     ap.add_argument("--resume", action="store_true",

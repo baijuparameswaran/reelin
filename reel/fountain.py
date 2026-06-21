@@ -119,13 +119,18 @@ def _av(scene_no: int, soundscape: dict, visuals: dict) -> tuple[str, str]:
 
 
 def to_storyboard(scenes: list[dict], soundscape: dict, visuals: dict, casting: dict,
-                  out, max_scenes: int = 2, max_shots: int = 3) -> dict:
+                  out, max_scenes: int = 2, max_shots: int | None = None) -> dict:
     """Build a render-ready storyboard: scenes → shots, each a Veo prompt fusing the
-    screenplay action + dialogue with the scene's visual style and audio."""
+    screenplay action + dialogue with the scene's visual style and audio.
+
+    `max_scenes` limits how many SCENES are built (the demo uses 2-3). `max_shots`
+    is None by default → **every** action beat in a scene becomes a shot (all shots
+    rendered); set it only if you deliberately want to cap shots per scene.
+    """
     board = {"storyboard_style": "photoreal cinematic, screenplay-driven, native audio", "storyboard": []}
     for idx, sc in enumerate(scenes[:max_scenes], start=1):
         visual, audio = _av(idx, soundscape, visuals)
-        beats = _sample(sc["action"], max_shots) or [sc["slugline"]]
+        beats = (_sample(sc["action"], max_shots) if max_shots else sc["action"]) or [sc["slugline"]]
         frames = []
         for fnum, action in enumerate(beats, start=1):
             who, _img = _resolve_character(action, sc["dialogue"], casting, out)
