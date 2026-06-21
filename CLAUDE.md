@@ -21,8 +21,10 @@ and a Fountain draft. A human-in-the-loop gate reviews/iterates each stage.
   dep is PyYAML; the Ollama client is stdlib `urllib` (in `reel/llm.py`). Image
   rendering adds **optional** deps (`diffusers`/`torch`/etc., see
   `requirements-image.txt`) — the text pipeline runs without them.
-- `reel/` — package. `llm.py` (model-agnostic client + profile/fallback +
-  `with_feedback`), `pipeline.py` (orchestration + per-stage gates), `gate.py`
+- `reel/` — package. `models.py` (**unified AI-model abstraction + provider
+  policy** — the front door for text/image/video), `llm.py` (open-model client:
+  model-agnostic Ollama + profile/fallback + `with_feedback`), `pipeline.py`
+  (orchestration + per-stage gates), `gate.py`
   (human-in-the-loop review gate), `imagegen.py` (pluggable text-to-image +
   img2img backend; default backend **Gemini**), `gemini.py` (Google Gemini REST
   helpers — image generation + Veo video, stdlib urllib, API key from env), `i2v.py`
@@ -69,6 +71,13 @@ original 7.6 GB cap. 4 GB swap. 872 GB disk.
 - **Model-agnostic by design:** agents pick a *profile* (`fast`/`quality`), never
   a model name. Preferred = **Qwen3 4B / 8B**; auto-fallback to installed models
   (qwen2.5, llama3:8b, mistral, phi3) so the pipeline always runs.
+- **Provider policy (single source of truth: `reel/models.py`):** **Gemini is used
+  ONLY for image + video generation, and only if `GEMINIAPIKEY` is set; every
+  text/LLM stage always uses the local OPEN models (Ollama).** Image/video config
+  backends are `auto` → resolve to `gemini` when a key exists, else the
+  `open_backend` (diffusers/comfyui). `reel.models` is the front door
+  (`text()`/`generate_image()`/`generate_clip()` + `providers()`); `reel.llm` is
+  the open-text engine behind `models.text`. No Gemini text path exists by design.
 - **`runtime.max_parallel_agents: 1`** here — one CPU model serves sequentially
   and two different models can't co-reside in RAM. Raise on GPU/multi-model hosts
   to actually parallelize the independent branches: structure ‖ characters,
@@ -153,6 +162,18 @@ original 7.6 GB cap. 4 GB swap. 872 GB disk.
   mix / final cut).
 
 ## Session log
+- 2026-06-21 (later 2) — **Unified model abstraction + provider policy.** Added
+  `reel/models.py` as the single front door (text/image/video + `providers()`),
+  enforcing: **Gemini ONLY for image + video (and only if `GEMINIAPIKEY` set);
+  all text stages on the local open models.** Image/video config backends are now
+  `auto` (resolve gemini-if-key-else-`open_backend`) in `imagegen.backend()` /
+  `i2v.backend()`. Fixed the policy violation: the **fidelity agent now runs on
+  open models** (was using Gemini) via `models.text`; removed `gemini.generate_text`
+  (no Gemini text path by design). Added `fidelity` to `agent_profiles` (quality).
+  Verified routing: with key → image/video=gemini; without → image/video=diffusers;
+  text always open. *(Existing text agents still import `reel.llm` directly — the
+  open engine behind `models.text`; migrating their call sites to `models.text` is
+  optional polish, not yet done.)*
 - 2026-06-21 (later) — **Live Gemini render verified; screenplay shots/V.O.;
   fidelity check.** Got the Gemini APIs working live (key in `~/.bashrc` as
   `GEMINIAPIKEY`; note `.bashrc`'s non-interactive early-return means a plain

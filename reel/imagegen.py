@@ -37,11 +37,16 @@ def _cfg() -> dict:
 
 def enabled() -> bool:
     c = _cfg()
-    return bool(c.get("enabled", False)) and c.get("backend", "none") != "none"
+    return bool(c.get("enabled", False)) and backend() != "none"
 
 
 def backend() -> str:
-    return _cfg().get("backend", "none")
+    """Resolved image backend. `auto` → Gemini when a key exists (policy: prefer
+    Gemini for image generation), else the configured open backend."""
+    b = _cfg().get("backend", "none")
+    if b == "auto":
+        return "gemini" if gemini.available() else _cfg().get("open_backend", "diffusers")
+    return b
 
 
 def _log(msg: str) -> None:

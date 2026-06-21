@@ -102,21 +102,9 @@ def generate_image(prompt: str, out_path: Path, *,
     raise RuntimeError("Gemini returned no image (check model/quota/prompt)")
 
 
-# ── text generation ──────────────────────────────────────────────────────────
-
-def generate_text(prompt: str, *, system: str | None = None,
-                  model: str = "gemini-2.5-flash", timeout: float = 180) -> str:
-    """Plain text generation (e.g. for the fidelity check). Returns the text."""
-    body: dict = {"contents": [{"parts": [{"text": prompt}]}]}
-    if system:
-        body["systemInstruction"] = {"parts": [{"text": system}]}
-    data = _post(f"{BASE}/v1beta/models/{model}:generateContent", body, timeout)
-    out = []
-    for cand in data.get("candidates", []):
-        for part in cand.get("content", {}).get("parts", []):
-            if "text" in part:
-                out.append(part["text"])
-    return "".join(out)
+# NB: no text generation here by design — per project policy Gemini is used ONLY
+# for image + video generation; all text/LLM stages run on the local open models
+# (Ollama via reel.llm / reel.models.text).
 
 
 # ── Veo video generation ─────────────────────────────────────────────────────
