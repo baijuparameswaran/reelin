@@ -404,6 +404,7 @@ def run(
     # ── 1/10  ingest (deterministic — no gate) ───────────────────────────────
     _log("1/10 ingest …")
     source = ingest(input_path)
+    save("source", source)   # checkpoint so source-dependent stages can run standalone
     _log(f"      '{source['title']}' — {source['word_count']} words")
 
     # ── 2/10  structure + characters ─────────────────────────────────────────
