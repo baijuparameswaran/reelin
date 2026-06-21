@@ -29,9 +29,10 @@ and a Fountain draft. A human-in-the-loop gate reviews/iterates each stage.
   (pluggable image-to-video backend — default **Gemini Veo**; also diffusers
   LTX/Wan or a remote endpoint), `stock.py` (free CC stock-photo lookup —
   *currently unused*: kept for the diffusers actor-reference workflow), `cli.py`
-  (entry), `manifest.py` (model list for the updater), `agents/` (ingest,
+  (entry), `manifest.py` (model list for the updater), `fountain.py` (Fountain
+  parser + screenplay→storyboard/shot builder for rendering), `agents/` (ingest,
   structure, characters, casting, scenes, soundscape, visuals, cinematography,
-  storyboard, screenplay).
+  storyboard, screenplay, fidelity).
 - `config/models.yaml` — model profiles, per-agent profile map, `hitl` gate
   knobs, `image` block (backend/model — default Gemini), `video` block
   (image-to-video backend/model — default Gemini Veo), runtime knobs.
@@ -152,6 +153,31 @@ original 7.6 GB cap. 4 GB swap. 872 GB disk.
   mix / final cut).
 
 ## Session log
+- 2026-06-21 (later) — **Live Gemini render verified; screenplay shots/V.O.;
+  fidelity check.** Got the Gemini APIs working live (key in `~/.bashrc` as
+  `GEMINIAPIKEY`; note `.bashrc`'s non-interactive early-return means a plain
+  `source` in a non-interactive shell won't load it — eval the export line).
+  **Image fix:** the v1 `:generateContent` image endpoint rejects extra
+  `generationConfig` (responseModalities/responseFormat/imageConfig) — send only
+  the documented minimal `contents/parts` body. Rendered all 4 character images
+  live (`gemini-3.1-flash-image`, photoreal, ~13 s each). **Veo fix:** the seed
+  image must be `bytesBase64Encoded` (NOT `inlineData`, which Veo rejects).
+  Rendered scene clips live with `veo-3.1-fast-generate-preview` (native audio),
+  seeded by character images, continuity via ffmpeg tail-frame; **Veo preview
+  tier rate-limits (429)** so batches need backoff/spacing (one clip of six was
+  dropped to 429). **Added `reel/fountain.py`** (parse `screenplay.fountain` →
+  scenes/shots with attributed dialogue; `to_storyboard` folds visuals+soundscape
+  audio into Veo prompts). **Enhanced the screenplay agent** to emit structured
+  JSON: numbered **shots** (shot_type + action), **attributed dialogue**
+  (speaker + modifier O.S./CONT'D + parenthetical), and **voice-over** provisions;
+  `scene_to_fountain` renders proper Fountain (`!SHOT n — TYPE`, `NAME (V.O.)`).
+  **Added a fidelity agent** (`reel/agents/fidelity.py` + `gemini.generate_text`):
+  compares the final screenplay/storyboard against the original story → covered
+  beats / omissions / additions / contradictions / score / verdict. Ran it
+  (Gemini) on the lighthouse story — it correctly flagged drift: the source is
+  Edith's *secret solitary* choice to abandon the light, but the draft has her
+  *openly directing the crew*. **Not yet wired into `pipeline.run`**; screenplay
+  agent's new structured output not yet re-run on Ollama. *(Uncommitted at write.)*
 - 2026-06-21 — **Switched image + video to the Google Gemini API; image gen
   limited to the character representation.** Added `reel/gemini.py` (stdlib-urllib
   REST helpers per ai.google.dev docs: image `…:generateContent` with
