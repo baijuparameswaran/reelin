@@ -307,22 +307,46 @@ def _spec(name: str, compute: Callable, summarize: Callable, rerun: Callable) ->
 
 # ── gate loop helper ──────────────────────────────────────────────────────────
 
+def _format_fidelity(rep: dict | None, min_score: int = 70) -> str:
+    """One-block fidelity readout for the review gate (score + a hint to re-run)."""
+    if not rep:
+        return ""
+    score = rep.get("fidelity_score")
+    verdict = (rep.get("verdict") or "?").upper()
+    line = f"\n  story fidelity: {verdict}  {score}/100"
+    if isinstance(score, (int, float)) and score < min_score:
+        line += f"  ⚠ below {min_score} — consider re-running with feedback"
+    issues = (rep.get("drift") or []) + (rep.get("contradictions") or [])
+    if issues:
+        line += "\n    drift: " + "; ".join(str(i) for i in issues[:2])
+    return line
+
+
 def _gated(
     gate: Gate,
     name: str,
     initial_result: dict,
     summarize_fn: Callable,
-    rerun_fn: Callable,  # rerun_fn(feedback: str) -> dict
-) -> dict:
-    """Show gate for initial_result; re-run with feedback until approved.
+    rerun_fn: Callable,            # rerun_fn(feedback: str) -> dict
+    fidelity_fn: Callable | None = None,  # fidelity_fn(result) -> report | None
+    min_score: int = 70,
+) -> tuple[dict, dict | None]:
+    """Show gate for initial_result; re-run with feedback until approved. The
+    story-fidelity score (if `fidelity_fn` is given) is computed for each candidate
+    result and shown at the gate so the operator can decide whether to re-iterate.
 
-    Raises PipelineStopped if the operator chooses to pause at the gate.
+    Returns (approved_result, its_fidelity_report). Raises PipelineStopped on pause.
     """
     result = initial_result
     while True:
-        decision = gate.review(name, result, summarize_fn)
+        report = fidelity_fn(result) if fidelity_fn else None
+
+        def _summary(r, _rep=report):
+            return summarize_fn(r) + _format_fidelity(_rep, min_score)
+
+        decision = gate.review(name, result, _summary)
         if decision.approved:
-            return result
+            return result, report
         if decision.stop:
             raise PipelineStopped(name)
         _log(f"      re-running {name} with feedback …")
@@ -361,26 +385,32 @@ def run(
     # config `fidelity.per_stage`.
     fid_cfg = llm.config().get("fidelity", {})
     fid_on = bool(fid_cfg.get("per_stage", True))
+    fid_min = int(fid_cfg.get("min_score", 70))
     fid_reports: dict = {}
     _FID_STAGES = {"structure", "characters", "scenes", "casting", "soundscape",
                    "visuals", "cinematography", "screenplay", "storyboard"}
 
-    def check_consistency(name: str, result: dict) -> None:
+    def fidelity_report(name: str, result: dict) -> dict | None:
+        """Score this stage's output against the original story (open model).
+        Computed BEFORE the gate so the operator sees the score when deciding
+        whether to re-iterate. Best-effort — never blocks the pipeline."""
         if not fid_on or name not in _FID_STAGES:
-            return
+            return None
         try:
-            rep = fidelity.check_stage(name, result, source.get("text", ""))
-        except Exception as e:                       # never block the pipeline
+            return fidelity.check_stage(name, result, source.get("text", ""))
+        except Exception as e:
             _log(f"      fidelity[{name}] skipped ({type(e).__name__})")
+            return None
+
+    def save_fidelity(name: str, rep: dict | None) -> None:
+        if rep is None:
             return
         fid_reports[name] = rep
         fdir = out / "fidelity"
         fdir.mkdir(exist_ok=True)
         _write_json(fdir / f"{name}.json", rep)
-        drift = rep.get("drift") or []
-        _log(f"      ✓ fidelity[{name}]: {rep.get('verdict', '?')} "
-             f"{rep.get('fidelity_score', '?')}/100"
-             + (f" — {drift[0][:70]}" if drift else ""))
+        _log(f"      fidelity[{name}]: {rep.get('verdict', '?')} "
+             f"{rep.get('fidelity_score', '?')}/100")
 
     def run_group(label_num: str, label: str, specs: list[dict]) -> dict:
         """Compute/gate/save a set of stages, loading any already-checkpointed.
@@ -417,9 +447,12 @@ def run(
             if nm in loaded:
                 results[nm] = loaded[nm]
                 continue
-            r = _gated(gate, nm, raws[nm], s["summarize"], s["rerun"])
+            fid_fn = (lambda res, _nm=nm: fidelity_report(_nm, res)) \
+                if (fid_on and nm in _FID_STAGES) else None
+            r, rep = _gated(gate, nm, raws[nm], s["summarize"], s["rerun"],
+                            fidelity_fn=fid_fn, min_score=fid_min)
             save(nm, r)
-            check_consistency(nm, r)
+            save_fidelity(nm, rep)
             results[nm] = r
         return results
 

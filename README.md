@@ -45,9 +45,12 @@ Artifacts land in `output/`: `structure.json`, `characters.json`, `casting.json`
 ### Human-in-the-loop review
 
 After each LLM stage the pipeline pauses at a **review gate**: it prints a
-summary and waits for you to either approve (press Enter) or type feedback. Type
-feedback and the stage re-runs with your notes appended to its prompt — iterate
-until you approve. Parallel branches are gated one after another once they finish.
+summary — including that stage's **story-fidelity score** (see
+[Story fidelity](#story-fidelity-consistency-scoring)) so you can judge whether
+the output still matches the source — and waits for you to either approve (press
+Enter) or type feedback. Type feedback and the stage re-runs with your notes
+appended to its prompt — iterate until you approve. Parallel branches are gated
+one after another once they finish.
 
 The gate is controlled in `config/models.yaml` under `hitl`:
 
@@ -168,9 +171,19 @@ still runs the full pipeline with the HITL gate, concurrency, and `--resume`.
 ## Story fidelity (consistency scoring)
 
 As the pipeline transforms the source through structure → … → screenplay →
-storyboard, drift can creep in. After **each** stage is approved, a fidelity agent
-compares that stage's output back to the **original story** and scores it — so you
-can see exactly where (and how badly) an adaptation diverges.
+storyboard, drift can creep in. For **each** stage, a fidelity agent compares that
+stage's output back to the **original story** and scores it — so you can see
+exactly where (and how badly) an adaptation diverges.
+
+The score is computed **before each review gate** and shown in the gate readout,
+so it directly informs your approve / re-iterate decision:
+
+```
+  story fidelity: DRIFTING  62/100  ⚠ below 70 — consider re-running with feedback
+    drift: villagers' nickname dropped; Edith's secret choice softened
+```
+
+(The threshold for the hint is `fidelity.min_score`, default 70.)
 
 - Per stage → `output/fidelity/<stage>.json`: a `fidelity_score` (0-100) plus
   `drift` / `omissions` / `contradictions` and a `verdict`.

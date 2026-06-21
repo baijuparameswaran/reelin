@@ -92,6 +92,7 @@ video:
 #   aligned, 50-69 drifting, <50 misaligned.
 fidelity:
   per_stage: true   # set false to skip per-stage checks (faster runs)
+  min_score: 70     # at the review gate, scores below this flag a re-iterate hint
 
 # Runtime behavior.
 runtime:
