@@ -137,6 +137,34 @@ without clips. The `diffusers` (LTX-Video/Wan via `pipeline_class`) and
 `comfyui`/`http` backends remain as self-hosted/remote-GPU alternatives — see
 `reel/i2v.py`.
 
+## Running individual stages
+
+Every stage is declared once in a registry (`reel/stages.py`) with the inputs it
+depends on, so you can run **one stage on its own** instead of the whole pipeline.
+Each stage loads its inputs from prior `output/<input>.json` checkpoints (ingesting
+the source on demand) and writes its own artifact.
+
+```bash
+python -m reel.cli stages                      # list stages + their inputs
+python -m reel.cli stage structure story.txt   # ingest + run just 'structure'
+python -m reel.cli stage scenes                # uses output/source.json + structure.json
+python -m reel.cli stage screenplay --feedback "more voice-over"
+python -m reel.cli stage fidelity              # check the draft vs the original story
+```
+
+Equivalently in Python:
+
+```python
+from reel.stages import run_stage
+run_stage("casting", out="output")             # needs structure + characters checkpoints
+run_stage("structure", input_path="story.txt") # ingests the source first
+```
+
+Stage runs are direct (no review gate; pass `--feedback`/`feedback=` for a
+revision note). Routing follows the provider policy — text stages on the open
+models, image/video stages on Gemini when a key is set (see below). `reel.pipeline.run`
+still runs the full pipeline with the HITL gate, concurrency, and `--resume`.
+
 ## Quick start
 
 ```bash

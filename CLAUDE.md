@@ -22,9 +22,10 @@ and a Fountain draft. A human-in-the-loop gate reviews/iterates each stage.
   rendering adds **optional** deps (`diffusers`/`torch`/etc., see
   `requirements-image.txt`) — the text pipeline runs without them.
 - `reel/` — package. `models.py` (**unified AI-model abstraction + provider
-  policy** — the front door for text/image/video), `llm.py` (open-model client:
-  model-agnostic Ollama + profile/fallback + `with_feedback`), `pipeline.py`
-  (orchestration + per-stage gates), `gate.py`
+  policy** — the front door for text/image/video), `stages.py` (**per-stage
+  registry + `run_stage` for independent invocation**), `llm.py` (open-model
+  client: model-agnostic Ollama + profile/fallback + `with_feedback`),
+  `pipeline.py` (orchestration + per-stage gates), `gate.py`
   (human-in-the-loop review gate), `imagegen.py` (pluggable text-to-image +
   img2img backend; default backend **Gemini**), `gemini.py` (Google Gemini REST
   helpers — image generation + Veo video, stdlib urllib, API key from env), `i2v.py`
@@ -78,6 +79,18 @@ original 7.6 GB cap. 4 GB swap. 872 GB disk.
   `open_backend` (diffusers/comfyui). `reel.models` is the front door
   (`text()`/`generate_image()`/`generate_clip()` + `providers()`); `reel.llm` is
   the open-text engine behind `models.text`. No Gemini text path exists by design.
+- **Per-stage abstraction + independent invocation (`reel/stages.py`):** every
+  stage of processing is declared once as a `Stage` (name, the input artifacts it
+  depends on, the agent it runs, what it `produces`). The registry lets the
+  pipeline treat stages uniformly AND lets any single stage be run on its own with
+  just its required inputs — `run_stage("scenes", out=…)` /
+  `python -m reel.cli stage scenes` — resolving each dependency from a prior
+  `output/<input>.json` checkpoint (ingesting the source on demand), running it
+  through the model abstraction, and writing its artifact. `python -m reel.cli
+  stages` lists stages + inputs. Stage runs are direct (no HITL gate; pass
+  `--feedback` for a revision note). `reel.pipeline.run` still orchestrates the
+  same stages with the gate, concurrency, and resume; `run()` now also
+  checkpoints `source.json` so source-dependent stages are independently runnable.
 - **`runtime.max_parallel_agents: 1`** here — one CPU model serves sequentially
   and two different models can't co-reside in RAM. Raise on GPU/multi-model hosts
   to actually parallelize the independent branches: structure ‖ characters,
@@ -162,6 +175,16 @@ original 7.6 GB cap. 4 GB swap. 872 GB disk.
   mix / final cut).
 
 ## Session log
+- 2026-06-21 (later 3) — **Per-stage abstraction + independent invocation.** Added
+  `reel/stages.py`: each stage declared as a `Stage` (name, input artifacts,
+  run callable, `produces`) in a `REGISTRY`; `run_stage(name, …)` invokes any one
+  stage standalone — resolving deps from `output/<input>.json` (ingesting SOURCE on
+  demand), running through the model abstraction, saving the artifact. CLI gained
+  `stage NAME [SOURCE]` and `stages` (list). `pipeline.run` now checkpoints
+  `source.json`. Validated **without Gemini**: `ingest` ran end-to-end standalone;
+  all 13 stages' input deps resolve from existing checkpoints (load-only, no agent
+  runs). NB: the render stages (`casting_images`, `scene_render`) hit the image/
+  video provider when actually run — keep them out of no-Gemini validation.
 - 2026-06-21 (later 2) — **Unified model abstraction + provider policy.** Added
   `reel/models.py` as the single front door (text/image/video + `providers()`),
   enforcing: **Gemini ONLY for image + video (and only if `GEMINIAPIKEY` set);
