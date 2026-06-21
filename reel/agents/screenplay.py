@@ -15,19 +15,22 @@ from datetime import date
 from .. import llm
 
 SYSTEM = (
-    "You are a professional screenwriter. You write in Fountain screenplay "
-    "format: scene headings in CAPS (INT./EXT. LOCATION - TIME), tight action "
-    "lines in present tense, and character cues in CAPS above dialogue. Output "
-    "only the screenplay text for the requested scene — no commentary."
+    "You are a professional screenwriter and shot-list director. You break a "
+    "scene into clearly numbered SHOTS, write tight present-tense action, and "
+    "attribute every spoken line to a named speaker. You mark off-screen voices "
+    "(O.S.), off-screen narration / interior monologue as voice-over (V.O.), and "
+    "use the camera coverage provided. You always respond with valid JSON and "
+    "nothing else."
 )
 
 PROMPT = """\
-{revision_note}Write the screenplay for ONE scene in Fountain format.
+{revision_note}Break ONE scene into a numbered shot list with fully attributed
+dialogue. Use the camera coverage below to decide the shots.
 
 Story logline: {logline}
 Tone: {tone}
 
-Characters in this scene:
+Characters in this scene (use these EXACT names as speakers):
 {characters}
 
 Scene to write:
@@ -35,7 +38,34 @@ Scene to write:
 - What happens: {summary}
 - Dramatic purpose: {purpose}
 {soundscape_block}{visuals_block}{cinema_block}
-Write vivid but economical action and natural dialogue. Begin with the slugline.
+Respond with JSON in exactly this shape:
+{{
+  "scene_number": {scene_number},
+  "slugline": "{slugline}",
+  "shots": [
+    {{
+      "shot": 1,
+      "shot_type": "WIDE | MEDIUM | CLOSE-UP | OTS | POV | INSERT | TWO-SHOT | ...",
+      "description": "the action / what the camera sees in this shot, present tense",
+      "voiceover": {{"speaker": "NAME", "line": "narration or interior monologue heard over the shot"}},
+      "dialogue": [
+        {{"speaker": "NAME (exact)", "modifier": "" or "O.S." or "CONT'D",
+          "parenthetical": "optional acting/delivery note, no parens", "line": "the spoken line"}}
+      ],
+      "sound": "key audio under this shot (from the soundscape)"
+    }}
+  ]
+}}
+
+Rules:
+- Derive shots from the camera coverage when given; otherwise pick the key beats.
+- EVERY dialogue line MUST have a `speaker` that matches a character name above.
+- Use `voiceover` only when narration / interior monologue genuinely serves the
+  scene (e.g. reflection over action); set it to null when not needed.
+- Use modifier "O.S." for a speaker heard but not seen; "V.O." voice is the
+  `voiceover` field. Keep `parenthetical` short or "".
+- Keep action economical and shootable; no camera directions inside `description`
+  beyond what the shot_type implies.
 """
 
 
@@ -160,26 +190,67 @@ def draft_screenplay(
     for scene in scene_list[:max_scenes]:
         scene_num = scene.get("number")
         scene_chars = scene.get("characters", [])
+        slugline = scene.get("slugline", "INT. LOCATION - DAY")
         prompt = PROMPT.format(
             revision_note=revision_note,
             logline=logline,
             tone=tone,
             characters=_scene_char_brief(scene_chars, char_lookup),
-            slugline=scene.get("slugline", "INT. LOCATION - DAY"),
+            slugline=slugline,
+            scene_number=scene_num if scene_num is not None else 0,
             summary=scene.get("summary", ""),
             purpose=scene.get("purpose", ""),
             soundscape_block=_scene_soundscape_block(scene_num, sound_lookup),
             visuals_block=_scene_visuals_block(scene_num, vis_lookup),
             cinema_block=_scene_cinema_block(scene_num, cinema_lookup),
         )
-        text = llm.generate(prompt, profile=profile, system=SYSTEM)
-        drafted.append({"number": scene_num, "fountain": text})
+        raw = llm.generate(prompt, profile=profile, system=SYSTEM, as_json=True)
+        scene_doc = llm.safe_json(raw)
+        scene_doc.setdefault("scene_number", scene_num)
+        scene_doc.setdefault("slugline", slugline)
+        scene_doc.setdefault("shots", [])
+        scene_doc["number"] = scene_num
+        scene_doc["fountain"] = scene_to_fountain(scene_doc)  # rendered view
+        drafted.append(scene_doc)
 
     return {
         "drafted_count": len(drafted),
         "total_scenes": len(scene_list),
         "scenes": drafted,
     }
+
+
+def _cue(speaker: str, modifier: str = "") -> str:
+    name = (speaker or "").upper().strip()
+    mod = (modifier or "").strip().strip("()")
+    return f"{name} ({mod})" if mod else name
+
+
+def scene_to_fountain(scene: dict) -> str:
+    """Render one structured scene (shots + attributed dialogue + V.O.) as Fountain."""
+    out = [scene.get("slugline", "INT. LOCATION - DAY").upper(), ""]
+    for shot in scene.get("shots", []):
+        num = shot.get("shot", "")
+        stype = (shot.get("shot_type") or "").upper()
+        header = f"SHOT {num}" + (f" — {stype}" if stype else "")
+        out.append(f"!{header}")                      # '!' forces an action/shot line
+        if shot.get("description"):
+            out.append(shot["description"].strip())
+        out.append("")
+        vo = shot.get("voiceover")
+        if isinstance(vo, dict) and vo.get("line"):
+            out.append(_cue(vo.get("speaker", "NARRATOR"), "V.O."))
+            out.append(vo["line"].strip())
+            out.append("")
+        for d in shot.get("dialogue", []) or []:
+            if not d.get("line"):
+                continue
+            out.append(_cue(d.get("speaker", ""), d.get("modifier", "")))
+            if d.get("parenthetical"):
+                out.append(f"({d['parenthetical'].strip().strip('()')})")
+            out.append(d["line"].strip())
+            out.append("")
+    return "\n".join(out).strip()
 
 
 def to_fountain(source: dict, structure: dict, draft: dict) -> str:

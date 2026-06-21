@@ -78,21 +78,20 @@ def generate_image(prompt: str, out_path: Path, *,
                    image_size: str | None = None,
                    timeout: float = 300) -> bool:
     """Generate an image for `prompt` (optionally conditioned on `refs` reference
-    images) and write it to `out_path`. Returns True on success; raises on a hard
-    API error (callers catch)."""
+    images) and write it to `out_path`. Mirrors the official text-to-image sample
+    (ai.google.dev/gemini-api/docs/image-generation): a minimal contents/parts
+    body, no generationConfig. Returns True on success; raises on a hard API error.
+
+    aspect_ratio / image_size are accepted for forward-compatibility but NOT sent —
+    the v1 `:generateContent` endpoint rejects extra generationConfig fields for
+    these image models, so we keep the body byte-for-byte with the documented
+    minimal request (aspect ratio can be steered via the prompt text).
+    """
     parts: list[dict] = [{"text": prompt}]
     for rp in (refs or []):
         if rp and Path(rp).exists():
             parts.append(_inline(Path(rp)))
-    gen: dict = {"responseModalities": ["TEXT", "IMAGE"]}
-    img_fmt = {}
-    if aspect_ratio:
-        img_fmt["aspectRatio"] = aspect_ratio
-    if image_size:
-        img_fmt["imageSize"] = image_size
-    if img_fmt:
-        gen["responseFormat"] = {"image": img_fmt}
-    body = {"contents": [{"parts": parts}], "generationConfig": gen}
+    body: dict = {"contents": [{"parts": parts}]}
     data = _post(f"{BASE}/v1/models/{model}:generateContent", body, timeout)
     for cand in data.get("candidates", []):
         for part in cand.get("content", {}).get("parts", []):
@@ -101,6 +100,23 @@ def generate_image(prompt: str, out_path: Path, *,
                 Path(out_path).write_bytes(base64.b64decode(inline["data"]))
                 return True
     raise RuntimeError("Gemini returned no image (check model/quota/prompt)")
+
+
+# ── text generation ──────────────────────────────────────────────────────────
+
+def generate_text(prompt: str, *, system: str | None = None,
+                  model: str = "gemini-2.5-flash", timeout: float = 180) -> str:
+    """Plain text generation (e.g. for the fidelity check). Returns the text."""
+    body: dict = {"contents": [{"parts": [{"text": prompt}]}]}
+    if system:
+        body["systemInstruction"] = {"parts": [{"text": system}]}
+    data = _post(f"{BASE}/v1beta/models/{model}:generateContent", body, timeout)
+    out = []
+    for cand in data.get("candidates", []):
+        for part in cand.get("content", {}).get("parts", []):
+            if "text" in part:
+                out.append(part["text"])
+    return "".join(out)
 
 
 # ── Veo video generation ─────────────────────────────────────────────────────
@@ -117,9 +133,9 @@ def generate_video(prompt: str, out_path: Path, *,
     `out_path`. Returns True on success; raises on a hard API error."""
     instance: dict = {"prompt": prompt}
     if image_path and Path(image_path).exists():
-        inline = _inline(Path(image_path))["inline_data"]
-        instance["image"] = {"inlineData": {"mimeType": inline["mime_type"],
-                                            "data": inline["data"]}}
+        # Veo wants the seed image as bytesBase64Encoded (NOT inlineData).
+        b64 = base64.b64encode(Path(image_path).read_bytes()).decode()
+        instance["image"] = {"bytesBase64Encoded": b64, "mimeType": "image/png"}
     body = {"instances": [instance],
             "parameters": {"aspectRatio": aspect_ratio, "resolution": resolution}}
     op = _post(f"{BASE}/v1beta/models/{model}:predictLongRunning", body, 120)

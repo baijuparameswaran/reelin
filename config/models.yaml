@@ -36,8 +36,10 @@ image:
   enabled: true
   backend: gemini
   model: gemini-3.1-flash-image   # gemini-3-pro-image / gemini-2.5-flash-image
-  aspect_ratio: "3:4"             # portrait character representation
-  image_size: "2K"                # 512 | 1K | 2K | 4K
+  # NB: the v1 :generateContent image endpoint rejects extra generationConfig
+  # fields (responseModalities / responseFormat / imageConfig), so the request is
+  # kept minimal (matches the official text-to-image sample). Steer framing /
+  # aspect via the prompt text instead.
   timeout_seconds: 300
   # --- diffusers / auto1111 backends (only used if backend above is changed) ---
   host: http://localhost:7860     # auto1111 backend
