@@ -20,70 +20,64 @@ hitl:
   enabled: true
   timeout_seconds: 120
 
-# Text-to-image rendering for the casting stage (a basic portrait per character,
-# saved to output/casting/<name>.png and linked from casting details). This is a
-# different modality than Ollama, so it uses its own backend — see reel/imagegen.py.
-#   backend: diffusers  -> in-process via diffusers+torch (optional deps:
-#                          `pip install -r requirements-image.txt`).
-#                          CPU-friendly model: stabilityai/sd-turbo (few-step).
-#                          GPU hosts: swap model to SDXL or FLUX.1-schnell.
-#            auto1111    -> HTTP to a running AUTOMATIC1111 / SD.cpp server (host).
-#            none        -> disable.
-# Best-effort: if the backend isn't available the run continues and just keeps
-# each character's text visual_prompt.
+# Character image generation — ONE image per character (the character
+# representation), saved to output/casting/<name>.png and used as the identity
+# reference for the video stage. Different modality than Ollama — see
+# reel/imagegen.py. Default backend is the Gemini API (needs an API key in env:
+# GEMINIAPIKEY, or GEMINI_API_KEY/GOOGLE_API_KEY).
+#   backend: gemini    -> Google Gemini image API (no extra Python deps).
+#                         docs: ai.google.dev/gemini-api/docs/image-generation
+#            diffusers -> in-process via diffusers+torch (requirements-image.txt).
+#            auto1111  -> HTTP to an AUTOMATIC1111 / SD.cpp server (host).
+#            none      -> disable.
+# Best-effort: if the backend isn't available (e.g. no API key) the run continues
+# and just keeps each character's text visual_prompt.
 image:
   enabled: true
-  backend: diffusers
-  model: stabilityai/sd-turbo
-  host: http://localhost:7860     # used by the auto1111 backend
+  backend: gemini
+  model: gemini-3.1-flash-image   # gemini-3-pro-image / gemini-2.5-flash-image
+  aspect_ratio: "3:4"             # portrait character representation
+  image_size: "2K"                # 512 | 1K | 2K | 4K
+  timeout_seconds: 300
+  # --- diffusers / auto1111 backends (only used if backend above is changed) ---
+  host: http://localhost:7860     # auto1111 backend
   steps: 4
-  size: 512                       # fallback square dim if width/height unset
-  width: 512                      # portrait aspect: taller than wide so the
-  height: 768                     # full head-to-toe figure fits the frame
-  guidance_scale: 0.0             # sd-turbo wants 0.0; raise (~7) for SDXL/SD1.5
-  # Framing left open (don't force full-length): img2img inherits the stock
-  # reference's framing, which is usually a portrait/headshot — fighting that with
-  # "full body" language just degrades the render.
+  size: 512
+  width: 512
+  height: 768
+  guidance_scale: 0.0
   negative_prompt: "lowres, deformed, extra limbs, text, watermark, blurry"
   style_suffix: "character portrait, plain neutral background, soft studio light"
-  timeout_seconds: 600
-  # Identity consistency: the actor anchors the look, and each character render is
-  # generated FROM the actor image (img2img) so it stays the same person.
-  img2img_strength: 0.55          # character transform from the actor image (lower = closer to the actor)
-  # Free CC stock photo as the actor's real-face reference (see reel/stock.py).
-  stock:
-    enabled: true
-    provider: openverse           # CC image search, no API key
-    use_as: reference             # 'reference' = generate the actor FROM the photo (grounded, AI-made,
-                                  #   license-clean); 'direct' = use the stock photo itself as the actor
-    license_filter: modification  # only photos we may modify (the actor/character renders are derivatives)
-    reference_strength: 0.4       # actor render from the stock reference (lower = closer to the real face)
-    candidates: 8                 # stock results to try before giving up
+  img2img_strength: 0.55
 
 # Scene rendering — image-to-video (the next phase, after storyboard + screenplay).
-# Renders each storyboard frame to a still then animates it into a clip, chaining
-# clips for continuity within a scene. Heavy modality: the efficient open models
-# (LTX-Video/LTX-2, Wan 2.x, CogVideoX-I2V) all want a GPU (~12 GB+ VRAM), so this
-# is a no-op on this CPU-only host — see reel/i2v.py. Best-effort: with no backend
-# the run still keeps each frame's still + prompt.
-#   backend: diffusers -> in-process on a GPU host. Model-agnostic via pipeline_class:
-#                         LTXImageToVideoPipeline / WanImageToVideoPipeline / etc.
-#            comfyui|http-> POST keyframe image(s)+prompt to a remote GPU endpoint
-#                         (recommended from here: render stills locally, motion remote).
-#            none       -> disabled (default on this host).
+# Renders each storyboard frame as a clip, seeded by the in-frame character's
+# representation image (the reference from the image stage) and chained for
+# continuity within a scene. Default backend is the Gemini Veo API (image-to-
+# video; needs the same API key in env). Best-effort: with no key/backend the run
+# continues without clips.
+#   backend: gemini|veo -> Google Veo via the Gemini API (no extra Python deps).
+#                          docs: ai.google.dev/gemini-api/docs/video
+#            diffusers   -> in-process on a GPU host (LTX/Wan via pipeline_class).
+#            comfyui|http-> POST keyframe image(s)+prompt to a remote GPU endpoint.
+#            none        -> disabled.
 video:
-  enabled: true                   # attempt scene rendering once storyboard+screenplay are done
-  backend: none                   # none on this CPU host; set diffusers/comfyui on a GPU host
-  model: Lightricks/LTX-Video     # diffusers backend (GPU); swap to a Wan I2V checkpoint, etc.
-  pipeline_class: LTXImageToVideoPipeline   # model-agnostic diffusers class
-  host: http://localhost:8188     # comfyui / remote endpoint base URL
-  endpoint: ""                    # full POST URL (defaults to <host>/i2v)
+  enabled: true
+  backend: gemini
+  model: veo-3.1-fast-generate-preview   # veo-3.1-generate-preview / -lite-generate-preview
+  aspect_ratio: "16:9"
+  resolution: "720p"
+  continuity: true                # chain each clip from the previous frame's last image
+  style_suffix: "cinematic, smooth natural motion, consistent character"
+  poll_seconds: 10
+  timeout_seconds: 1200
+  # --- diffusers / comfyui backends (only used if backend above is changed) ---
+  pipeline_class: LTXImageToVideoPipeline
+  host: http://localhost:8188
+  endpoint: ""
   seconds: 4
   fps: 24
   size: 768
-  continuity: true                # chain each clip from the previous frame's last image
-  style_suffix: "cinematic, smooth natural motion, consistent character"
-  timeout_seconds: 1200
 
 # Runtime behavior.
 runtime:

@@ -13,8 +13,8 @@ Agents, in dependency order:
   casting        — locks each character's visual form as two layers: the actor
                    (own role-independent look) and the character (that actor aged/
                    costumed into the role), image-ready; humans, animals, groups
-                   alike. The pipeline can render these (stock photo → actor →
-                   character) via reel.imagegen + reel.stock.
+                   alike. The pipeline renders the *character* to an image (Gemini,
+                   via reel.imagegen) as the identity reference for the video stage.
   scenes         — numbered, filmable scene list
   soundscape     — background score / sound design per scene
   visuals        — art production (color, lighting, props) per scene

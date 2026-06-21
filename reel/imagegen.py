@@ -27,6 +27,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from . import gemini
 from . import llm
 
 
@@ -54,6 +55,8 @@ def available() -> bool:
     if not enabled():
         return False
     b = backend()
+    if b == "gemini":
+        return gemini.available()
     if b == "diffusers":
         return all(importlib.util.find_spec(m) for m in ("torch", "diffusers"))
     if b == "auto1111":
@@ -68,6 +71,8 @@ def available() -> bool:
 
 def unavailable_hint() -> str:
     b = backend()
+    if b == "gemini":
+        return gemini.key_hint()
     if b == "diffusers":
         return ("diffusers/torch not installed — run "
                 "`pip install -r requirements-image.txt` to enable casting renders")
@@ -185,6 +190,18 @@ def _gen_auto1111(prompt: str, out_path: Path) -> bool:
     return True
 
 
+def _gen_gemini(prompt: str, out_path: Path, refs: list | None = None) -> bool:
+    c = _cfg()
+    return gemini.generate_image(
+        prompt, Path(out_path),
+        model=c.get("model", "gemini-3.1-flash-image"),
+        refs=refs,
+        aspect_ratio=c.get("aspect_ratio"),
+        image_size=c.get("image_size"),
+        timeout=c.get("timeout_seconds", 300) or 300,
+    )
+
+
 # ── public entry point ───────────────────────────────────────────────────────
 
 def generate_image(prompt: str, out_path: Path) -> bool:
@@ -193,6 +210,8 @@ def generate_image(prompt: str, out_path: Path) -> bool:
         return False
     try:
         b = backend()
+        if b == "gemini":
+            return _gen_gemini(prompt, out_path)
         if b == "diffusers":
             return _gen_diffusers(prompt, out_path)
         if b == "auto1111":
@@ -207,21 +226,25 @@ def generate_image(prompt: str, out_path: Path) -> bool:
 
 
 def can_img2img() -> bool:
-    """True if a from-photo (identity-preserving) render is possible right now."""
-    return enabled() and backend() == "diffusers" and available()
+    """True if a reference-conditioned render is possible right now (diffusers
+    img2img, or Gemini reference images)."""
+    return enabled() and available() and backend() in ("diffusers", "gemini")
 
 
 def generate_image_from(init_path: Path, prompt: str, out_path: Path,
                         strength: float | None = None) -> bool:
-    """Render `prompt` starting from the photo at `init_path` (identity anchor).
-    `strength` (lower = closer to the reference) overrides the configured default.
-    Falls back to a plain text->image render if img2img isn't possible. Best-effort."""
+    """Render `prompt` conditioned on the image at `init_path` (identity anchor) —
+    diffusers img2img, or a Gemini reference image. `strength` (diffusers only;
+    lower = closer to the reference). Falls back to a plain text->image render if
+    reference conditioning isn't possible. Best-effort."""
     if not prompt:
         return False
     if not (init_path and Path(init_path).exists() and can_img2img()):
         return generate_image(prompt, out_path)
     try:
+        if backend() == "gemini":
+            return _gen_gemini(prompt, out_path, refs=[init_path])
         return _gen_diffusers_img2img(prompt, Path(init_path), out_path, strength)
     except Exception as e:  # noqa: BLE001 — stay non-fatal, degrade to text->image
-        _log(f"      img2img failed ({type(e).__name__}: {e}); falling back to text->image")
+        _log(f"      reference render failed ({type(e).__name__}: {e}); falling back to text->image")
         return generate_image(prompt, out_path)

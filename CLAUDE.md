@@ -24,15 +24,20 @@ and a Fountain draft. A human-in-the-loop gate reviews/iterates each stage.
 - `reel/` — package. `llm.py` (model-agnostic client + profile/fallback +
   `with_feedback`), `pipeline.py` (orchestration + per-stage gates), `gate.py`
   (human-in-the-loop review gate), `imagegen.py` (pluggable text-to-image +
-  img2img backend for casting renders), `stock.py` (free CC stock-photo lookup
-  via Openverse — actor identity references), `i2v.py` (pluggable image-to-video
-  backend — render storyboard frames into clips on a GPU/remote host), `cli.py`
+  img2img backend; default backend **Gemini**), `gemini.py` (Google Gemini REST
+  helpers — image generation + Veo video, stdlib urllib, API key from env), `i2v.py`
+  (pluggable image-to-video backend — default **Gemini Veo**; also diffusers
+  LTX/Wan or a remote endpoint), `stock.py` (free CC stock-photo lookup —
+  *currently unused*: kept for the diffusers actor-reference workflow), `cli.py`
   (entry), `manifest.py` (model list for the updater), `agents/` (ingest,
   structure, characters, casting, scenes, soundscape, visuals, cinematography,
   storyboard, screenplay).
 - `config/models.yaml` — model profiles, per-agent profile map, `hitl` gate
-  knobs, `image` block (backend/model/stock/img2img), `video` block
-  (image-to-video backend/model/continuity), runtime knobs.
+  knobs, `image` block (backend/model — default Gemini), `video` block
+  (image-to-video backend/model — default Gemini Veo), runtime knobs.
+- **Gemini API key** (for image/video): read from env `GEMINIAPIKEY` (or
+  `GEMINI_API_KEY`/`GOOGLE_API_KEY`). Without it, image/video stages no-op
+  gracefully with a hint; the text pipeline is unaffected.
 - `scripts/` — `update-models.sh` (cadence), `install-cron.sh`, `model-updates.log`.
 - `samples/` — bundled test story. `output/` — generated artifacts (gitignored).
 - Entry points via `Makefile`: `setup`, `demo`, `run`, `models`, `update`,
@@ -83,30 +88,26 @@ original 7.6 GB cap. 4 GB swap. 872 GB disk.
   `run_group()` in `pipeline.py` is the checkpoint-aware stage runner (load → or
   compute concurrently → gate → save); stop raises `PipelineStopped`, caught in
   `cli.main`. A stage interrupted mid-flight is never half-saved — it re-runs.
-- **Casting = actor vs. character (identity-consistent renders):** casting models
-  two layers like a real production — an **actor** (a performer's own, role-
-  independent features) and the **character** (that actor aged/costumed/styled
-  into the role). Image rendering follows a chain: a free **CC stock photo**
-  (Openverse, no API key) is sourced as the actor's real-face *reference* →
-  `imagegen` **generates the actor** from it (img2img, grounded but AI-made and
-  license-clean) → **generates the character** from the actor image (img2img) so
-  it stays the same person. `config/models.yaml` `image` block tunes this
-  (`backend`, `stock.use_as: reference|direct`, `img2img_strength`,
-  `stock.reference_strength`, `license_filter`); CC attribution is captured to
-  `output/casting/CREDITS.json`. All best-effort: no torch/network/stock hit →
-  it degrades (text→image, or skip) without breaking the run. Framing is left
-  open (not forced full-length) so img2img can follow the reference photo.
-- **Scene rendering = image-to-video (next phase, scaffolded):** after storyboard
-  + screenplay, the pipeline renders each storyboard frame to a still (reusing
-  `imagegen`, identity-anchored on the casting images) then animates each still
-  into a clip via `i2v` (`pipeline._render_scene_frames` → `output/video/`).
-  **Continuity:** clips chain from the previous frame's last image *within* a
-  scene; scene boundaries reset the chain (a cut). Model-agnostic, best-effort
-  pluggable backend (`video` block): `diffusers` (LTX-Video/Wan/CogVideoX on a
-  **GPU** host, via `pipeline_class`), `comfyui`/`http` (offload to a remote GPU
-  endpoint — render stills locally, motion remote), or `none`. **Video needs a
-  GPU (~12 GB+ VRAM) — a no-op on this CPU host**; stills still render where
-  `imagegen` is available, clips are skipped with a hint.
+- **Casting still keeps the actor vs. character data model** (an `actor` block —
+  the performer's own, role-independent features — and a `character` block — that
+  actor aged/costumed/styled into the role), but **image generation is limited to
+  the character representation only**: exactly one image per character
+  (`output/casting/<name>.png`) from `character.visual_prompt`, via the **Gemini
+  image API** (`imagegen` backend `gemini`, default model `gemini-3.1-flash-image`).
+  This character image is the **identity reference** handed to the video stage. No
+  actor render, no stock photo (the old Openverse → actor → character img2img chain
+  is retired; `stock.py` is dormant). Best-effort: no API key → skip with a hint.
+- **Scene rendering = image-to-video (next phase):** after storyboard + screenplay,
+  the pipeline renders each storyboard frame as a **video clip** via `i2v`
+  (`pipeline._render_scene_frames` → `output/video/`), default backend **Gemini
+  Veo** (`veo-3.1-fast-generate-preview`). The **character representation image**
+  is the reference: the first frame of a scene is seeded from the in-frame
+  character's `output/casting/<name>.png` (identity); later frames are seeded from
+  the previous frame's last image for **continuity within a scene** (scene boundary
+  = reset = cut). No intermediate stills — image generation is reserved for the
+  character. Pluggable (`video` block): `gemini`/`veo`, `diffusers` (LTX/Wan on a
+  GPU via `pipeline_class`), `comfyui`/`http`, or `none`. Best-effort: no API key
+  → skip with a hint.
 - On this host prefer `--profile fast` (one model, no 5 GB reloads between agents).
 - Update cadence lives in `scripts/update-models.sh` (pull + version-check +
   smoke test + log), wired weekly/monthly via `make install-cron`, runnable
@@ -121,14 +122,16 @@ original 7.6 GB cap. 4 GB swap. 872 GB disk.
   storyboard, and a human-in-the-loop gate** — these are import/unit smoke-tested
   but **not yet run fully end-to-end** (a complete run is slow on this host). Next
   full run should confirm all 10 stages produce clean JSON + coherent output.
-- **Image rendering (casting) — built & verified.** `imagegen.py` + `stock.py`
-  render per-character casting images: free CC stock photo (Openverse) as the
-  actor reference → AI actor (img2img) → character (img2img), identity carried
-  through. torch/diffusers are installed in `.venv`; verified on the sample
-  casting (`output/casting/*.png` + `CREDITS.json`), ~50 s/image on CPU with
-  sd-turbo. Not yet exercised inside a full 10-stage run, only the casting stage
-  in isolation. **Storyboard-frame rendering is still pending** (each storyboard
-  moment has an `image_prompt`, but only casting images render today).
+- **Image + video now use the Gemini API.** Image generation is **limited to the
+  character representation** — one `output/casting/<name>.png` per character via
+  the Gemini image API (`gemini-3.1-flash-image`) — and that image is the identity
+  reference for video. Scene rendering uses **Veo** (`reel/i2v.py` backend
+  `gemini`) image-to-video, seeded by the character image and chained for
+  continuity. Shared REST helper: `reel/gemini.py` (stdlib urllib, key from env
+  `GEMINIAPIKEY`). **Code wired + imports verified; NOT yet run live** — needs
+  `GEMINIAPIKEY` exported (currently unset), so both stages no-op with a hint.
+  The earlier local sd-turbo + Openverse-stock + img2img chain is retired
+  (`stock.py` now dormant; diffusers/auto1111/LTX backends remain as options).
 - **Blocked-on (external):** **Ollama 0.6.5 is too old to pull Qwen3** — needs
   upgrade. Requires user's sudo: run in your terminal →
   `curl -fsSL https://ollama.com/install.sh | sh`, then `make update` pulls Qwen3.
@@ -137,22 +140,34 @@ original 7.6 GB cap. 4 GB swap. 872 GB disk.
   end-to-end pass to validate the expanded pipeline. *(WSL RAM already raised to
   ~12 GB — done.)* The storyboard stage timed out on a run at the old 300 s
   inactivity window (slow time-to-first-token); raised default to 600 s.
-- **Scene rendering (image-to-video) — scaffolded, GPU-gated.** `i2v.py` +
-  `pipeline._render_scene_frames` render each storyboard frame to a still
-  (reusing `imagegen`) then animate it into a clip with continuity → `output/
-  video/`. Pluggable backends (diffusers LTX/Wan on GPU, comfyui/http remote,
-  none). On this CPU host it renders the per-frame **stills** (verified: 2-frame
-  scene with continuity carried forward) and **skips clips** (no GPU). Recommended
-  efficient open models: **LTX-Video/LTX-2** (fastest, ~12-16 GB) or **Wan 2.x**
-  (Apache-2.0, first+last-frame). Needs a GPU/remote endpoint to actually produce
-  video. Clip assembly per scene (ffmpeg concat) is not done yet.
-- **Next up (next iterations):** wire a real GPU/remote `video.backend` and do a
-  full scene-render pass (stills→clips→per-scene concat); input chunking for long
+- **Scene rendering (image-to-video) via Veo — wired, not run live.** `i2v.py`
+  (backend `gemini`) + `pipeline._render_scene_frames` render each storyboard
+  frame as a clip seeded by the character image, chained for continuity. Needs
+  `GEMINIAPIKEY`. Per-scene clip assembly (ffmpeg concat) is not done yet. The
+  diffusers LTX/Wan and comfyui/http backends remain as GPU/remote alternatives.
+- **Next up (next iterations):** export `GEMINIAPIKEY` and do a full live run
+  (character images → Veo scene clips → per-scene concat); input chunking for long
   texts (currently truncated at ~12k chars); draft *all* scenes not just first N;
   richer ingest (PDF/EPUB/.fdx); then the *next phase* (shot list / edit / sound
   mix / final cut).
 
 ## Session log
+- 2026-06-21 — **Switched image + video to the Google Gemini API; image gen
+  limited to the character representation.** Added `reel/gemini.py` (stdlib-urllib
+  REST helpers per ai.google.dev docs: image `…:generateContent` with
+  `responseModalities:[TEXT,IMAGE]`; Veo `…:predictLongRunning` + operation poll +
+  video download; key from env `GEMINIAPIKEY`/`GEMINI_API_KEY`/`GOOGLE_API_KEY`).
+  `imagegen` gained a `gemini` backend (default; model `gemini-3.1-flash-image`);
+  `i2v` gained a `gemini`/Veo backend (default; `veo-3.1-fast-generate-preview`).
+  Simplified `pipeline._render_casting_images` to render **only the character
+  image** per character (dropped the stock→actor→character img2img chain; removed
+  the stock import + actor-query helpers; `stock.py` now dormant).
+  `_render_scene_frames` is now video-only: each storyboard frame → a Veo clip
+  seeded by the in-frame character's representation image, chained for continuity
+  (no intermediate stills). Config `image`/`video` blocks default to gemini/veo.
+  Imports verified; both stages degrade gracefully with a clear hint when no API
+  key is set (it currently isn't). **Not yet run live** (needs `GEMINIAPIKEY`).
+  *(Uncommitted at time of writing.)*
 - 2026-06-20 (later) — **Scene rendering scaffold (image-to-video).** Added
   `i2v.py`: pluggable, model-agnostic image-to-video backend (`diffusers` for
   LTX-Video/Wan/CogVideoX on a GPU via `pipeline_class`; `comfyui`/`http` to
