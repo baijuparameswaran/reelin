@@ -34,7 +34,8 @@ hitl:
 # and just keeps each character's text visual_prompt.
 image:
   enabled: true
-  backend: gemini
+  backend: auto                   # auto = Gemini if GEMINIAPIKEY set, else open_backend
+  open_backend: diffusers         # the OPEN fallback when no Gemini key (diffusers|auto1111|none)
   model: gemini-3.1-flash-image   # gemini-3-pro-image / gemini-2.5-flash-image
   # NB: the v1 :generateContent image endpoint rejects extra generationConfig
   # fields (responseModalities / responseFormat / imageConfig), so the request is
@@ -65,7 +66,8 @@ image:
 #            none        -> disabled.
 video:
   enabled: true
-  backend: gemini
+  backend: auto                   # auto = Gemini Veo if GEMINIAPIKEY set, else open_backend
+  open_backend: diffusers         # the OPEN fallback when no Gemini key (diffusers|comfyui|none)
   model: veo-3.1-fast-generate-preview   # veo-3.1-generate-preview / -lite-generate-preview
   aspect_ratio: "16:9"
   resolution: "720p"
@@ -131,3 +133,4 @@ agent_profiles:
   cinematography:  fast
   storyboard:      quality
   screenplay:      quality
+  fidelity:        quality

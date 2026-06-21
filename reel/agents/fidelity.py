@@ -8,14 +8,14 @@ screenplay (and the shot list/storyboard) back against the **original story** an
 reports how faithfully the adaptation preserves it — covered beats, omissions,
 inventions, contradictions, and an overall verdict.
 
-Model-agnostic: prefers the Gemini text API when a key is available (fast, strong
-reasoning), otherwise falls back to the local LLM via `reel.llm`.
+Runs on the OPEN models (Ollama) via `reel.models.text`, per the project policy
+that Gemini is used only for image + video generation.
 """
 from __future__ import annotations
 
 import json
 
-from .. import gemini, llm
+from .. import models
 
 SYSTEM = (
     "You are a script editor and story-continuity checker. You compare an "
@@ -63,20 +63,15 @@ def check_alignment(
     storyboard: dict | None = None,
     profile: str | None = None,
     feedback: str | None = None,
-    prefer_gemini: bool = True,
 ) -> dict:
-    """Compare the screenplay/storyboard to the original story; return the report."""
+    """Compare the screenplay/storyboard to the original story; return the report.
+    Runs on the open models (Ollama) via the unified model abstraction."""
     prompt = PROMPT.format(
         story=(story_text or "")[:8000],
         screenplay=(screenplay_fountain or "")[:12000],
         storyboard=json.dumps(storyboard or {}, ensure_ascii=False)[:6000],
     )
-    prompt = llm.with_feedback(prompt, feedback)
-    if prefer_gemini and gemini.available():
-        raw = gemini.generate_text(prompt, system=SYSTEM,
-                                   model=llm.config().get("gemini_text_model", "gemini-2.5-flash"))
-        raw = raw.strip()
-    else:
-        raw = llm.generate(prompt, profile=profile or llm.agent_profile("structure"),
-                           system=SYSTEM, as_json=True)
-    return llm.safe_json(raw)
+    raw = models.text(prompt, system=SYSTEM,
+                      profile=profile or models.agent_profile("fidelity"),
+                      as_json=True, feedback=feedback)
+    return models.safe_json(raw)
