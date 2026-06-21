@@ -123,6 +123,10 @@ For each storyboard frame it generates a short **clip** (image-to-video):
 - **later frames** are seeded from the **previous frame's last image**, so motion
   is continuous within the scene. A scene boundary resets the chain (a cut).
 
+`--max-scenes` (the demo uses 2) limits how many **scenes** are drafted and
+rendered — but **every shot within each rendered scene is always rendered** (the
+storyboard emits one frame per camera shot; the renderer never caps shots).
+
 Output lands in `output/video/scene_NN/frame_MM.mp4` plus a `manifest.json`.
 
 ```yaml

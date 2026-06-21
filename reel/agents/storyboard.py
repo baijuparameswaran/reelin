@@ -62,7 +62,9 @@ the set and props, color and light, and the camera framing (shot/angle/lens)",
 }}
 
 Rules:
-- Derive frames from the camera shots when present; otherwise pick the key beats
+- Produce ONE frame per camera shot — cover EVERY shot in the coverage, in order
+  (do not merge or drop shots); only when a scene has no camera coverage, pick the
+  key beats as frames
 - Every image must integrate cast appearance + art design + camera framing
 - emotional_attribute and audio_attribute are required on every frame
 - Keep names consistent with the cast
