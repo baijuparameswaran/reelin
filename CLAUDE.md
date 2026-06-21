@@ -79,6 +79,17 @@ original 7.6 GB cap. 4 GB swap. 872 GB disk.
   `open_backend` (diffusers/comfyui). `reel.models` is the front door
   (`text()`/`generate_image()`/`generate_clip()` + `providers()`); `reel.llm` is
   the open-text engine behind `models.text`. No Gemini text path exists by design.
+- **Story-fidelity at every stage (`reel/agents/fidelity.py`, open model):** after
+  each stage is approved, `fidelity.check_stage` compares that stage's output to the
+  **original story text** and returns a per-stage report (`fidelity_score` 0-100,
+  drift / omissions / contradictions, verdict) → `output/fidelity/<stage>.json`.
+  `fidelity.score_pipeline` aggregates them into one **pipeline score**:
+  `overall = round(0.5·mean + 0.5·min)` of the per-stage scores (the weakest stage
+  caps consistency); verdict bands >=85 aligned / 70-84 mostly aligned / 50-69
+  drifting / <50 misaligned → `output/fidelity.json` + `project.json`. Runs on the
+  OPEN models (never Gemini); toggle with config `fidelity.per_stage`. Best-effort
+  (a failed check never blocks the pipeline). `check_alignment` remains for a
+  holistic screenplay+storyboard-vs-story check.
 - **Per-stage abstraction + independent invocation (`reel/stages.py`):** every
   stage of processing is declared once as a `Stage` (name, the input artifacts it
   depends on, the agent it runs, what it `produces`). The registry lets the
@@ -175,6 +186,19 @@ original 7.6 GB cap. 4 GB swap. 872 GB disk.
   mix / final cut).
 
 ## Session log
+- 2026-06-21 (later 4) — **Per-stage story-fidelity + defined score.** Generalized
+  the fidelity agent: `check_stage(stage, artifact, story_text)` checks any one
+  stage's output against the original story (open model) → per-stage report
+  (`fidelity_score` 0-100, drift/omissions/contradictions, verdict).
+  `score_pipeline` defines the aggregate **pipeline score = round(0.5·mean +
+  0.5·min)** of per-stage scores (verdict bands 85/70/50). Wired into
+  `pipeline.run`: after each approved stage, `check_consistency` writes
+  `output/fidelity/<stage>.json` and logs `verdict score/100`; assemble aggregates
+  to `output/fidelity.json` + `project.json`. Config `fidelity.per_stage` (default
+  true). Verified live on the open model: `check_stage("structure")` → 85 "mostly
+  aligned" with concrete drift vs the lighthouse story; `score_pipeline` math
+  checked. No Gemini (policy). Per-stage checks add one open-model call per stage
+  (slow on CPU) — toggle off for speed.
 - 2026-06-21 (later 3) — **Per-stage abstraction + independent invocation.** Added
   `reel/stages.py`: each stage declared as a `Stage` (name, input artifacts,
   run callable, `produces`) in a `REGISTRY`; `run_stage(name, …)` invokes any one

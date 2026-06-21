@@ -165,6 +165,37 @@ revision note). Routing follows the provider policy — text stages on the open
 models, image/video stages on Gemini when a key is set (see below). `reel.pipeline.run`
 still runs the full pipeline with the HITL gate, concurrency, and `--resume`.
 
+## Story fidelity (consistency scoring)
+
+As the pipeline transforms the source through structure → … → screenplay →
+storyboard, drift can creep in. After **each** stage is approved, a fidelity agent
+compares that stage's output back to the **original story** and scores it — so you
+can see exactly where (and how badly) an adaptation diverges.
+
+- Per stage → `output/fidelity/<stage>.json`: a `fidelity_score` (0-100) plus
+  `drift` / `omissions` / `contradictions` and a `verdict`.
+- Aggregate → `output/fidelity.json` (and `project.json`): the **pipeline score**
+
+  ```
+  overall = round( 0.5 · mean(stage scores)  +  0.5 · min(stage scores) )
+  ```
+
+  i.e. half the average quality, half the weakest stage (one badly drifting stage
+  caps story consistency). Verdict bands: **≥85 aligned · 70–84 mostly aligned ·
+  50–69 drifting · <50 misaligned**.
+
+The fidelity agent runs on the **open models** (never Gemini, per the provider
+policy). It's best-effort (a failed check never blocks the run) and adds one
+model call per stage — toggle it off for faster runs:
+
+```yaml
+fidelity:
+  per_stage: true      # false to skip the per-stage consistency checks
+```
+
+You can also run it standalone: `python -m reel.cli stage fidelity` (a holistic
+screenplay+storyboard-vs-story check).
+
 ## Quick start
 
 ```bash
