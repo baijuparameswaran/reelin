@@ -104,6 +104,12 @@ def _casting_images(ctx, *, out, **_):
     P._render_casting_images(casting, Path(out))
     return casting
 
+def _moodboard_tiles(ctx, *, out, **_):
+    from . import pipeline as P                      # lazy: avoid import cycle
+    mb = ctx["moodboard"]
+    P._render_moodboard_tiles(mb, Path(out))
+    return mb
+
 def _scene_render(ctx, *, out, **_):
     from . import pipeline as P
     return P._render_scene_frames(ctx["storyboard"], ctx["casting"], Path(out))
@@ -136,6 +142,8 @@ STAGES: list[Stage] = [
           optional=("characters", "screenplay"), desc="per-moment storyboard"),
     Stage("casting_images", ["casting"], _casting_images, produces="casting",
           desc="render character representation images (image provider)"),
+    Stage("moodboard_tiles", ["moodboard"], _moodboard_tiles, produces="moodboard",
+          desc="render moodboard reference tiles to images (image provider)"),
     Stage("scene_render", ["storyboard", "casting"], _scene_render, produces="scene_render",
           desc="render scenes frame-by-frame to video (video provider)"),
     Stage("fidelity", ["source", "screenplay_fountain"], _fidelity,

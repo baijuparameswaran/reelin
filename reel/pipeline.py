@@ -234,6 +234,41 @@ def _render_casting_images(casting: dict, out: Path) -> int:
     return n
 
 
+def _render_moodboard_tiles(moodboard: dict, out: Path) -> int:
+    """Render the moodboard's reference `tiles` into images via the image backend
+    (Gemini when a key is configured, else the open image backend) → output/
+    moodboard/tile_NN.png. The moodboard's palette + lighting are appended to each
+    tile prompt so the board coheres as one look. Stores the path on each tile.
+    Idempotent (skips files on disk). Best-effort — never blocks the run.
+
+    NB policy: only the moodboard *tiles* (images) use the image provider; the
+    moodboard spec itself is generated on the open text models like every stage."""
+    tiles = moodboard.get("tiles") or []
+    if not tiles:
+        return 0
+    if not imagegen.available():
+        _log(f"      moodboard tiles skipped — {imagegen.unavailable_hint()}")
+        return 0
+    mdir = out / "moodboard"
+    mdir.mkdir(exist_ok=True)
+    look = ", ".join(x for x in [
+        ", ".join(str(c) for c in (moodboard.get("palette") or [])[:4]),
+        moodboard.get("lighting_mood", ""),
+    ] if x)
+    n = 0
+    for i, tile in enumerate(tiles, start=1):
+        prompt = tile.get("image_prompt") or tile.get("label")
+        if not prompt:
+            continue
+        if look:
+            prompt = f"{prompt}. Moodboard look: {look}."
+        img = mdir / f"tile_{i:02d}.png"
+        if img.exists() or imagegen.generate_image(prompt, img):
+            tile["image_path"] = str(img.relative_to(out))
+            n += 1
+    return n
+
+
 def _frame_char_anchor(frame: dict, cast_index: dict, out: Path) -> Path | None:
     """The casting image of the first in-frame character — the identity anchor for
     a frame's still (so the right actor shows up, consistently)."""
@@ -641,6 +676,12 @@ def run(
         ])
         moodboard = g["moodboard"]
         _log(f"      moodboard: {moodboard.get('overall_aesthetic', '?')[:80]}")
+        # Render the moodboard's reference tiles via the image backend (Gemini when
+        # keyed). The spec stays on open models; only the tiles become images.
+        if imagegen.enabled() and moodboard.get("tiles"):
+            if _render_moodboard_tiles(moodboard, out):
+                save("moodboard", moodboard)
+                _log(f"      moodboard tiles → {out}/moodboard/")
         apply_direction()   # fold the moodboard into the steering for every stage below
 
     # ── 3–4/10  scenes + casting (scenes←structure, casting←characters) ───────

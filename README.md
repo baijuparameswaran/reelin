@@ -309,6 +309,14 @@ cinematography, screenplay, storyboard — by folding its directive into the sam
 creative-direction hook the genre uses, so they all compose toward one look
 (no per-agent changes; the graders stay neutral). Runs on the **open models**.
 
+Its reference **tiles** (capped to `--max-scenes`) are **rendered to images** via
+the image backend — **Gemini when a key is configured**, else the open image
+backend — into `output/moodboard/tile_NN.png` (the board's palette + lighting are
+appended to each tile prompt so they cohere). Per policy only the *tiles* (images)
+use the image provider; the moodboard spec itself stays on the open text models.
+Best-effort: with no image backend the run keeps the tile prompts. Render them
+standalone with `python -m reel.cli stage moodboard_tiles`.
+
 ```yaml
 moodboard:
   enabled: true      # false to skip the stage
