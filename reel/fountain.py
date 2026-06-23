@@ -106,6 +106,33 @@ def _resolve_character(text: str, scene_dialogue: list, casting: dict, out) -> t
     return (entries[0][0], str(Path(out) / entries[0][1])) if entries and entries[0][1] else (None, None)
 
 
+def _camera(scene_no: int, frame_idx: int, n_frames: int, cinematography: dict) -> tuple[str, str]:
+    """(camera clause, shot-type label) for a frame from the DP's shot list.
+
+    cinematography.json declares an ordered list of `shots` per scene (type/angle/
+    movement/lens/framing). There are usually fewer planned shots than action beats,
+    so map each frame to a shot by proportional index — every beat inherits the
+    nearest planned shot's camera grammar. ("", "") when the scene has no entry."""
+    sc = next((s for s in cinematography.get("scenes", []) if s.get("scene_number") == scene_no), {})
+    shots = sc.get("shots", []) if isinstance(sc, dict) else []
+    if not shots:
+        return "", ""
+    sh = shots[min(int(frame_idx * len(shots) / max(n_frames, 1)), len(shots) - 1)]
+    parts = []
+    if sh.get("type"):
+        parts.append(f"{sh['type']} shot")
+    if sh.get("angle"):
+        parts.append(f"{sh['angle']} angle")
+    if sh.get("movement"):
+        parts.append(str(sh["movement"]))
+    if sh.get("lens"):
+        parts.append(f"{sh['lens']} lens")
+    clause = ("Camera: " + ", ".join(parts) + ".") if parts else ""
+    if sh.get("framing"):
+        clause += f" Framing: {sh['framing']}."
+    return clause, (sh.get("type") or "")
+
+
 def _av(scene_no: int, soundscape: dict, visuals: dict) -> tuple[str, str]:
     """(visual style, audio) strings for a scene from the design docs."""
     snd = next((s for s in soundscape.get("soundscapes", []) if s.get("scene_number") == scene_no), {})
@@ -119,16 +146,22 @@ def _av(scene_no: int, soundscape: dict, visuals: dict) -> tuple[str, str]:
 
 
 def to_storyboard(scenes: list[dict], soundscape: dict, visuals: dict, casting: dict,
-                  out, max_scenes: int = 2, max_shots: int | None = None) -> dict:
+                  out, max_scenes: int | None = None, max_shots: int | None = None,
+                  cinematography: dict | None = None) -> dict:
     """Build a render-ready storyboard: scenes → shots, each a Veo prompt fusing the
-    screenplay action + dialogue with the scene's visual style and audio.
+    screenplay action + dialogue with the scene's **camera grammar** (cinematography:
+    shot type/angle/movement/lens/framing), visual style and audio.
 
-    `max_scenes` limits how many SCENES are built (the demo uses 2-3). `max_shots`
-    is None by default → **every** action beat in a scene becomes a shot (all shots
-    rendered); set it only if you deliberately want to cap shots per scene.
+    No artificial caps by default — the **story** sets the extent: every scene the
+    screenplay drafted, and every action beat within it, becomes a shot. `max_scenes`/
+    `max_shots` stay available as optional overrides (None = all). `cinematography`
+    is cinematography.json; its per-scene shot list drives the camera language.
     """
-    board = {"storyboard_style": "photoreal cinematic, screenplay-driven, native audio", "storyboard": []}
-    for idx, sc in enumerate(scenes[:max_scenes], start=1):
+    cine = cinematography or {}
+    style = "photoreal cinematic, screenplay-driven, camera-directed, native audio"
+    board = {"storyboard_style": style, "storyboard": []}
+    chosen = scenes[:max_scenes] if max_scenes else scenes
+    for idx, sc in enumerate(chosen, start=1):
         visual, audio = _av(idx, soundscape, visuals)
         beats = (_sample(sc["action"], max_shots) if max_shots else sc["action"]) or [sc["slugline"]]
         frames = []
@@ -140,14 +173,17 @@ def to_storyboard(scenes: list[dict], soundscape: dict, visuals: dict, casting: 
                 if who and who.split()[0].lower() in spk.lower():
                     said = f' {spk} says: "{line}".'
                     break
+            camera, shot_type = _camera(idx, fnum - 1, len(beats), cine)
             prompt = (f"{sc['slugline']}. {action}"
                       f"{said}"
-                      f" Cinematic, natural motion."
+                      + (f" {camera}" if camera else "")
+                      + " Cinematic, natural motion."
                       + (f" Visual style: {visual}." if visual else "")
                       + (f" Audio: {audio}." if audio else ""))
             frames.append({
                 "frame": fnum,
                 "moment": action[:80],
+                "shot_type": shot_type,
                 "characters_in_frame": [who] if who else [],
                 "image_prompt": prompt,
             })

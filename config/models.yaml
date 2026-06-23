@@ -94,6 +94,30 @@ fidelity:
   per_stage: true   # set false to skip per-stage checks (faster runs)
   min_score: 70     # at the review gate, scores below this flag a re-iterate hint
 
+# Genre alignment. The genre agent fixes ONE genre for the run — from `value`
+# (an explicit genre name), or inferred from the storyline when `value: auto`
+# (the CLI `--genre NAME` overrides both). It then (a) STEERS every creative
+# stage: its conventions are injected into each stage's prompt; and (b) ENFORCES
+# alignment: after each stage the agent scores how on-genre the output is, shown
+# at the review gate (below `min_score` flags a re-iterate hint). Runs on the OPEN
+# models, per policy — never Gemini. Per-stage reports land in output/genre/; the
+# resolved spec in output/genre.json; the aggregate in output/genre_alignment.json.
+genre:
+  value: auto       # explicit genre name, or "auto" to infer from the storyline
+  steer: true       # inject genre conventions into each creative stage's prompt
+  enforce: true     # per-stage genre-alignment checks (set false for faster runs)
+  min_score: 70     # at the review gate, scores below this flag a re-iterate hint
+
+# Moodboard. After structure, the moodboard agent fixes the film-wide visual-tone
+# bible (color story, lighting mood, textures, atmosphere, influences) from the
+# story + genre, and folds it into the steering direction so every creative stage
+# below — casting, soundscape, visuals, cinematography, screenplay, storyboard —
+# composes toward one look. Reviewed at its own gate; saved to output/moodboard.json.
+# Runs on the OPEN models, per policy — never Gemini.
+moodboard:
+  enabled: true     # set false to skip the moodboard stage entirely
+  steer: true       # fold the moodboard into the creative-direction steering
+
 # Runtime behavior.
 runtime:
   # How many agents may call models concurrently. On CPU-only / low-RAM hosts a
@@ -145,3 +169,5 @@ agent_profiles:
   storyboard:      quality
   screenplay:      quality
   fidelity:        quality
+  genre:           quality
+  moodboard:       quality

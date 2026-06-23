@@ -47,6 +47,25 @@ def host() -> str:
     return config().get("ollama_host", "http://localhost:11434")
 
 
+# ── creative direction (e.g. genre steering) ─────────────────────────────────
+# A process-wide directive prepended to the system message of *steered* generations
+# so every creative stage leans the same way (set by the pipeline from the genre
+# agent). Grader/checker calls (fidelity, genre enforcement) go through
+# `models.text`, which disables steering, so they stay neutral.
+_DIRECTION: str | None = None
+
+
+def set_direction(text: str | None) -> None:
+    """Set (or clear with None) the global creative direction injected into steered
+    generations."""
+    global _DIRECTION
+    _DIRECTION = (text or "").strip() or None
+
+
+def direction() -> str | None:
+    return _DIRECTION
+
+
 def request_timeout() -> float | None:
     """Inactivity timeout (seconds) for a single socket read during generation.
 
@@ -137,18 +156,25 @@ def generate(
     profile: str = "fast",
     system: str | None = None,
     as_json: bool = False,
+    steer: bool = True,
 ) -> str:
     """Single-turn generation against a local model selected by `profile`.
 
     Streams the response so the socket timeout acts as an inactivity window
     (max gap between tokens) rather than a cap on total generation time — slow
     CPU inference can take as long as it needs, as long as tokens keep arriving.
+
+    When a global creative `direction()` is set (e.g. genre) and `steer` is True,
+    it is prepended to the system message so the stage leans that way. Pass
+    `steer=False` for neutral calls (graders/checkers) — `models.text` does.
     """
     p = get_profile(profile)
     model = resolve_model(p)
+    steer_text = direction() if steer else None
+    sys_msg = "\n\n".join(s for s in (steer_text, system) if s) or None
     messages: list[dict] = []
-    if system:
-        messages.append({"role": "system", "content": system})
+    if sys_msg:
+        messages.append({"role": "system", "content": sys_msg})
     messages.append({"role": "user", "content": prompt})
 
     payload = {

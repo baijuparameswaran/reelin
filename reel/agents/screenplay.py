@@ -32,7 +32,7 @@ Tone: {tone}
 
 Characters in this scene (use these EXACT names as speakers):
 {characters}
-
+{casting_block}
 Scene to write:
 - Slugline: {slugline}
 - What happens: {summary}
@@ -140,6 +140,28 @@ def _scene_cinema_block(scene_number: int, lookup: dict[int, dict]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _casting_lookup(casting: dict) -> dict[str, dict]:
+    return {c.get("name", ""): c for c in (casting or {}).get("casting", [])}
+
+
+def _scene_casting_brief(names: list[str], lookup: dict[str, dict]) -> str:
+    """The LOCKED on-screen look per character (casting), so action descriptions
+    stay true to what's actually rendered for video."""
+    if not lookup:
+        return ""
+    rows = ["Locked on-screen look (keep action true to this):"]
+    for name in names or lookup.keys():
+        c = lookup.get(name)
+        if not c:
+            continue
+        ch = c.get("character", c)
+        bits = [ch.get("physical_form", ""), ch.get("age", ""), ch.get("costume", ch.get("wardrobe", "")),
+                ch.get("defining_feature", ""), ch.get("mannerism", "")]
+        detail = "; ".join(b for b in bits if b)
+        rows.append(f"- {name}: {detail}" if detail else f"- {name}")
+    return ("\n".join(rows) + "\n") if len(rows) > 1 else ""
+
+
 def _char_lookup(characters: dict) -> dict[str, dict]:
     return {c.get("name", ""): c for c in characters.get("characters", [])}
 
@@ -169,6 +191,7 @@ def draft_screenplay(
     soundscape: dict | None = None,
     visuals: dict | None = None,
     cinematography: dict | None = None,
+    casting: dict | None = None,
     max_scenes: int = 3,
     profile: str | None = None,
     feedback: str | None = None,
@@ -177,6 +200,7 @@ def draft_screenplay(
     logline = structure.get("logline", source["title"])
     tone = structure.get("tone", "")
     char_lookup = _char_lookup(characters)
+    casting_lookup = _casting_lookup(casting or {})
     sound_lookup = _soundscape_lookup(soundscape or {})
     vis_lookup = _visuals_lookup(visuals or {})
     cinema_lookup = _cinema_lookup(cinematography or {})
@@ -196,6 +220,7 @@ def draft_screenplay(
             logline=logline,
             tone=tone,
             characters=_scene_char_brief(scene_chars, char_lookup),
+            casting_block=_scene_casting_brief(scene_chars, casting_lookup),
             slugline=slugline,
             scene_number=scene_num if scene_num is not None else 0,
             summary=scene.get("summary", ""),

@@ -10,35 +10,60 @@ developed in slow, steady iterations.
 ## Iteration 1 — "screenplay material"
 
 The agent set converts raw text into screenplay material plus a full creative
-design (cast look, score, art, camera, and a per-moment storyboard):
+design (cast look, score, art, camera, and a per-moment storyboard).
+
+**The creative flow** — each box is an agent; same-column branches run
+concurrently where the host allows it (structure ‖ characters; scenes ‖ casting;
+soundscape ‖ visuals ‖ cinematography):
 
 ```
-ingest ─┬─▶ structure ──┐
-        └─▶ characters ──┴─▶ scenes ─┬─▶ soundscape ─────┐
-                        └─▶ casting   ├─▶ visuals ─────────┼─▶ storyboard ─┐
-                                      └─▶ cinematography ──┘               ├─▶ assemble
-                                                          screenplay ──────┘
+ingest ─┬─▶ structure ─▶ moodboard ─┬─▶ scenes ─┬─▶ soundscape ─────┐
+        └─▶ characters ──────────────┘           ├─▶ visuals ─────────┼─▶ storyboard ─┐
+                              casting ◀ characters└─▶ cinematography ──┘               ├─▶ render ─▶ assemble
+                                          screenplay ◀─ scenes + all designs ──────────┘
 ```
 
-Branches on the same column run concurrently where the host allows it
-(structure ‖ characters; scenes ‖ casting; soundscape ‖ visuals ‖ cinematography).
+**Cross-cutting agents** — set once, they shape and police *every* stage above
+(not per-scene; they thread through the whole run):
+
+```
+genre     ─ chosen up front (--genre │ config │ auto-from-story)  ─┐  steer every creative
+moodboard ─ visual-tone bible, fixed right after structure        ─┴─▶ stage's prompt (one
+                                                                       shared "direction")
+genre     ─ scores each stage's genre alignment  ┐  shown at the review gate; below
+fidelity  ─ scores each stage vs the original story ┴─ threshold → re-iterate hint
+```
+
+Genre and the moodboard **steer** generation (their conventions are injected into
+each creative stage), while genre and fidelity **grade** each stage — and the
+graders judge neutrally, unaffected by the steering. See
+[Genre alignment](#genre-alignment), [Moodboard](#moodboard-film-wide-visual-tone-bible),
+and [Story fidelity](#story-fidelity-consistency-scoring).
 
 | Agent | Role | Output |
 |-------|------|--------|
 | **ingest** | — | normalized text + metadata (`title`, word count) |
+| **genre** | showrunner | one genre for the film (explicit / config / inferred from the story) + its conventions; **steers every stage** and **scores per-stage alignment** |
 | **structure** | story analyst | logline, genre, themes, tone, three-act beat sheet |
+| **moodboard** | production designer | film-wide visual-tone bible (color story, palette, lighting mood, textures, atmosphere, influences, render-ready tiles); **steers all downstream stages** |
 | **characters** | script analyst | every character — humans **and** animals/birds/creatures — each defined individually (kind, role, want, arc, appearance, voice, mannerisms); undetailed background masses collapse to one `group` |
 | **casting** | casting director | two layers per character — an **actor** (own role-independent look) and the **character** (that actor aged/costumed into the role); the **character** is rendered to an image via Gemini (see [Character image generation](#character-image-generation-gemini)) and used as the video identity reference |
 | **scenes** | screenwriter | numbered scene list (sluglines, summaries, purpose) |
 | **soundscape** | sound / score | per-scene ambient bed, audio cues, silence, emotional function |
 | **visuals** | art production | per-scene color palette, lighting, filters, key props |
 | **cinematography** | director of photography | per-scene shot list (type, angle, movement, lens, framing) |
-| **storyboard** | storyboard artist | a visual image per moment, fusing cast + art + camera + score, each with emotional & audio attributes |
-| **screenplay** | screenwriter | Fountain-formatted draft pages (informed by every design above) |
+| **screenplay** | screenwriter | Fountain draft — numbered shots, attributed dialogue, V.O. — carrying the **locked on-screen look** (casting) plus every design above |
+| **storyboard** | storyboard artist | a frame per moment that **fuses the full detail** of every artifact (locked cast look + voice, complete art/sound/camera design, and the screenplay's own shots + dialogue) into a self-contained, render-ready prompt — this is what **drives video generation** |
 
-Artifacts land in `output/`: `structure.json`, `characters.json`, `casting.json`,
-`scenes.json`, `soundscape.json`, `visuals.json`, `cinematography.json`,
-`storyboard.json`, `screenplay.fountain`, per-character files under
+> The screenplay and storyboard are the two artifacts that **drive video
+> generation**, so they deliberately capture the full detail of every upstream
+> stage — nothing is dropped on the way to the renderer.
+
+Artifacts land in `output/`: `genre.json`, `moodboard.json`, `structure.json`,
+`characters.json`, `casting.json`, `scenes.json`, `soundscape.json`,
+`visuals.json`, `cinematography.json`, `storyboard.json`, `screenplay.fountain`,
+per-stage genre/fidelity reports under `output/genre/` and `output/fidelity/`
+(aggregates `genre_alignment.json` + `fidelity.json`), per-character files under
 `output/characters/`, character images under `output/casting/`, scene clips under
 `output/video/`, and a combined `project.json`.
 
@@ -123,11 +148,20 @@ For each storyboard frame it generates a short **clip** (image-to-video):
 - **later frames** are seeded from the **previous frame's last image**, so motion
   is continuous within the scene. A scene boundary resets the chain (a cut).
 
-`--max-scenes` (the demo uses 2) limits how many **scenes** are drafted and
+`--max-scenes` (default 1, prototype) limits how many **scenes** are drafted and
 rendered — but **every shot within each rendered scene is always rendered** (the
 storyboard emits one frame per camera shot; the renderer never caps shots).
 
 Output lands in `output/video/scene_NN/frame_MM.mp4` plus a `manifest.json`.
+
+You can also render **straight from the finished artifacts**, without re-running
+any LLM stage — it builds a camera-directed plan from `screenplay.fountain` +
+`cinematography.json` (every drafted scene, every shot, no caps) and renders it:
+
+```bash
+python -m reel.cli render            # render the whole drafted story to video
+python -m reel.cli render --fresh    # re-render (old clips backed up to output/video_prev)
+```
 
 ```yaml
 video:
@@ -139,10 +173,11 @@ video:
   continuity: true            # chain each clip from the previous frame's last image
 ```
 
-Veo uses the same `GEMINIAPIKEY`. Best-effort: with no key the run finishes
-without clips. The `diffusers` (LTX-Video/Wan via `pipeline_class`) and
-`comfyui`/`http` backends remain as self-hosted/remote-GPU alternatives — see
-`reel/i2v.py`.
+Veo uses the same `GEMINIAPIKEY`. The preview tier rate-limits aggressively, so the
+client **retries with backoff** on HTTP 429/5xx *and* on transient Veo operation
+errors (internal/unavailable). Best-effort: with no key the run finishes without
+clips. The `diffusers` (LTX-Video/Wan via `pipeline_class`) and `comfyui`/`http`
+backends remain as self-hosted/remote-GPU alternatives — see `reel/i2v.py`.
 
 ## Running individual stages
 
@@ -212,6 +247,69 @@ fidelity:
 
 You can also run it standalone: `python -m reel.cli stage fidelity` (a holistic
 screenplay+storyboard-vs-story check).
+
+## Genre alignment
+
+The pipeline fixes **one genre** for the run and keeps every department true to it.
+The genre comes from (in priority order): the `--genre` flag, the config
+`genre.value`, or — when that is `auto` — it is **inferred from the storyline**
+itself before any creative stage runs.
+
+```bash
+python -m reel.cli story.txt --genre "noir thriller"   # force a genre
+python -m reel.cli story.txt                           # config / auto-detect
+```
+
+The genre agent then does two things:
+
+- **Steers** every creative stage — its conventions (tone, visual/sound language,
+  pacing, dialogue) are injected into each stage's prompt so generation leans into
+  the genre. (Steering is invisible to the graders: fidelity and the genre check
+  itself judge neutrally.)
+- **Enforces** alignment — after each stage, it scores how on-genre the output is,
+  shown in the review gate next to the fidelity score:
+
+  ```
+    genre [noir thriller]: MOSTLY ON-GENRE  74/100
+    story fidelity: ALIGNED  88/100
+  ```
+
+  Below `genre.min_score` (default 70) flags a re-iterate hint, exactly like
+  fidelity. Per-stage reports → `output/genre/<stage>.json`; the resolved spec →
+  `output/genre.json`; the aggregate (same `0.5·mean + 0.5·min` score) →
+  `output/genre_alignment.json` and `project.json`.
+
+Runs on the **open models** (never Gemini, per policy). Best-effort and
+toggleable:
+
+```yaml
+genre:
+  value: auto        # explicit genre name, or "auto" to infer from the storyline
+  steer: true        # inject genre conventions into each creative stage's prompt
+  enforce: true      # per-stage genre-alignment checks
+  min_score: 70
+```
+
+## Moodboard (film-wide visual-tone bible)
+
+Right after structure, a **moodboard** agent fixes the film's single aesthetic —
+color story, palette, lighting mood, textures, atmosphere, visual influences,
+wardrobe and sound mood, plus render-ready reference `tiles`. It sits one level
+*above* the per-scene `visuals` stage: like genre, it's one cross-cutting
+reference, reviewed at its own gate and saved to `output/moodboard.json`.
+
+It then **steers every downstream creative stage** — casting, soundscape, visuals,
+cinematography, screenplay, storyboard — by folding its directive into the same
+creative-direction hook the genre uses, so they all compose toward one look
+(no per-agent changes; the graders stay neutral). Runs on the **open models**.
+
+```yaml
+moodboard:
+  enabled: true      # false to skip the stage
+  steer: true        # fold the moodboard into the creative-direction steering
+```
+
+Standalone: `python -m reel.cli stage moodboard`.
 
 ## Quick start
 

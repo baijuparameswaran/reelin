@@ -32,11 +32,15 @@ config = llm.config
 # ── TEXT — always open models (Ollama) ───────────────────────────────────────
 
 def text(prompt: str, *, system: str | None = None, profile: str | None = None,
-         as_json: bool = False, feedback: str | None = None) -> str:
-    """Open-model text generation. The one entry point for every text stage."""
+         as_json: bool = False, feedback: str | None = None, steer: bool = False) -> str:
+    """Open-model text generation. The one entry point for every text stage.
+
+    `steer` is False here by design: the checker/grader agents that call this
+    module (fidelity, genre enforcement) must judge neutrally, not under the genre
+    direction. Creative agents call `llm.generate` directly, which steers."""
     if feedback:
         prompt = llm.with_feedback(prompt, feedback)
-    return llm.generate(prompt, profile=profile, system=system, as_json=as_json)
+    return llm.generate(prompt, profile=profile, system=system, as_json=as_json, steer=steer)
 
 
 def text_json(prompt: str, **kw) -> dict:

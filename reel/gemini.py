@@ -51,17 +51,47 @@ def _headers(json_body: bool = True) -> dict:
     return h
 
 
-def _post(url: str, body: dict, timeout: float) -> dict:
-    req = urllib.request.Request(url, data=json.dumps(body).encode(),
-                                 method="POST", headers=_headers())
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode())
+def _retry_after(err: "urllib.error.HTTPError", attempt: int, base: float) -> float:
+    """Backoff seconds — honor a Retry-After header if present, else exponential."""
+    hdr = err.headers.get("Retry-After") if getattr(err, "headers", None) else None
+    if hdr:
+        try:
+            return float(hdr)
+        except ValueError:
+            pass
+    return min(base * (2 ** attempt), 60.0)
 
 
-def _get_bytes(url: str, timeout: float) -> tuple[bytes, str]:
-    req = urllib.request.Request(url, headers=_headers(json_body=False))
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read(), resp.headers.get("Content-Type", "")
+def _post(url: str, body: dict, timeout: float, *, retries: int = 5, backoff: float = 5.0) -> dict:
+    """POST JSON, retrying on transient errors (429 rate limit, 5xx). The Veo
+    preview tier rate-limits aggressively, so a batch of submissions needs spacing."""
+    data = json.dumps(body).encode()
+    for attempt in range(retries + 1):
+        req = urllib.request.Request(url, data=data, method="POST", headers=_headers())
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode())
+        except urllib.error.HTTPError as e:
+            if e.code in (429, 500, 503) and attempt < retries:
+                wait = _retry_after(e, attempt, backoff)
+                print(f"[reel] Gemini {e.code} — backing off {wait:.0f}s "
+                      f"(attempt {attempt + 1}/{retries})", flush=True)
+                time.sleep(wait)
+                continue
+            raise
+
+
+def _get_bytes(url: str, timeout: float, *, retries: int = 5, backoff: float = 5.0) -> tuple[bytes, str]:
+    for attempt in range(retries + 1):
+        req = urllib.request.Request(url, headers=_headers(json_body=False))
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.read(), resp.headers.get("Content-Type", "")
+        except urllib.error.HTTPError as e:
+            if e.code in (429, 500, 503) and attempt < retries:
+                time.sleep(_retry_after(e, attempt, backoff))
+                continue
+            raise
 
 
 def _inline(image_path: Path) -> dict:
@@ -109,16 +139,26 @@ def generate_image(prompt: str, out_path: Path, *,
 
 # ── Veo video generation ─────────────────────────────────────────────────────
 
+# Veo operation-error codes worth a retry — the op submits fine (HTTP 200) but the
+# generation itself fails transiently. 13=INTERNAL, 14=UNAVAILABLE, 8=RESOURCE_EXHAUSTED.
+_VEO_TRANSIENT = {8, 13, 14}
+
+
 def generate_video(prompt: str, out_path: Path, *,
                    image_path: Path | None = None,
                    model: str = "veo-3.1-fast-generate-preview",
                    aspect_ratio: str = "16:9",
                    resolution: str = "720p",
                    poll_seconds: float = 10,
-                   timeout_seconds: float = 1200) -> bool:
+                   timeout_seconds: float = 1200,
+                   op_retries: int = 3) -> bool:
     """Generate a clip for `prompt`, optionally seeded by `image_path` (image-to-
     video). Submits a long-running op, polls until done, downloads the mp4 to
-    `out_path`. Returns True on success; raises on a hard API error."""
+    `out_path`. Returns True on success; raises on a hard API error.
+
+    Transient *operation* failures (Veo internal/unavailable errors that surface
+    only after the op completes) are retried up to `op_retries` times with backoff —
+    distinct from the HTTP-level 429/5xx that `_post`/`_get_bytes` retry."""
     instance: dict = {"prompt": prompt}
     if image_path and Path(image_path).exists():
         # Veo wants the seed image as bytesBase64Encoded (NOT inlineData).
@@ -126,6 +166,24 @@ def generate_video(prompt: str, out_path: Path, *,
         instance["image"] = {"bytesBase64Encoded": b64, "mimeType": "image/png"}
     body = {"instances": [instance],
             "parameters": {"aspectRatio": aspect_ratio, "resolution": resolution}}
+    for attempt in range(op_retries + 1):
+        try:
+            return _run_veo_op(model, body, out_path, poll_seconds, timeout_seconds)
+        except RuntimeError as e:
+            if getattr(e, "veo_code", None) in _VEO_TRANSIENT and attempt < op_retries:
+                wait = min(15.0 * (2 ** attempt), 90.0)
+                print(f"[reel] Veo transient error (code {e.veo_code}) — resubmitting in "
+                      f"{wait:.0f}s (attempt {attempt + 1}/{op_retries})", flush=True)
+                time.sleep(wait)
+                continue
+            raise
+    return False  # unreachable
+
+
+def _run_veo_op(model: str, body: dict, out_path: Path,
+                poll_seconds: float, timeout_seconds: float) -> bool:
+    """One Veo submit + poll + download cycle. Raises RuntimeError (with `.veo_code`
+    on operation failures) so the caller can retry transients."""
     op = _post(f"{BASE}/v1beta/models/{model}:predictLongRunning", body, 120)
     name = op.get("name")
     if not name:
@@ -137,7 +195,9 @@ def generate_video(prompt: str, out_path: Path, *,
         status = json.loads(raw.decode())
         if status.get("done"):
             if status.get("error"):
-                raise RuntimeError(f"Veo failed: {status['error']}")
+                err = RuntimeError(f"Veo failed: {status['error']}")
+                err.veo_code = status["error"].get("code") if isinstance(status["error"], dict) else None
+                raise err
             samples = (status.get("response", {})
                        .get("generateVideoResponse", {})
                        .get("generatedSamples", []))
