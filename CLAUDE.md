@@ -122,7 +122,12 @@ original 7.6 GB cap. 4 GB swap. 872 GB disk.
   to fidelity; aggregate `genre.score_pipeline` → `output/genre/<stage>.json` +
   `output/genre_alignment.json`. `_gated` now returns `(result, fidelity_report,
   genre_report)`. Config `genre.{value,steer,enforce,min_score}` +
-  `moodboard.{enabled,steer}`. Per policy these run on OPEN models (never Gemini).
+  `moodboard.{enabled,steer}`. Per policy these run on OPEN models (never Gemini) —
+  **except** the moodboard's reference `tiles` are **rendered to images** via the
+  image backend (`_render_moodboard_tiles` → Gemini when keyed, else open image
+  backend) into `output/moodboard/tile_NN.png`, palette+lighting appended for
+  coherence; that's image generation (policy-consistent), the moodboard *spec* still
+  comes from the open text models. Standalone stage `moodboard_tiles`.
 - **Storyboard + screenplay capture FULL detail (they drive video):** the screenplay
   agent now also gets **casting** (a "locked on-screen look" block per character, so
   action stays true to what's rendered); the storyboard agent's `_scene_bundles`
