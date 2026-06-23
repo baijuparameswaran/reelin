@@ -152,15 +152,21 @@ For each storyboard frame it generates a short **clip** (image-to-video):
 rendered — but **every shot within each rendered scene is always rendered** (the
 storyboard emits one frame per camera shot; the renderer never caps shots).
 
-Output lands in `output/video/scene_NN/frame_MM.mp4` plus a `manifest.json`.
+Output lands in `output/video/scene_NN/frame_MM.mp4` plus a `manifest.json`. After
+the clips are rendered they are **stitched into a single movie** —
+`output/video/movie.mp4` — concatenated in scene-then-frame order with ffmpeg
+(fast lossless stream-copy, falling back to a re-encode if the clips don't match;
+Veo's native audio is preserved). The `movie` path is recorded in `manifest.json`.
 
 You can also render **straight from the finished artifacts**, without re-running
 any LLM stage — it builds a camera-directed plan from `screenplay.fountain` +
-`cinematography.json` (every drafted scene, every shot, no caps) and renders it:
+`cinematography.json` (every drafted scene, every shot, no caps), renders it, and
+stitches the movie:
 
 ```bash
-python -m reel.cli render            # render the whole drafted story to video
+python -m reel.cli render            # render the whole drafted story to video + movie.mp4
 python -m reel.cli render --fresh    # re-render (old clips backed up to output/video_prev)
+python -m reel.cli stitch            # just re-stitch existing clips → movie.mp4 (no render)
 ```
 
 ```yaml

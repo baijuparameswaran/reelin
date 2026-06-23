@@ -309,8 +309,36 @@ def _render_scene_frames(storyboard: dict, casting: dict, out: Path,
             })
         manifest["scenes"].append({"scene_number": snum, "frames": frames_out})
 
+    # Stitch every rendered clip (scene order, then frame order) into one movie.
+    movie = _assemble_movie(manifest, out)
+    if movie:
+        manifest["movie"] = str(movie.relative_to(out))
+
     (vdir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2))
     return manifest
+
+
+def _clips_in_order(manifest: dict, out: Path) -> list[Path]:
+    """All rendered clip paths in playback order: by scene_number, then frame."""
+    clips: list[Path] = []
+    for scene in sorted(manifest.get("scenes", []),
+                        key=lambda s: (s.get("scene_number") if isinstance(s.get("scene_number"), int) else 1e9)):
+        for fr in sorted(scene.get("frames", []),
+                         key=lambda f: (f.get("frame") if isinstance(f.get("frame"), int) else 1e9)):
+            rel = fr.get("clip")
+            if rel and (out / rel).exists():
+                clips.append(out / rel)
+    return clips
+
+
+def _assemble_movie(manifest: dict, out: Path) -> Path | None:
+    """Concatenate the manifest's clips into output/video/movie.mp4. Best-effort —
+    returns the movie path on success, else None (a failure never breaks the run)."""
+    clips = _clips_in_order(manifest, out)
+    if not clips:
+        return None
+    movie = out / "video" / "movie.mp4"
+    return movie if i2v.stitch(clips, movie) else None
 
 
 def _checkpoint_load(out: Path, name: str) -> dict | None:

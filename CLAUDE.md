@@ -216,8 +216,11 @@ original 7.6 GB cap. 4 GB swap. 872 GB disk.
   `output/casting/<name>.png` per character); Veo (`reel/i2v.py`) renders scene
   clips seeded by that image, chained for continuity. **Veo preview tier rate-limits
   hard (429)** and occasionally returns transient operation errors (code 13) — the
-  `gemini.py` client now **retries both with backoff**. Per-scene clip assembly
-  (ffmpeg concat) still TODO.
+  `gemini.py` client now **retries both with backoff**. After rendering, clips are
+  **stitched into one `output/video/movie.mp4`** (`i2v.stitch` → ffmpeg concat
+  demuxer, stream-copy with re-encode fallback; native audio preserved) — done
+  automatically at the end of `_render_scene_frames`, or on demand via
+  `python -m reel.cli stitch`.
 - **Genre + moodboard steer the whole run; both grade-able stages stay neutral.**
   Verified the steering exemption (creative `llm.generate` gets the direction;
   `models.text` graders don't). Moodboard `tiles` are capped to `max_scenes`.
