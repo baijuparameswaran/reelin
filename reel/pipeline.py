@@ -49,6 +49,8 @@ from .agents.cinematography import plan_cinematography
 from .agents.storyboard import plan_storyboard
 from .agents.screenplay import draft_screenplay, to_fountain
 from .agents import fidelity
+from .agents import genre as genre_agent
+from .agents.moodboard import design_moodboard, guidance as moodboard_guidance
 from .gate import Gate
 from . import llm
 from . import imagegen
@@ -127,6 +129,21 @@ def _summarize_visuals(r: dict) -> str:
         vf = s.get("visual_filter", "")
         if vf:
             rows.append(f"      filter: {vf}")
+    return "\n".join(rows)
+
+
+def _summarize_moodboard(r: dict) -> str:
+    rows = [f"Aesthetic: {r.get('overall_aesthetic', '?')[:90]}"]
+    if r.get("palette"):
+        rows.append(f"  Palette: {', '.join(str(c) for c in r['palette'][:6])}")
+    if r.get("lighting_mood"):
+        rows.append(f"  Light: {r['lighting_mood'][:80]}")
+    if r.get("atmosphere_keywords"):
+        rows.append(f"  Atmosphere: {', '.join(str(a) for a in r['atmosphere_keywords'][:6])}")
+    if r.get("visual_influences"):
+        rows.append(f"  Influences: {', '.join(str(i) for i in r['visual_influences'][:4])}")
+    if r.get("tiles"):
+        rows.append(f"  Tiles: {len(r['tiles'])} reference frame(s)")
     return "\n".join(rows)
 
 
@@ -237,7 +254,7 @@ def _render_scene_frames(storyboard: dict, casting: dict, out: Path,
     intermediate stills are generated — image generation is reserved for the
     character representation. Best-effort, idempotent. Returns a render manifest.
 
-    `max_scenes` caps how many SCENES are rendered (e.g. the demo renders 2-3) —
+    `max_scenes` caps how many SCENES are rendered (default 1, prototype) —
     but EVERY shot/frame within each rendered scene is always rendered.
     """
     if not i2v.enabled():
@@ -329,6 +346,22 @@ def _format_fidelity(rep: dict | None, min_score: int = 70) -> str:
     return line
 
 
+def _format_genre(rep: dict | None, min_score: int = 70) -> str:
+    """One-block genre-alignment readout for the review gate."""
+    if not rep:
+        return ""
+    score = rep.get("genre_score")
+    verdict = (rep.get("verdict") or "?").upper()
+    name = rep.get("genre") or "?"
+    line = f"\n  genre [{name}]: {verdict}  {score}/100"
+    if isinstance(score, (int, float)) and score < min_score:
+        line += f"  ⚠ below {min_score} — consider re-running with feedback"
+    issues = (rep.get("off_genre") or []) + (rep.get("missing_conventions") or [])
+    if issues:
+        line += "\n    off-genre: " + "; ".join(str(i) for i in issues[:2])
+    return line
+
+
 def _gated(
     gate: Gate,
     name: str,
@@ -337,23 +370,27 @@ def _gated(
     rerun_fn: Callable,            # rerun_fn(feedback: str) -> dict
     fidelity_fn: Callable | None = None,  # fidelity_fn(result) -> report | None
     min_score: int = 70,
-) -> tuple[dict, dict | None]:
+    genre_fn: Callable | None = None,     # genre_fn(result) -> report | None
+    genre_min: int = 70,
+) -> tuple[dict, dict | None, dict | None]:
     """Show gate for initial_result; re-run with feedback until approved. The
-    story-fidelity score (if `fidelity_fn` is given) is computed for each candidate
-    result and shown at the gate so the operator can decide whether to re-iterate.
+    story-fidelity and genre-alignment scores (if their fns are given) are computed
+    for each candidate result and shown at the gate so the operator can decide
+    whether to re-iterate.
 
-    Returns (approved_result, its_fidelity_report). Raises PipelineStopped on pause.
+    Returns (approved_result, fidelity_report, genre_report). Raises PipelineStopped.
     """
     result = initial_result
     while True:
         report = fidelity_fn(result) if fidelity_fn else None
+        grep = genre_fn(result) if genre_fn else None
 
-        def _summary(r, _rep=report):
-            return summarize_fn(r) + _format_fidelity(_rep, min_score)
+        def _summary(r, _rep=report, _g=grep):
+            return summarize_fn(r) + _format_fidelity(_rep, min_score) + _format_genre(_g, genre_min)
 
         decision = gate.review(name, result, _summary)
         if decision.approved:
-            return result, report
+            return result, report, grep
         if decision.stop:
             raise PipelineStopped(name)
         _log(f"      re-running {name} with feedback …")
@@ -365,9 +402,10 @@ def _gated(
 def run(
     input_path: str,
     out_dir: str = "output",
-    max_scenes: int = 3,
+    max_scenes: int = 1,
     profile_override: str | None = None,
     resume: bool = False,
+    genre: str | None = None,
 ) -> dict:
     """Run the full screenplay-material phase and write artifacts to `out_dir`.
 
@@ -419,6 +457,55 @@ def run(
         _log(f"      fidelity[{name}]: {rep.get('verdict', '?')} "
              f"{rep.get('fidelity_score', '?')}/100")
 
+    # Genre: fix ONE genre for the run (CLI > config value > auto from storyline),
+    # STEER every creative stage with it (llm.set_direction), and ENFORCE alignment
+    # per stage (open model, per policy). Toggle via config `genre.{steer,enforce}`.
+    gen_cfg = llm.config().get("genre", {})
+    gen_enforce = bool(gen_cfg.get("enforce", True))
+    gen_steer = bool(gen_cfg.get("steer", True))
+    gen_min = int(gen_cfg.get("min_score", 70))
+    genre_spec: dict = {}
+    gen_reports: dict = {}
+
+    # Moodboard: the film-wide visual-tone bible, fixed after structure and folded
+    # into the steering direction so every creative stage composes toward one look.
+    mood_cfg = llm.config().get("moodboard", {})
+    mood_on = bool(mood_cfg.get("enabled", True))
+    mood_steer = bool(mood_cfg.get("steer", True))
+    moodboard: dict = {}
+    _GENRE_STAGES = _FID_STAGES | {"moodboard"}
+
+    def apply_direction() -> None:
+        """Compose the shared creative direction from genre + moodboard and steer
+        all subsequent creative generations with it (graders stay neutral)."""
+        parts = []
+        if gen_steer and genre_spec:
+            parts.append(genre_agent.guidance(genre_spec))
+        if mood_steer and moodboard:
+            parts.append(moodboard_guidance(moodboard))
+        llm.set_direction("\n\n".join(p for p in parts if p) or None)
+
+    def genre_report(name: str, result: dict) -> dict | None:
+        """Score this stage's output against the chosen genre (open model, neutral).
+        Computed BEFORE the gate so the operator sees alignment when deciding."""
+        if not gen_enforce or not genre_spec or name not in _GENRE_STAGES:
+            return None
+        try:
+            return genre_agent.enforce_stage(name, result, genre_spec)
+        except Exception as e:
+            _log(f"      genre[{name}] skipped ({type(e).__name__})")
+            return None
+
+    def save_genre(name: str, rep: dict | None) -> None:
+        if rep is None:
+            return
+        gen_reports[name] = rep
+        gdir = out / "genre"
+        gdir.mkdir(exist_ok=True)
+        _write_json(gdir / f"{name}.json", rep)
+        _log(f"      genre[{name}]: {rep.get('verdict', '?')} "
+             f"{rep.get('genre_score', '?')}/100")
+
     def run_group(label_num: str, label: str, specs: list[dict]) -> dict:
         """Compute/gate/save a set of stages, loading any already-checkpointed.
 
@@ -456,10 +543,14 @@ def run(
                 continue
             fid_fn = (lambda res, _nm=nm: fidelity_report(_nm, res)) \
                 if (fid_on and nm in _FID_STAGES) else None
-            r, rep = _gated(gate, nm, raws[nm], s["summarize"], s["rerun"],
-                            fidelity_fn=fid_fn, min_score=fid_min)
+            gen_fn = (lambda res, _nm=nm: genre_report(_nm, res)) \
+                if (gen_enforce and nm in _GENRE_STAGES) else None
+            r, rep, grep = _gated(gate, nm, raws[nm], s["summarize"], s["rerun"],
+                                  fidelity_fn=fid_fn, min_score=fid_min,
+                                  genre_fn=gen_fn, genre_min=gen_min)
             save(nm, r)
             save_fidelity(nm, rep)
+            save_genre(nm, grep)
             results[nm] = r
         return results
 
@@ -475,6 +566,26 @@ def run(
     save("source", source)   # checkpoint so source-dependent stages can run standalone
     _log(f"      '{source['title']}' — {source['word_count']} words")
 
+    # Fix the genre once (CLI > config value > auto from storyline) before any
+    # creative stage, then steer every stage with it. Reuses a checkpoint on resume.
+    genre_loaded = _checkpoint_load(out, "genre") if resume else None
+    if genre_loaded:
+        genre_spec = genre_loaded
+        _log(f"      genre: {genre_spec.get('genre', '?')} (resumed)")
+    elif gen_steer or gen_enforce:
+        try:
+            genre_spec = genre_agent.resolve_genre(
+                source.get("text", ""), explicit=genre,
+                config_value=gen_cfg.get("value"), profile=profile_override)
+            save("genre", genre_spec)
+            label = genre_spec.get("genre", "?")
+            if genre_spec.get("subgenre"):
+                label += f" / {genre_spec['subgenre']}"
+            _log(f"      genre: {label} ({genre_spec.get('source', 'auto')})")
+        except Exception as e:
+            _log(f"      genre resolution skipped ({type(e).__name__}: {e})")
+    apply_direction()   # steer with genre now (moodboard joins after its stage)
+
     # ── 2/10  structure + characters ─────────────────────────────────────────
     g = run_group("2/10", "structure ‖ characters", [
         _spec("structure",
@@ -489,6 +600,20 @@ def run(
     structure, characters = g["structure"], g["characters"]
     _log(f"      logline: {structure.get('logline', '(parse failed)')[:80]}")
     _log(f"      characters: {len(characters.get('characters', []))}")
+
+    # ── moodboard (film-wide visual-tone bible) — set once, steers all below ──
+    if mood_on:
+        g = run_group("moodboard", "moodboard", [
+            _spec("moodboard",
+                  lambda: design_moodboard(structure, source.get("text", ""), genre_spec,
+                                           max_scenes=max_scenes, profile=profile_override),
+                  _summarize_moodboard,
+                  lambda fb: design_moodboard(structure, source.get("text", ""), genre_spec,
+                                              max_scenes=max_scenes, profile=profile_override, feedback=fb)),
+        ])
+        moodboard = g["moodboard"]
+        _log(f"      moodboard: {moodboard.get('overall_aesthetic', '?')[:80]}")
+        apply_direction()   # fold the moodboard into the steering for every stage below
 
     # ── 3–4/10  scenes + casting (scenes←structure, casting←characters) ───────
     g = run_group("3/10", "scenes ‖ casting", [
@@ -534,7 +659,7 @@ def run(
         return draft_screenplay(
             source, structure, characters, scenes,
             soundscape=soundscape, visuals=visuals, cinematography=cinematography,
-            max_scenes=max_scenes, profile=profile_override, feedback=fb,
+            casting=casting, max_scenes=max_scenes, profile=profile_override, feedback=fb,
         )
     g = run_group(f"8/10 screenplay (first {max_scenes} scenes)", "draft", [
         _spec("screenplay", lambda: _draft(), _summarize_screenplay, _draft),
@@ -547,6 +672,7 @@ def run(
     def _board(fb=None):
         return plan_storyboard(
             structure, scenes, casting, soundscape, visuals, cinematography,
+            characters=characters, draft=draft, genre=genre_spec,
             profile=profile_override, feedback=fb,
         )
     g = run_group("9/10", "storyboard", [
@@ -575,6 +701,18 @@ def run(
              f"{overall.get('overall_score')}/100"
              + (f"; drift in {overall['drifting_stages']}" if overall.get("drifting_stages") else ""))
 
+    # Aggregate the per-stage genre checks into one pipeline genre-alignment score.
+    genre_summary = {}
+    if genre_spec:
+        overall_g = genre_agent.score_pipeline(gen_reports) if gen_reports else {}
+        genre_summary = {"spec": genre_spec, "overall": overall_g, "per_stage": gen_reports}
+        save("genre_alignment", genre_summary)
+        if overall_g:
+            _log(f"      genre [{genre_spec.get('genre', '?')}]: {overall_g.get('verdict')} "
+                 f"{overall_g.get('overall_score')}/100"
+                 + (f"; off-genre in {overall_g['off_genre_stages']}" if overall_g.get("off_genre_stages") else ""))
+    llm.set_direction(None)   # clear steering once the creative stages are done
+
     # ── 10/10  assemble artifacts ─────────────────────────────────────────────
     # Per-stage JSON + screenplay.fountain are already written above (incremental,
     # crash-safe). Here we add the per-character files and the combined manifest.
@@ -590,6 +728,7 @@ def run(
         "source": source["source_path"],
         "word_count": source["word_count"],
         "structure": structure,
+        "moodboard": moodboard,
         "characters": characters,
         "casting": casting,
         "scenes": scenes,
@@ -600,6 +739,7 @@ def run(
         "screenplay_draft": draft,
         "scene_render": scene_render,
         "fidelity": fidelity_summary,
+        "genre": genre_summary or genre_spec,
         "models": {"fast": fast_model, "quality": quality_model},
         "elapsed_seconds": round(time.time() - t0, 1),
     }

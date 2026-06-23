@@ -199,7 +199,8 @@ def _gen_gemini(prompt: str, out_path: Path, refs: list | None = None) -> bool:
     c = _cfg()
     return gemini.generate_image(
         prompt, Path(out_path),
-        model=c.get("model", "gemini-3.1-flash-image"),
+        #model=c.get("model", "gemini-3.1-flash-image"),
+        model=c.get("model", "gemini-2.5-flash-image"),
         refs=refs,
         aspect_ratio=c.get("aspect_ratio"),
         image_size=c.get("image_size"),

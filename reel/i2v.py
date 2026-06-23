@@ -122,7 +122,8 @@ def _gen_gemini(images: list[Path], prompt: str, out_path: Path) -> bool:
     return gemini.generate_video(
         _full_prompt(prompt), Path(out_path),
         image_path=images[-1] if images else None,
-        model=c.get("model", "veo-3.1-fast-generate-preview"),
+        #model=c.get("model", "veo-3.1-fast-generate-preview"),
+        model=c.get("model", "veo-3.1-lite-generate-preview"),
         aspect_ratio=c.get("aspect_ratio", "16:9"),
         resolution=c.get("resolution", "720p"),
         poll_seconds=c.get("poll_seconds", 10),

@@ -11,10 +11,15 @@ material (book / script / short story) and navigates the phases of adaptation
 **locally-run open LLMs**, developed in slow, steady iterations.
 
 **Iteration 1 (done, thin slice working):** the agent set converts raw text into
-*screenplay material* plus a full creative design — structure, characters,
-casting (locked visual form), scenes, soundscape (score), visuals (art
-production), cinematography (camera), a per-moment storyboard fusing all four,
-and a Fountain draft. A human-in-the-loop gate reviews/iterates each stage.
+*screenplay material* plus a full creative design — **genre** (one genre for the
+film: explicit/config/auto-from-story), structure, characters, a **moodboard**
+(film-wide visual-tone bible), casting (locked visual form), scenes, soundscape
+(score), visuals (art production), cinematography (camera), a per-moment
+storyboard fusing *all* artifacts, and a Fountain draft. Two cross-cutting agents
+are set once and shape every stage: **genre** and **moodboard STEER** every
+creative stage (their direction is injected into each prompt), while **genre** and
+**fidelity GRADE** every stage (per-stage alignment shown at the gate; graders
+judge neutrally). A human-in-the-loop gate reviews/iterates each stage.
 
 ## Stack & layout
 - **Runtime:** Python 3.12 (`.venv/`), local LLMs via **Ollama**. Core 3rd-party
@@ -24,8 +29,9 @@ and a Fountain draft. A human-in-the-loop gate reviews/iterates each stage.
 - `reel/` — package. `models.py` (**unified AI-model abstraction + provider
   policy** — the front door for text/image/video), `stages.py` (**per-stage
   registry + `run_stage` for independent invocation**), `llm.py` (open-model
-  client: model-agnostic Ollama + profile/fallback + `with_feedback`),
-  `pipeline.py` (orchestration + per-stage gates), `gate.py`
+  client: model-agnostic Ollama + profile/fallback + `with_feedback` + the global
+  creative-**direction** steering hook `set_direction`), `pipeline.py`
+  (orchestration + per-stage gates), `gate.py`
   (human-in-the-loop review gate), `imagegen.py` (pluggable text-to-image +
   img2img backend; default backend **Gemini**), `gemini.py` (Google Gemini REST
   helpers — image generation + Veo video, stdlib urllib, API key from env), `i2v.py`
@@ -33,12 +39,15 @@ and a Fountain draft. A human-in-the-loop gate reviews/iterates each stage.
   LTX/Wan or a remote endpoint), `stock.py` (free CC stock-photo lookup —
   *currently unused*: kept for the diffusers actor-reference workflow), `cli.py`
   (entry), `manifest.py` (model list for the updater), `fountain.py` (Fountain
-  parser + screenplay→storyboard/shot builder for rendering), `agents/` (ingest,
-  structure, characters, casting, scenes, soundscape, visuals, cinematography,
-  storyboard, screenplay, fidelity).
+  parser + screenplay→storyboard/shot builder for rendering; `to_storyboard` folds
+  cinematography camera grammar into the render plan), `agents/` (ingest, **genre**,
+  structure, **moodboard**, characters, casting, scenes, soundscape, visuals,
+  cinematography, storyboard, screenplay, fidelity).
 - `config/models.yaml` — model profiles, per-agent profile map, `hitl` gate
-  knobs, `image` block (backend/model — default Gemini), `video` block
-  (image-to-video backend/model — default Gemini Veo), runtime knobs.
+  knobs, `genre` block (value/steer/enforce/min_score), `moodboard` block
+  (enabled/steer), `fidelity` block, `image` block (backend/model — default
+  Gemini), `video` block (image-to-video backend/model — default Gemini Veo),
+  runtime knobs.
 - **Gemini API key** (for image/video): read from env `GEMINIAPIKEY` (or
   `GEMINI_API_KEY`/`GOOGLE_API_KEY`). Without it, image/video stages no-op
   gracefully with a hint; the text pipeline is unaffected.
@@ -95,6 +104,42 @@ original 7.6 GB cap. 4 GB swap. 872 GB disk.
   OPEN models (never Gemini); toggle with config `fidelity.per_stage`. Best-effort
   (a failed check never blocks the pipeline). `check_alignment` remains for a
   holistic screenplay+storyboard-vs-story check.
+- **Creative direction = genre + moodboard STEER every stage (`reel/agents/genre.py`,
+  `reel/agents/moodboard.py`, open models):** two cross-cutting agents are fixed
+  once and shape the whole run via ONE shared steering hook. **Genre** is resolved
+  up front (priority: `--genre` flag > config `genre.value` > **auto-inferred from
+  the storyline**) → `output/genre.json`; **moodboard** runs right after structure
+  (film-wide visual-tone bible: palette/light/texture/atmosphere/influences + render-
+  ready `tiles`, the tiles **capped to `max_scenes`** so they match the scenes
+  actually rendered) → `output/moodboard.json`. The pipeline composes
+  `genre.guidance()+moodboard.guidance()` and calls **`llm.set_direction()`** (a
+  process-wide directive prepended to the *system* message of steered generations).
+  Creative agents call `llm.generate` directly → they get the direction; the
+  **graders** (fidelity, genre-enforcement) call `models.text`, which passes
+  `steer=False`, so they judge **neutrally**. **Genre also ENFORCES** per stage:
+  `genre.enforce_stage` scores genre alignment (`genre_score`, off_genre, verdict —
+  verdict back-filled from the score if the model omits it) shown at the gate next
+  to fidelity; aggregate `genre.score_pipeline` → `output/genre/<stage>.json` +
+  `output/genre_alignment.json`. `_gated` now returns `(result, fidelity_report,
+  genre_report)`. Config `genre.{value,steer,enforce,min_score}` +
+  `moodboard.{enabled,steer}`. Per policy these run on OPEN models (never Gemini).
+- **Storyboard + screenplay capture FULL detail (they drive video):** the screenplay
+  agent now also gets **casting** (a "locked on-screen look" block per character, so
+  action stays true to what's rendered); the storyboard agent's `_scene_bundles`
+  fuses the COMPLETE detail of every artifact — cast look + voice/mannerism +
+  casting `visual_prompt`/image, full visuals (filter, visual_moments, emotional_fn),
+  full soundscape (sound_events, emotional_fn), full camera (framing, coverage,
+  transition, per-shot emotional_fn), scene purpose, AND the screenplay's own written
+  shots + attributed dialogue — and the prompt requires each `image_prompt` to be a
+  self-contained, render-ready video prompt. Pipeline passes screenplay←`casting`,
+  storyboard←`characters`+`draft`+`genre`.
+- **Standalone video render (`python -m reel.cli render [--fresh]`):** builds a
+  camera-directed render plan from `screenplay.fountain`+`cinematography.json` (every
+  drafted scene, every shot — NO caps by default) via `fountain.to_storyboard`
+  (cinematography camera grammar folded into each Veo prompt), then renders clips
+  with `i2v` — no LLM stage runs. `gemini.generate_video` retries HTTP 429/5xx AND
+  transient Veo **operation** errors (codes 8/13/14) with backoff (preview tier
+  rate-limits hard).
 - **Per-stage abstraction + independent invocation (`reel/stages.py`):** every
   stage of processing is declared once as a `Stage` (name, the input artifacts it
   depends on, the agent it runs, what it `produces`). The registry lets the
@@ -155,42 +200,64 @@ original 7.6 GB cap. 4 GB swap. 872 GB disk.
 - Version control: git, branch `main`.
 
 ## Current state
-- **Status:** Core screenplay-material slice (ingest→structure/characters→scenes→
-  screenplay) was validated end-to-end on the sample story earlier. Since then the
-  pipeline was extended with **casting, soundscape, visuals, cinematography,
-  storyboard, and a human-in-the-loop gate** — these are import/unit smoke-tested
-  but **not yet run fully end-to-end** (a complete run is slow on this host). Next
-  full run should confirm all 10 stages produce clean JSON + coherent output.
-- **Image + video now use the Gemini API.** Image generation is **limited to the
-  character representation** — one `output/casting/<name>.png` per character via
-  the Gemini image API (`gemini-3.1-flash-image`) — and that image is the identity
-  reference for video. Scene rendering uses **Veo** (`reel/i2v.py` backend
-  `gemini`) image-to-video, seeded by the character image and chained for
-  continuity. Shared REST helper: `reel/gemini.py` (stdlib urllib, key from env
-  `GEMINIAPIKEY`). **Code wired + imports verified; NOT yet run live** — needs
-  `GEMINIAPIKEY` exported (currently unset), so both stages no-op with a hint.
-  The earlier local sd-turbo + Openverse-stock + img2img chain is retired
-  (`stock.py` now dormant; diffusers/auto1111/LTX backends remain as options).
-- **Blocked-on (external):** **Ollama 0.6.5 is too old to pull Qwen3** — needs
-  upgrade. Requires user's sudo: run in your terminal →
-  `curl -fsSL https://ollama.com/install.sh | sh`, then `make update` pulls Qwen3.
-  Until then the pipeline runs on the installed qwen2.5/llama3 fallbacks.
-- **Recommended next user action:** (1) upgrade Ollama (Qwen3); (2) run a full
-  end-to-end pass to validate the expanded pipeline. *(WSL RAM already raised to
-  ~12 GB — done.)* The storyboard stage timed out on a run at the old 300 s
-  inactivity window (slow time-to-first-token); raised default to 600 s.
-- **Scene rendering (image-to-video) via Veo — wired, not run live.** `i2v.py`
-  (backend `gemini`) + `pipeline._render_scene_frames` render each storyboard
-  frame as a clip seeded by the character image, chained for continuity. Needs
-  `GEMINIAPIKEY`. Per-scene clip assembly (ffmpeg concat) is not done yet. The
-  diffusers LTX/Wan and comfyui/http backends remain as GPU/remote alternatives.
-- **Next up (next iterations):** export `GEMINIAPIKEY` and do a full live run
-  (character images → Veo scene clips → per-scene concat); input chunking for long
-  texts (currently truncated at ~12k chars); draft *all* scenes not just first N;
-  richer ingest (PDF/EPUB/.fdx); then the *next phase* (shot list / edit / sound
-  mix / final cut).
+- **Status:** The pipeline now runs **genre → structure/characters → moodboard →
+  scenes/casting → soundscape/visuals/cinematography → screenplay → storyboard →
+  render**, with a human-in-the-loop gate per stage plus per-stage **fidelity** and
+  **genre** scoring. The earlier creative stages were validated end-to-end on the
+  sample; the newest additions (genre, moodboard, steering, full-detail storyboard/
+  screenplay, standalone render) are **import/byte-compile/offline-verified and the
+  genre agent is live-verified** (auto-detect + guidance + enforce on the sample),
+  but a full single end-to-end run with everything on is still slow/pending on this
+  CPU host.
+- **Qwen3 installed** (`qwen3:8b`, `qwen3:4b`) — the old "Ollama too old for Qwen3"
+  blocker is resolved; both profiles resolve to Qwen3.
+- **Gemini image + video are live-verified** (key in `~/.bashrc` as `GEMINIAPIKEY`).
+  Image generation is **limited to the character representation** (one
+  `output/casting/<name>.png` per character); Veo (`reel/i2v.py`) renders scene
+  clips seeded by that image, chained for continuity. **Veo preview tier rate-limits
+  hard (429)** and occasionally returns transient operation errors (code 13) — the
+  `gemini.py` client now **retries both with backoff**. Per-scene clip assembly
+  (ffmpeg concat) still TODO.
+- **Genre + moodboard steer the whole run; both grade-able stages stay neutral.**
+  Verified the steering exemption (creative `llm.generate` gets the direction;
+  `models.text` graders don't). Moodboard `tiles` are capped to `max_scenes`.
+- **Recommended next user action:** run one full end-to-end pass (`make run` /
+  `make demo`) to confirm all stages incl. genre+moodboard produce clean JSON, then
+  `python -m reel.cli render --fresh` for video. *(WSL RAM at ~12 GB; storyboard
+  inactivity timeout at 600 s.)*
+- **Next up (next iterations):** auto-render moodboard `tiles` (opt-in, like casting
+  images); per-scene clip assembly (ffmpeg concat); input chunking for long texts
+  (truncated ~12k chars); draft *all* scenes not just first N; richer ingest
+  (PDF/EPUB/.fdx); then the *next phase* (edit / sound mix / final cut).
 
 ## Session log
+- 2026-06-22 — **Genre + moodboard agents, full-detail storyboard/screenplay,
+  standalone video render.** Added two cross-cutting agents that are fixed once and
+  shape every stage. **`reel/agents/genre.py`**: one genre per run (priority
+  `--genre` > config `genre.value` > auto-from-story), `guidance()` for steering,
+  `enforce_stage()` per-stage alignment score, `score_pipeline()` aggregate.
+  **`reel/agents/moodboard.py`**: film-wide visual-tone bible from structure+genre
+  (palette/light/texture/atmosphere/influences + render-ready `tiles` **capped to
+  `max_scenes`**), runs right after structure. **Steering hook**: `llm.set_direction`
+  prepends a process-wide directive to *steered* generations; `models.text` passes
+  `steer=False` so the fidelity/genre **graders judge neutrally** (creative agents
+  call `llm.generate` directly → steered). Pipeline composes genre+moodboard into the
+  direction (`apply_direction()`), runs the moodboard as a gated stage, and adds a
+  per-stage **genre** check beside fidelity (`_gated` → 3-tuple; genre verdict
+  back-filled from score). Config: `genre`/`moodboard` blocks + `genre`/`moodboard`
+  profiles. CLI `--genre`. **Full-detail capture (these drive video):** screenplay
+  agent now also takes **casting** (locked on-screen look block); storyboard
+  `_scene_bundles` fuses the COMPLETE detail of every artifact incl. the
+  screenplay's own shots+dialogue, and demands self-contained render-ready
+  `image_prompt`s (pipeline passes screenplay←casting, storyboard←characters+draft+
+  genre). **Standalone render**: `python -m reel.cli render [--fresh]` builds a
+  camera-directed plan from `screenplay.fountain`+`cinematography.json` (all scenes/
+  shots, no caps; `fountain.to_storyboard` folds cinematography camera grammar) and
+  renders via Veo. **Gemini backoff**: `generate_video` retries HTTP 429/5xx + Veo
+  op errors (8/13/14). Verified: byte-compile, all imports, steering exemption,
+  tile cap, stage placement; genre live on the sample (Drama, melancholic, concrete
+  conventions). Docs (README flow diagram + sections, CLAUDE.md) updated. Full
+  single end-to-end run still pending (slow CPU). *(Committed.)*
 - 2026-06-21 (later 6) — **Scenes capped, shots never.** `--max-scenes` (demo: 2)
   now limits drafting AND rendering to that many SCENES, but **every shot within a
   rendered scene is always rendered**: `_render_scene_frames` gained `max_scenes`

@@ -30,6 +30,7 @@ from .agents.characters import extract_characters
 from .agents.cinematography import plan_cinematography
 from .agents.fidelity import check_alignment
 from .agents.ingest import ingest
+from .agents.moodboard import design_moodboard
 from .agents.scenes import segment_scenes
 from .agents.screenplay import draft_screenplay, to_fountain
 from .agents.soundscape import design_soundscape
@@ -52,7 +53,7 @@ class Stage:
 
 
 # ── stage run callables — ctx provides each input artifact by name ───────────
-# Signature is uniform: run(ctx, *, out, profile=None, feedback=None, max_scenes=3).
+# Signature is uniform: run(ctx, *, out, profile=None, feedback=None, max_scenes=1).
 
 def _ingest(ctx, **_):
     return ingest(ctx["input_path"])
@@ -62,6 +63,11 @@ def _structure(ctx, *, profile=None, feedback=None, **_):
 
 def _characters(ctx, *, profile=None, feedback=None, **_):
     return extract_characters(ctx["source"], profile, feedback=feedback)
+
+def _moodboard(ctx, *, profile=None, feedback=None, max_scenes=1, **_):
+    src = ctx.get("source") or {}
+    return design_moodboard(ctx["structure"], src.get("text", ""), ctx.get("genre"),
+                            max_scenes=max_scenes, profile=profile, feedback=feedback)
 
 def _scenes(ctx, *, profile=None, feedback=None, **_):
     return segment_scenes(ctx["source"], ctx["structure"], profile=profile, feedback=feedback)
@@ -78,17 +84,19 @@ def _visuals(ctx, *, profile=None, feedback=None, **_):
 def _cinematography(ctx, *, profile=None, feedback=None, **_):
     return plan_cinematography(ctx["structure"], ctx["scenes"], profile, feedback=feedback)
 
-def _screenplay(ctx, *, profile=None, feedback=None, max_scenes=3, **_):
+def _screenplay(ctx, *, profile=None, feedback=None, max_scenes=1, **_):
     return draft_screenplay(
         ctx["source"], ctx["structure"], ctx["characters"], ctx["scenes"],
         soundscape=ctx.get("soundscape"), visuals=ctx.get("visuals"),
-        cinematography=ctx.get("cinematography"),
+        cinematography=ctx.get("cinematography"), casting=ctx.get("casting"),
         max_scenes=max_scenes, profile=profile, feedback=feedback)
 
 def _storyboard(ctx, *, profile=None, feedback=None, **_):
     return plan_storyboard(
         ctx["structure"], ctx["scenes"], ctx["casting"], ctx["soundscape"],
-        ctx["visuals"], ctx["cinematography"], profile=profile, feedback=feedback)
+        ctx["visuals"], ctx["cinematography"],
+        characters=ctx.get("characters"), draft=ctx.get("screenplay"),
+        profile=profile, feedback=feedback)
 
 def _casting_images(ctx, *, out, **_):
     from . import pipeline as P                      # lazy: avoid import cycle
@@ -112,6 +120,8 @@ STAGES: list[Stage] = [
     Stage("ingest", ["input_path"], _ingest, produces="source",
           desc="load & normalize the source text (deterministic)"),
     Stage("structure", ["source"], _structure, desc="logline, genre, themes, beats"),
+    Stage("moodboard", ["structure"], _moodboard, optional=("source", "genre"),
+          desc="film-wide visual-tone moodboard (steers downstream stages)"),
     Stage("characters", ["source"], _characters, desc="character breakdown"),
     Stage("scenes", ["source", "structure"], _scenes, desc="numbered scene list"),
     Stage("casting", ["structure", "characters"], _casting, desc="actor/character casting"),
@@ -119,10 +129,11 @@ STAGES: list[Stage] = [
     Stage("visuals", ["structure", "scenes"], _visuals, desc="art production / look"),
     Stage("cinematography", ["structure", "scenes"], _cinematography, desc="shot list"),
     Stage("screenplay", ["source", "structure", "characters", "scenes"], _screenplay,
-          optional=("soundscape", "visuals", "cinematography"),
+          optional=("soundscape", "visuals", "cinematography", "casting"),
           desc="Fountain draft (shots, attributed dialogue, V.O.)"),
     Stage("storyboard", ["structure", "scenes", "casting", "soundscape", "visuals",
-                         "cinematography"], _storyboard, desc="per-moment storyboard"),
+                         "cinematography"], _storyboard,
+          optional=("characters", "screenplay"), desc="per-moment storyboard"),
     Stage("casting_images", ["casting"], _casting_images, produces="casting",
           desc="render character representation images (image provider)"),
     Stage("scene_render", ["storyboard", "casting"], _scene_render, produces="scene_render",
@@ -184,7 +195,7 @@ def _save_artifact(out: Path, name: str, data) -> None:
 
 def run_stage(name: str, out: str | Path = "output", *, input_path: str | None = None,
               profile: str | None = None, feedback: str | None = None,
-              max_scenes: int = 3, save: bool = True) -> dict:
+              max_scenes: int = 1, save: bool = True) -> dict:
     """Invoke a single stage independently. Loads each required input from its
     checkpoint in `out` (ingesting the source on demand), runs the stage, and
     writes its artifact. Returns the stage result."""
