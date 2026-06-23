@@ -243,3 +243,52 @@ def last_frame(video_path: Path, out_image: Path) -> Path | None:
         return out_image if out_image.exists() else None
     except Exception:
         return None
+
+
+def has_ffmpeg() -> bool:
+    import shutil as _sh
+    return _sh.which("ffmpeg") is not None
+
+
+def stitch(clips: list, out_path: Path, *, reencode: bool = False) -> bool:
+    """Concatenate `clips` (in the given order) into a single movie at `out_path`
+    via ffmpeg's concat demuxer. Tries a fast lossless stream-copy first; if that
+    fails (e.g. clips differ in codec/params), falls back to a re-encode. Returns
+    success; best-effort (logs and returns False on any failure)."""
+    paths = [Path(p) for p in clips if p and Path(p).exists()]
+    if not paths:
+        _log("      stitch skipped — no clips to assemble")
+        return False
+    if not has_ffmpeg():
+        _log("      stitch skipped — ffmpeg not found")
+        return False
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    # concat-demuxer list file (absolute paths, single-quoted per ffmpeg spec)
+    listing = "\n".join(f"file '{p.resolve()}'" for p in paths) + "\n"
+    list_file = out_path.parent / "_concat.txt"
+    list_file.write_text(listing, encoding="utf-8")
+    base = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_file)]
+    attempts = ([base + ["-c", "copy", "-movflags", "+faststart", str(out_path)]]
+                if not reencode else [])
+    # re-encode fallback normalizes mismatched streams (Veo clips are usually
+    # uniform, so copy works; this is the safety net)
+    attempts.append(base + ["-c:v", "libx264", "-pix_fmt", "yuv420p",
+                            "-c:a", "aac", "-movflags", "+faststart", str(out_path)])
+    try:
+        for i, cmd in enumerate(attempts):
+            r = subprocess.run(cmd, capture_output=True, timeout=600)
+            if r.returncode == 0 and out_path.exists() and out_path.stat().st_size > 0:
+                how = "stream-copy" if (not reencode and i == 0) else "re-encode"
+                _log(f"      stitched {len(paths)} clip(s) → {out_path.name} ({how})")
+                return True
+        _log(f"      stitch failed ({r.stderr.decode(errors='replace')[-200:].strip()})")
+        return False
+    except Exception as e:
+        _log(f"      stitch failed ({type(e).__name__}: {e})")
+        return False
+    finally:
+        try:
+            list_file.unlink()
+        except Exception:
+            pass

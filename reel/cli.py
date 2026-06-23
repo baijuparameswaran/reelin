@@ -7,6 +7,7 @@ Usage:
     python -m reel.cli stage NAME [SOURCE.txt]   # run ONE stage independently
     python -m reel.cli render [--fresh]          # render the whole drafted story to video
                                                  # (screenplay.fountain + cinematography.json)
+    python -m reel.cli stitch                    # concatenate rendered clips → one movie.mp4
 
 Run via the package so relative imports resolve: `python -m reel.cli ...`.
 
@@ -147,6 +148,35 @@ def _render_video(argv: list[str]) -> int:
 
     manifest = _render_scene_frames(board, _load_json(out / "casting.json"), out, max_scenes=a.max_scenes)
     print(f"[reel] rendered {manifest.get('clips', 0)} new clip(s) → {out}/video/")
+    if manifest.get("movie"):
+        print(f"[reel] movie → {out}/{manifest['movie']}")
+    return 0
+
+
+def _stitch(argv: list[str]) -> int:
+    """Stitch already-rendered scene clips into one movie (no rendering)."""
+    import json
+    from pathlib import Path
+
+    from .pipeline import _assemble_movie
+
+    ap = argparse.ArgumentParser(prog="reel stitch",
+                                 description="concatenate rendered scene clips into a single movie")
+    ap.add_argument("--out", default="output")
+    a = ap.parse_args(argv)
+    out = Path(a.out)
+    mpath = out / "video" / "manifest.json"
+    if not mpath.exists():
+        print(f"[reel] no {mpath} — render scenes first (pipeline run, or `reel.cli render`)")
+        return 2
+    manifest = json.loads(mpath.read_text(encoding="utf-8"))
+    movie = _assemble_movie(manifest, out)
+    if not movie:
+        print("[reel] nothing stitched (no clips, or ffmpeg unavailable)")
+        return 1
+    manifest["movie"] = str(movie.relative_to(out))
+    mpath.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"[reel] movie → {movie}")
     return 0
 
 
@@ -158,6 +188,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_stage(argv[1:])
     if argv and argv[0] == "render":
         return _render_video(argv[1:])
+    if argv and argv[0] == "stitch":
+        return _stitch(argv[1:])
 
     ap = argparse.ArgumentParser(prog="reel", description=__doc__)
     ap.add_argument("source", nargs="?", help="path to source text (book/story/script)")
