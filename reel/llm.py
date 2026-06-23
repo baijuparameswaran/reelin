@@ -76,6 +76,13 @@ def request_timeout() -> float | None:
     return val if val else None
 
 
+def think_enabled() -> bool:
+    """Whether to let thinking models emit their reasoning trace. Default False:
+    on a CPU-only host the (uncaptured) reasoning stream is pure wasted time.
+    Override with config `runtime.think: true`."""
+    return bool(config().get("runtime", {}).get("think", False))
+
+
 def _api(
     path: str,
     payload: dict | None = None,
@@ -182,6 +189,12 @@ def generate(
         "messages": messages,
         "stream": True,
         "options": p.options,
+        # Disable the reasoning trace by default. Thinking models (e.g. Qwen3)
+        # otherwise emit a long hidden `thinking` stream before the answer — which
+        # `generate` doesn't even capture (we read `content`), so on a CPU-only host
+        # it is pure wasted time (a single stage can take 15-20 min). Re-enable with
+        # config `runtime.think: true`. Harmless/ignored for non-thinking models.
+        "think": think_enabled(),
     }
     if as_json:
         payload["format"] = "json"
