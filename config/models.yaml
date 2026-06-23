@@ -135,6 +135,13 @@ runtime:
   # Set to 0 to wait indefinitely (fine for batch jobs — Ctrl-C still pauses).
   request_timeout_seconds: 600
 
+  # Let thinking models (e.g. Qwen3) emit their reasoning trace before answering.
+  # Enabled: Qwen3 reasons before producing the final JSON (better structure/
+  # instruction-following). NB on a CPU-only host this is much slower — the
+  # reasoning stream adds many tokens per stage (a single stage can take 15-20 min).
+  # Set false to skip thinking for faster (lower-reasoning) runs.
+  think: true
+
 # Qwen3 requires a newer Ollama than 0.6.5. The update script checks this and
 # tells you how to upgrade if needed. (Soft floor; updater always pulls latest.)
 min_ollama_version: "0.7.0"
