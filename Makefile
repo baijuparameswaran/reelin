@@ -14,6 +14,11 @@ setup: ## Create venv and install dependencies
 	$(PIP) install -q -r requirements.txt
 	@echo "setup complete"
 
+setup-models: ## Pull all preferred Ollama models (qwen3:4b, qwen3:8b, gemma3:12b)
+	@echo "Pulling preferred models from config/models.yaml …"
+	@$(PY) -m reel.manifest | while read m; do echo "  pull $$m"; ollama pull "$$m"; done
+	@echo "done — run 'make models' to verify"
+
 setup-image: ## Install optional deps for casting image rendering (diffusers/torch)
 	$(PIP) install -r requirements-image.txt
 	@echo "image rendering deps installed (image.backend: diffusers)"
@@ -35,6 +40,9 @@ update-all: ## Same as update, but also pull fallback models
 
 install-cron: ## Install weekly + monthly model-update cron jobs
 	@bash scripts/install-cron.sh
+
+secrets: ## Manage encrypted API keys (set / get / delete / status)
+	$(PY) -m reel.secrets $(or $(CMD),status)
 
 clean: ## Remove generated output
 	rm -rf output /tmp/reel_smoke

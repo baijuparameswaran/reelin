@@ -122,8 +122,9 @@ moodboard:
 runtime:
   # How many agents may call models concurrently. On CPU-only / low-RAM hosts a
   # single model serves requests sequentially and loading two different models
-  # at once OOMs, so keep this at 1 here. Raise it on a GPU/multi-model box to
-  # actually parallelize the independent branches (structure ‖ characters).
+  # at once OOMs, so keep this at 1 here. On a GPU host with enough VRAM to hold
+  # two models, raise to 2-4 to actually parallelize the independent branches
+  # (structure ‖ characters, scenes ‖ casting, soundscape ‖ visuals ‖ cinematography).
   max_parallel_agents: 1
 
   # Generation is streamed, so this is an *inactivity* timeout: the max seconds
@@ -142,39 +143,78 @@ runtime:
   # Set false to skip thinking for faster (lower-reasoning) runs.
   think: true
 
+  # GPU layer offload for Ollama (the `num_gpu` request option).
+  #   -1 / unset : Ollama auto-detects CUDA/ROCm and offloads as many layers
+  #                as VRAM allows — this is the default and usually what you want.
+  #    0          : force CPU-only (useful to compare speed or free VRAM for
+  #                 something else while the pipeline runs).
+  #    N > 0      : offload exactly N transformer layers to GPU (partial offload
+  #                 when the model is larger than VRAM — the rest runs on CPU).
+  #
+  # Leave commented out to use Ollama's default (auto-detect).
+  # Uncomment and set 0 to force CPU; set -1 to explicitly request full GPU.
+  # Per-profile options.num_gpu (in profiles below) overrides this global knob.
+  #
+  # WSL2 + NVIDIA: Ollama inside WSL2 picks up the GPU automatically via the
+  #   CUDA-for-WSL2 driver — install the Windows NVIDIA driver (≥ 527.x) and
+  #   Ollama will use the GPU with no further config. Verify with: ollama ps
+  #   (look for a non-zero "Size VRAM" after loading a model).
+  # Intel iGPU (this host): no CUDA/ROCm support in WSL2 — CPU only for now.
+  #
+  # num_gpu: -1
+
 # Qwen3 requires a newer Ollama than 0.6.5. The update script checks this and
 # tells you how to upgrade if needed. (Soft floor; updater always pulls latest.)
 min_ollama_version: "0.7.0"
 
 profiles:
   # Fast tier — default for iteration on modest CPU-only hardware.
+  # GPU note: with ≥ 6 GB VRAM the 4B fits entirely; raise num_ctx to 8192
+  #           and max_parallel_agents to 2 for meaningful speedup.
   fast:
     model: qwen3:4b
     fallbacks: [qwen2.5:latest, mistral:7b-instruct, phi3:mini]
     options:
       temperature: 0.7
       num_ctx: 4096
+      # num_ctx: 8192   # GPU hosts — fits in VRAM, fewer prompt truncations
 
   # Quality tier — slower, better structure/instruction-following.
   # Comfortable after bumping WSL RAM to ~12 GB (see CLAUDE.md).
+  # GPU note: 8B q4 ≈ 5 GB VRAM; num_ctx 8192 is safe with ≥ 8 GB VRAM.
   quality:
     model: qwen3:8b
     fallbacks: [llama3:8b, qwen2:7b-instruct-q5_K_M, qwen2.5:latest]
     options:
       temperature: 0.8
       num_ctx: 4096
+      # num_ctx: 8192   # GPU hosts
+
+  # High-quality tier — gemma3:12b. Best instruction-following + JSON fidelity
+  # at this RAM budget; falls back to qwen3:8b if not pulled. Use for the
+  # heaviest stages (storyboard, screenplay, structure) where output quality
+  # matters most. At ~9-10 GB total with KV cache it fits the 12 GB ceiling.
+  # GPU note: 12B q4 ≈ 8 GB VRAM; requires a 10+ GB VRAM card for full offload.
+  #           Partial offload (e.g. num_gpu: 20) still speeds up prefill significantly.
+  quality_high:
+    model: gemma3:12b
+    fallbacks: [qwen3:8b, llama3:8b, qwen2.5:latest]
+    options:
+      temperature: 0.8
+      num_ctx: 4096
+      # num_ctx: 8192   # GPU hosts with ≥ 10 GB VRAM
 
 # Default profile each agent uses (override per run with `--profile`).
 agent_profiles:
-  structure:       quality
+  structure:       quality_high
   characters:      fast
   casting:         fast
   scenes:          fast
   soundscape:      fast
   visuals:         fast
   cinematography:  fast
-  storyboard:      quality
-  screenplay:      quality
+  storyboard:      quality_high
+  screenplay:      quality_high
   fidelity:        quality
   genre:           quality
   moodboard:       quality

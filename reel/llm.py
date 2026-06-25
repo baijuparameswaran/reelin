@@ -77,9 +77,9 @@ def request_timeout() -> float | None:
 
 
 def think_enabled() -> bool:
-    """Whether to let thinking models emit their reasoning trace. Default False:
-    on a CPU-only host the (uncaptured) reasoning stream is pure wasted time.
-    Override with config `runtime.think: true`."""
+    """Whether to let thinking models emit their reasoning trace.
+    Only applied when the resolved model actually supports thinking (see
+    `_is_thinking_model`). Override with config `runtime.think: true/false`."""
     return bool(config().get("runtime", {}).get("think", False))
 
 
@@ -157,6 +157,12 @@ def resolve_model(profile: Profile) -> str:
     )
 
 
+_THINKING_MODELS = ("qwen3", "deepseek-r1", "qwq")
+
+def _is_thinking_model(model: str) -> bool:
+    return any(m in model.lower() for m in _THINKING_MODELS)
+
+
 def generate(
     prompt: str,
     *,
@@ -184,18 +190,22 @@ def generate(
         messages.append({"role": "system", "content": sys_msg})
     messages.append({"role": "user", "content": prompt})
 
+    # Merge profile options with the global GPU knob (profile takes precedence).
+    opts = dict(p.options)
+    num_gpu = config().get("runtime", {}).get("num_gpu")
+    if num_gpu is not None and "num_gpu" not in opts:
+        opts["num_gpu"] = num_gpu
+
     payload = {
         "model": model,
         "messages": messages,
         "stream": True,
-        "options": p.options,
-        # Disable the reasoning trace by default. Thinking models (e.g. Qwen3)
-        # otherwise emit a long hidden `thinking` stream before the answer — which
-        # `generate` doesn't even capture (we read `content`), so on a CPU-only host
-        # it is pure wasted time (a single stage can take 15-20 min). Re-enable with
-        # config `runtime.think: true`. Harmless/ignored for non-thinking models.
-        "think": think_enabled(),
+        "options": opts,
     }
+    # Only send `think` for models that actually support it — Ollama returns HTTP
+    # 400 for non-thinking models (e.g. mistral) even with think=False.
+    if think_enabled() and _is_thinking_model(model):
+        payload["think"] = True
     if as_json:
         payload["format"] = "json"
 

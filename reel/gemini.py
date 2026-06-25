@@ -23,15 +23,27 @@ import urllib.request
 from pathlib import Path
 
 BASE = "https://generativelanguage.googleapis.com"
-_KEY_ENV = ("GEMINIAPIKEY", "GEMINI_API_KEY", "GOOGLE_API_KEY")
+_KEYRING_SERVICE = "reel"
+_KEYRING_USERNAME = "GEMINIAPIKEY"
+
+
+def _keyring_get() -> str | None:
+    """Look up the Gemini API key from the encrypted system keyring.
+    Returns None silently if keyring is unavailable or the key isn't stored."""
+    try:
+        import keyring
+        v = keyring.get_password(_KEYRING_SERVICE, _KEYRING_USERNAME)
+        return v.strip() if v else None
+    except Exception:
+        return None
 
 
 def api_key() -> str | None:
-    for name in _KEY_ENV:
-        v = os.environ.get(name)
-        if v:
-            return v.strip()
-    return None
+    """Resolve the Gemini API key from the encrypted keyring only.
+
+    Store the key with:  python -m reel.secrets set
+    """
+    return _keyring_get()
 
 
 def available() -> bool:
@@ -40,8 +52,7 @@ def available() -> bool:
 
 
 def key_hint() -> str:
-    return (f"set a Gemini API key — export {_KEY_ENV[0]}=… "
-            f"(or {_KEY_ENV[1]}/{_KEY_ENV[2]})")
+    return "set a Gemini API key — run `python -m reel.secrets set`"
 
 
 def _headers(json_body: bool = True) -> dict:
