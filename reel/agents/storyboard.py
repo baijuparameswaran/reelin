@@ -1,77 +1,137 @@
-"""Storyboard agent: a visual image for every moment of every scene.
+"""Storyboard agent: a production-ready board for every scene of the film.
 
-This is the synthesis stage. It fuses the four creative-crew designs into a
-concrete frame for each beat:
+This is the synthesis stage. It fuses all upstream artifacts into a structured
+storyboard that a director, DP, and VFX team — or a video generation model —
+can work from directly:
 
-  casting        → who is in frame and exactly how they look
-  visuals        → color palette, lighting, props (art production)
-  cinematography → shot type, angle, movement, lens (camera)
-  soundscape     → the score / audio attribute under the frame
+  structure      → logline, genre, tone
+  scenes         → slugline, summary, narrative purpose, characters per scene
+  casting        → locked on-screen look per character (physical_form, wardrobe,
+                   defining_feature, mannerism) + reference image
+  characters     → voice, mannerisms
+  visuals        → color palette, lighting, key props, visual filter per scene
+  soundscape     → score cue, ambient bed, sound events per scene
+  cinematography → shot list with full camera grammar per scene
+  screenplay     → attributed dialogue, V.O., written action per shot
 
-The agent receives a pre-merged per-scene design bundle (built below) so it can
-compose each frame as a single image with both an emotional and an audio
-attribute, plus a text-to-image prompt ready for a render pipeline.
+Output schema mirrors a real production storyboard:
+  scene header   → slugline (int/ext · location · time), purpose, characters,
+                   duration estimate
+  visual/audio   → color palette, lighting setup, score cue, ambient, key sounds
+  panels         → one per camera shot, with shot_type / camera_angle /
+                   camera_movement / lens / composition / duration / action /
+                   dialogue / sound / emotional_note / transition / image_prompt
 """
 from __future__ import annotations
 
 import json
+import re
 
 from .. import llm
 
 SYSTEM = (
-    "You are a storyboard artist and visual director. You translate a scene's "
-    "casting, art design, camera plan, and score into concrete frames — each a "
-    "single composed image carrying an emotional charge and an audio attribute. "
-    "You always respond with valid JSON and nothing else."
+    "You are a professional storyboard supervisor. You translate a complete scene "
+    "design package into a production-ready storyboard that a director, DP, and "
+    "video generation pipeline can execute from. Every panel carries the full camera "
+    "grammar, locked character look, action, dialogue, and audio — self-sufficient "
+    "for rendering. You respond with valid JSON and nothing else."
 )
 
 PROMPT = """\
-Compose a storyboard for the film below. For each scene, break it into frames \
-(one per key moment, following the camera shots where given) and render each \
-frame as a single concrete image.
+Compose a production storyboard for the film below. Use ALL upstream artifacts \
+fused into the scene design bundles — lose nothing.
 
-Film details:
+Film:
 - Logline: {logline}
 - Genre: {genre}
 - Tone: {tone}
 
-Each scene's design bundle gives you EVERYTHING about the scene and you must fuse \
-ALL of it into each frame, losing no detail:
-- cast: each character's locked physical_form, age, wardrobe, defining_feature, \
-mannerism, voice, and a reference_image of their on-screen identity
-- art: color_palette, lighting, visual_filter, key_props (prop+function), \
-visual_moments, emotional_function
-- audio: ambient_bed (or silence), sound_events (moment+sound), emotional_function
-- camera: coverage + per-shot type/angle/movement/lens/framing/emotional_function \
-and the transition to the next scene
-- screenplay_shots: the script's own written shots, action, and attributed \
-dialogue / voice-over for this scene
+STORYBOARD STRUCTURE:
 
-These frames DRIVE VIDEO GENERATION, so each `image_prompt` must be self-contained.
+For each scene produce:
 
-Respond with JSON in exactly this shape:
+1. header — slugline, int_ext (INT/EXT/INT·EXT), location, time_of_day, one-sentence \
+narrative purpose, characters present, estimated screen duration (e.g. "1m 45s")
+
+2. visual_overview — color_palette for this scene, lighting_setup (rig or natural \
+light description), mood (one line)
+
+3. audio_overview — score_cue (music/score description), ambient (ambient bed), \
+key_sounds (list of "moment: sound" strings)
+
+4. panels — ONE panel per camera shot (follow the cinematography coverage in order; \
+never merge or drop shots; align each panel with the matching screenplay shot). \
+Each panel must include:
+   - panel: sequential panel number
+   - shot_type: ECU / CU / MCU / MS / FS / WS / ELS / POV / OTS / 2S / INSERT
+   - camera_angle: EYE LEVEL / LOW ANGLE / HIGH ANGLE / DUTCH TILT / BIRD'S EYE / WORM'S EYE
+   - camera_movement: STATIC / PAN / TILT / DOLLY IN / DOLLY OUT / TRACK LEFT / TRACK RIGHT \
+/ CRANE UP / CRANE DOWN / HANDHELD / STEADICAM / ZOOM IN / ZOOM OUT / PUSH IN / PULL OUT
+   - lens: focal length e.g. "24mm wide" "50mm normal" "85mm portrait" "135mm telephoto"
+   - composition: framing note — who/what is where, depth layers, negative space, leading lines
+   - duration: estimated screen time e.g. "3s" "6s" "12s"
+   - characters_in_frame: list of character names visible
+   - action: physical movement or event (what happens / moves — drives video motion)
+   - dialogue: list of {{speaker, line, vo}} — attributed lines from the screenplay \
+(vo: true for voice-over); empty list if silent
+   - sound: ambient bed + specific sound events audible in this panel
+   - emotional_note: the emotion this panel must evoke in the audience
+   - transition: CUT TO / DISSOLVE TO / FADE TO BLACK / MATCH CUT / SMASH CUT / \
+L-CUT / J-CUT / WIPE
+   - image_prompt: a COMPLETE, self-contained prompt for a video generation model — \
+include character locked look (physical_form, wardrobe, defining_feature), setting \
+and key props, color palette and lighting, camera (shot_type / angle / movement / lens), \
+the action, audio atmosphere, and any spoken dialogue — everything the model needs \
+to render this panel without any other context
+
+JSON schema (respond with this shape and nothing else):
 {{
-  "storyboard_style": "one sentence describing the overall look of the boards",
+  "storyboard_style": "one sentence: overall visual language of the boards",
   "storyboard": [
     {{
       "scene_number": 1,
-      "frames": [
+      "header": {{
+        "slugline": "INT. LIGHTHOUSE LANTERN ROOM - DUSK",
+        "int_ext": "INT",
+        "location": "Lighthouse lantern room",
+        "time_of_day": "DUSK",
+        "purpose": "Edith confronts the choice that will define her",
+        "characters": ["EDITH"],
+        "duration_estimate": "2m 10s"
+      }},
+      "visual_overview": {{
+        "color_palette": "amber and deep navy; warm lantern glow against cold sea dark",
+        "lighting_setup": "practical lantern as key light; blue-grey ambient from windows",
+        "mood": "claustrophobic intimacy breaking open into vast dread"
+      }},
+      "audio_overview": {{
+        "score_cue": "solo cello, sustained low drone building through the scene",
+        "ambient": "wind against glass, faint ocean below",
+        "key_sounds": ["panel 2: the lantern mechanism clicks and stalls",
+                       "panel 4: silence as she makes her decision"]
+      }},
+      "panels": [
         {{
-          "frame": 1,
-          "shot_type": "the camera shot type for this frame (from the coverage)",
-          "moment": "the beat this frame captures",
-          "characters_in_frame": ["NAME", "..."],
-          "image": "a single composed visual: who is in frame and their exact \
-locked look (physical_form, wardrobe, defining_feature), the set and key props, \
-color/light/filter, and the camera framing (shot/angle/lens/movement)",
-          "action": "what physically happens/moves in this frame (for motion)",
-          "dialogue": [{{"speaker": "NAME", "line": "spoken line heard in this frame"}}],
-          "emotional_attribute": "the emotion this frame should evoke",
-          "audio_attribute": "the ambient bed + sound events + any score under this frame",
-          "image_prompt": "a complete, self-contained prompt to render this frame as \
-VIDEO: subject + locked look, setting + props, color/light/filter, camera \
-shot/angle/lens/movement, the motion/action, and the audio + any spoken dialogue \
-(so a video model can voice it)"
+          "panel": 1,
+          "shot_type": "WS",
+          "camera_angle": "LOW ANGLE",
+          "camera_movement": "STATIC",
+          "lens": "24mm wide",
+          "composition": "Edith small in frame, lantern room towering above, \
+ocean visible through curved glass behind her",
+          "duration": "5s",
+          "characters_in_frame": ["EDITH"],
+          "action": "Edith enters the lantern room, stops. Looks up at the mechanism.",
+          "dialogue": [],
+          "sound": "wind against glass, door creaks shut behind her",
+          "emotional_note": "awe mixed with foreboding",
+          "transition": "CUT TO",
+          "image_prompt": "Wide shot, low angle, static camera, 24mm lens. EDITH \
+(50s, weathered face, grey-streaked hair pinned tight, navy-wool keeper's uniform, \
+brass-button coat) stands small in the centre of a Victorian lighthouse lantern room. \
+Amber lantern glow as key light, cold blue-grey ocean light from curved glass panels. \
+She looks up at the Fresnel lens mechanism above. Wind-sound against glass. \
+Colour palette: deep navy and warm amber. Cinematic, photorealistic."
         }}
       ]
     }}
@@ -79,19 +139,33 @@ shot/angle/lens/movement, the motion/action, and the audio + any spoken dialogue
 }}
 
 Rules:
-- Produce ONE frame per camera shot — cover EVERY shot in the coverage, in order
-  (do not merge or drop shots); align it with the matching screenplay shot. Only
-  when a scene has no camera coverage, use the screenplay_shots (or key beats).
-- Each frame MUST fuse cast look + art design + camera framing + audio, and carry
-  any dialogue/voice-over from the screenplay for that beat.
-- `image_prompt` must be self-sufficient (it is what gets rendered) — bake the
-  look, camera, motion, and audio into it.
-- emotional_attribute and audio_attribute are required on every frame
-- Keep names consistent with the cast
+- One panel per camera shot — every shot in the coverage, in order (never merge or drop)
+- Align each panel with its screenplay shot; bake in the attributed dialogue
+- image_prompt is self-contained and render-ready — the character look, setting, \
+camera grammar, motion, and audio must ALL be in the prompt
+- emotional_note and transition are required on every panel
+- Keep character names consistent with the cast
 
 SCENE DESIGN BUNDLES:
 {bundles}
 """
+
+
+def _parse_slugline(slugline: str) -> dict:
+    """Extract int_ext, location, and time_of_day from a Fountain slugline."""
+    s = slugline.strip().upper()
+    time_of_day = ""
+    location = s
+    if " - " in s:
+        parts = s.rsplit(" - ", 1)
+        location, time_of_day = parts[0].strip(), parts[1].strip()
+    int_ext = ""
+    for prefix in ("INT./EXT.", "EXT./INT.", "INT/EXT.", "INT.", "EXT."):
+        if location.startswith(prefix):
+            int_ext = prefix.rstrip(".")
+            location = location[len(prefix):].strip()
+            break
+    return {"int_ext": int_ext, "location": location, "time_of_day": time_of_day}
 
 
 def _scene_bundles(
@@ -103,31 +177,32 @@ def _scene_bundles(
     characters: dict | None = None,
     draft: dict | None = None,
 ) -> list[dict]:
-    """Merge the per-scene designs into rich bundles for the prompt.
+    """Merge per-scene designs into rich bundles for the prompt.
 
-    Captures the FULL detail of every upstream artifact — the locked cast look
-    (casting) plus voice/mannerisms (characters), the complete art design, the
-    complete soundscape, the complete camera coverage, and the screenplay's own
-    written shots + attributed dialogue for the scene — because the storyboard is
-    what drives video generation and must lose nothing.
+    Captures the FULL detail of every upstream artifact — locked cast look
+    (casting) plus voice/mannerisms (characters), complete art design, complete
+    soundscape, complete camera coverage, and the screenplay's shots + attributed
+    dialogue — because the storyboard drives video generation and must lose nothing.
     """
     cast_by_name = {c.get("name", ""): c for c in casting.get("casting", [])}
     char_by_name = {c.get("name", ""): c for c in (characters or {}).get("characters", [])}
     sound_by_scene = {s.get("scene_number"): s for s in soundscape.get("soundscapes", [])}
     vis_by_scene = {s.get("scene_number"): s for s in visuals.get("scenes", [])}
     cin_by_scene = {s.get("scene_number"): s for s in cinematography.get("scenes", [])}
-    draft_by_scene = {s.get("number", s.get("scene_number")): s for s in (draft or {}).get("scenes", [])}
+    draft_by_scene = {s.get("number", s.get("scene_number")): s
+                      for s in (draft or {}).get("scenes", [])}
 
     bundles = []
     for scene in scenes.get("scenes", []):
         num = scene.get("number")
-        names = scene.get("characters", []) or list(cast_by_name)
+        slugline = scene.get("slugline", "")
+        slugline_parsed = _parse_slugline(slugline)
+        char_names = scene.get("characters", []) or list(cast_by_name)
+
         cast = []
-        for name in names:
+        for name in char_names:
             c = cast_by_name.get(name, {})
-            # The on-screen look lives in the character (transformation) block;
-            # fall back to the flat legacy schema for older casting.json.
-            ch = c.get("character", c)
+            ch = c.get("character", c)          # character block (locked on-screen look)
             person = char_by_name.get(name, {})
             cast.append({
                 "name": name,
@@ -149,9 +224,11 @@ def _scene_bundles(
 
         bundles.append({
             "scene_number": num,
-            "slugline": scene.get("slugline", ""),
+            "slugline": slugline,
+            "slugline_parsed": slugline_parsed,
             "summary": scene.get("summary", ""),
             "purpose": scene.get("purpose", ""),
+            "characters_in_scene": char_names,
             "cast": cast,
             "art": {
                 "color_palette": vis.get("color_palette", ""),
@@ -168,6 +245,7 @@ def _scene_bundles(
                 "silence": snd.get("silence", False),
                 "sound_events": [{"moment": e.get("moment", ""), "sound": e.get("sound", "")}
                                  for e in snd.get("sound_events", [])],
+                "score_direction": snd.get("score_direction", ""),
                 "emotional_function": snd.get("emotional_function", ""),
             },
             "camera": {
@@ -180,17 +258,17 @@ def _scene_bundles(
                     for shot in cin.get("shots", [])
                 ],
             },
-            # The screenplay's own written shots + attributed dialogue for this scene,
-            # so storyboard frames align with the script and can carry spoken lines.
             "screenplay_shots": [
                 {
                     "shot": sh.get("shot", ""),
                     "shot_type": sh.get("shot_type", ""),
                     "description": sh.get("description", ""),
                     "voiceover": sh.get("voiceover") or None,
-                    "dialogue": [{"speaker": d.get("speaker", ""), "modifier": d.get("modifier", ""),
-                                  "parenthetical": d.get("parenthetical", ""), "line": d.get("line", "")}
-                                 for d in (sh.get("dialogue") or [])],
+                    "dialogue": [
+                        {"speaker": d.get("speaker", ""), "modifier": d.get("modifier", ""),
+                         "parenthetical": d.get("parenthetical", ""), "line": d.get("line", "")}
+                        for d in (sh.get("dialogue") or [])
+                    ],
                     "sound": sh.get("sound", ""),
                 }
                 for sh in scr.get("shots", [])
