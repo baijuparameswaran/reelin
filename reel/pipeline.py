@@ -169,14 +169,24 @@ def _summarize_cinematography(r: dict) -> str:
 def _summarize_storyboard(r: dict) -> str:
     rows = [f"Board style: {r.get('storyboard_style', '?')}"]
     for s in r.get("storyboard", []):
-        frames = s.get("frames", [])
-        rows.append(f"  Scene {s.get('scene_number','?'):>2}: {len(frames)} frames")
-        for f in frames[:2]:
-            rows.append(
-                f"      f{f.get('frame','?')} {f.get('moment','?')[:50]}"
-                f"  [{f.get('emotional_attribute','')[:24]} / "
-                f"{f.get('audio_attribute','')[:24]}]"
-            )
+        panels = s.get("panels") or s.get("frames", [])
+        hdr = s.get("header", {})
+        slugline = hdr.get("slugline") or s.get("scene_number", "?")
+        purpose = hdr.get("purpose", "")
+        dur = hdr.get("duration_estimate", "")
+        rows.append(f"  Scene {s.get('scene_number','?'):>2}  {slugline}"
+                    + (f"  [{dur}]" if dur else "") + f"  — {len(panels)} panel(s)")
+        if purpose:
+            rows.append(f"      purpose: {purpose[:80]}")
+        vo = s.get("visual_overview", {})
+        if vo.get("color_palette"):
+            rows.append(f"      palette: {vo['color_palette'][:70]}")
+        for p in panels[:3]:
+            cam = (f"{p.get('shot_type','')} / {p.get('camera_angle','')} / "
+                   f"{p.get('camera_movement','')}").strip(" /")
+            rows.append(f"      p{p.get('panel', p.get('frame','?'))}  [{cam}]"
+                        f"  {p.get('action', p.get('moment',''))[:55]}"
+                        + (f"  — {p.get('emotional_note','')[:24]}" if p.get('emotional_note') else ""))
     return "\n".join(rows)
 
 
@@ -320,10 +330,12 @@ def _render_scene_frames(storyboard: dict, casting: dict, out: Path,
         sdir.mkdir(exist_ok=True)
         prev_tail = None                        # reset each scene → hard cut between scenes
         frames_out = []
+        # `panels` is the new schema; fall back to `frames` for old checkpoints
+        panels = scene.get("panels") or scene.get("frames", [])
 
-        for fr in scene.get("frames", []):
-            fnum = fr.get("frame", len(frames_out) + 1)
-            prompt = fr.get("image_prompt") or fr.get("image") or fr.get("moment", "")
+        for fr in panels:
+            fnum = fr.get("panel") or fr.get("frame", len(frames_out) + 1)
+            prompt = fr.get("image_prompt") or fr.get("action") or fr.get("moment", "")
             tag = f"{int(fnum):02d}" if isinstance(fnum, int) else str(fnum)
 
             # Seed: continue from the previous frame's tail (carries the look
@@ -341,8 +353,9 @@ def _render_scene_frames(storyboard: dict, casting: dict, out: Path,
                     _log(f"      ⚠ scene {snum} frame {tag} — clip not produced")
 
             frames_out.append({
-                "frame": fnum,
-                "moment": fr.get("moment"),
+                "panel": fnum,
+                "shot_type": fr.get("shot_type", ""),
+                "action": fr.get("action") or fr.get("moment", ""),
                 "seed": str(Path(seed).relative_to(out)) if seed and Path(seed).exists() else None,
                 "clip": str(clip.relative_to(out)) if clip.exists() else None,
             })
