@@ -163,6 +163,13 @@ runtime:
   #
   # num_gpu: -1
 
+  # How many consecutive low-score reruns (fidelity OR genre below threshold)
+  # trigger an automatic model escalation for that stage.
+  # Escalation promotes the stage's profile one tier: fast → quality → quality_high.
+  # The counter resets after each escalation, so each tier gets this many attempts.
+  # Set to 0 to disable auto-escalation entirely.
+  escalate_after: 3
+
 # Qwen3 requires a newer Ollama than 0.6.5. The update script checks this and
 # tells you how to upgrade if needed. (Soft floor; updater always pulls latest.)
 min_ollama_version: "0.7.0"

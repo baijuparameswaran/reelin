@@ -163,6 +163,21 @@ def _is_thinking_model(model: str) -> bool:
     return any(m in model.lower() for m in _THINKING_MODELS)
 
 
+# Ordered quality tiers — lower index = lighter/faster, higher = heavier/better.
+# Used by the pipeline to auto-escalate a stage's model when alignment keeps failing.
+_PROFILE_TIERS: tuple[str, ...] = ("fast", "quality", "quality_high")
+
+
+def next_profile(name: str) -> str | None:
+    """Return the next higher quality profile, or None if already at the top."""
+    try:
+        idx = _PROFILE_TIERS.index(name)
+        nxt = idx + 1
+        return _PROFILE_TIERS[nxt] if nxt < len(_PROFILE_TIERS) else None
+    except ValueError:
+        return None
+
+
 def generate(
     prompt: str,
     *,

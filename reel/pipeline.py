@@ -428,28 +428,53 @@ def _format_genre(rep: dict | None, min_score: int = 70) -> str:
     return line
 
 
+def _model_label(profile: str | None) -> str:
+    """'profile / resolved-model' string for display; graceful on lookup failure."""
+    if not profile:
+        return ""
+    try:
+        model = llm.resolve_model(llm.get_profile(profile))
+        return f"{profile} / {model}"
+    except Exception:
+        return profile
+
+
 def _gated(
     gate: Gate,
     name: str,
     initial_result: dict,
     summarize_fn: Callable,
-    rerun_fn: Callable,            # rerun_fn(feedback: str) -> dict
+    rerun_fn: Callable,            # rerun_fn(feedback: str, profile: str | None) -> dict
     fidelity_fn: Callable | None = None,  # fidelity_fn(result) -> report | None
     min_score: int = 70,
     genre_fn: Callable | None = None,     # genre_fn(result) -> report | None
     genre_min: int = 70,
+    profile: str | None = None,    # resolved profile name for this stage (display + escalation)
+    escalate_after: int = 3,       # consecutive low-score reruns before trying a better model
 ) -> tuple[dict, dict | None, dict | None]:
     """Show gate for initial_result; re-run with feedback until approved. The
     story-fidelity and genre-alignment scores (if their fns are given) are computed
     for each candidate result and shown at the gate so the operator can decide
     whether to re-iterate.
 
+    Tracks consecutive low-score reruns: if either fidelity or genre stays below
+    threshold for `escalate_after` iterations in a row, the stage is escalated to the
+    next higher profile (fast → quality → quality_high) and the rerun function is
+    called with the new profile name. Rerun lambdas must accept (feedback, profile=None).
+
     Returns (approved_result, fidelity_report, genre_report). Raises PipelineStopped.
     """
     result = initial_result
+    current_profile = profile
+    low_score_run = 0
+    iteration = 0
+
     while True:
         report = fidelity_fn(result) if fidelity_fn else None
         grep = genre_fn(result) if genre_fn else None
+
+        iter_label = "initial" if iteration == 0 else f"iteration {iteration + 1}"
+        _log(f"      {name}  [{_model_label(current_profile)}]  ({iter_label})")
 
         def _summary(r, _rep=report, _g=grep):
             return summarize_fn(r) + _format_fidelity(_rep, min_score) + _format_genre(_g, genre_min)
@@ -459,8 +484,34 @@ def _gated(
             return result, report, grep
         if decision.stop:
             raise PipelineStopped(name)
-        _log(f"      re-running {name} with feedback …")
-        result = rerun_fn(decision.feedback)
+
+        # Track consecutive low-score reruns for model escalation.
+        fid_low = (report is not None
+                   and isinstance(report.get("fidelity_score"), (int, float))
+                   and report["fidelity_score"] < min_score)
+        gen_low = (grep is not None
+                   and isinstance(grep.get("genre_score"), (int, float))
+                   and grep["genre_score"] < genre_min)
+        if fid_low or gen_low:
+            low_score_run += 1
+        else:
+            low_score_run = 0  # reset if scores recovered (user re-running for other reasons)
+
+        # Auto-escalate to a better model after repeated misalignment.
+        if low_score_run >= escalate_after and current_profile:
+            next_p = llm.next_profile(current_profile)
+            if next_p:
+                _log(f"      ↑ [{name}] escalating {current_profile} → {next_p} "
+                     f"after {low_score_run} consecutive low-score iterations")
+                current_profile = next_p
+                low_score_run = 0
+            else:
+                _log(f"      [{name}] already at top profile ({current_profile}); "
+                     f"continuing — try stronger feedback or edit the output manually")
+
+        iteration += 1
+        _log(f"      re-running {name}  [{_model_label(current_profile)}]  with feedback …")
+        result = rerun_fn(decision.feedback, current_profile)
 
 
 # ── main pipeline ─────────────────────────────────────────────────────────────
@@ -526,6 +577,8 @@ def run(
     # Genre: fix ONE genre for the run (CLI > config value > auto from storyline),
     # STEER every creative stage with it (llm.set_direction), and ENFORCE alignment
     # per stage (open model, per policy). Toggle via config `genre.{steer,enforce}`.
+    rt_cfg = llm.config().get("runtime", {})
+    escalate_after = int(rt_cfg.get("escalate_after", 3))
     gen_cfg = llm.config().get("genre", {})
     gen_enforce = bool(gen_cfg.get("enforce", True))
     gen_steer = bool(gen_cfg.get("steer", True))
@@ -590,6 +643,9 @@ def run(
         concurrent = parallel and len(pending) > 1
         note = f"  [resumed: {', '.join(loaded)}]" if loaded else ""
         _log(f"{label_num} {label}{' (concurrent)' if concurrent else ''}{note} …")
+        for s in pending:
+            pname = profile_override or llm.agent_profile(s["name"])
+            _log(f"        {s['name']}: {_model_label(pname)}")
 
         raws: dict = {}
         if concurrent:
@@ -607,22 +663,30 @@ def run(
             if nm in loaded:
                 results[nm] = loaded[nm]
                 continue
+            stage_profile = profile_override or llm.agent_profile(nm)
             fid_fn = (lambda res, _nm=nm: fidelity_report(_nm, res)) \
                 if (fid_on and nm in _FID_STAGES) else None
             gen_fn = (lambda res, _nm=nm: genre_report(_nm, res)) \
                 if (gen_enforce and nm in _GENRE_STAGES) else None
             r, rep, grep = _gated(gate, nm, raws[nm], s["summarize"], s["rerun"],
                                   fidelity_fn=fid_fn, min_score=fid_min,
-                                  genre_fn=gen_fn, genre_min=gen_min)
+                                  genre_fn=gen_fn, genre_min=gen_min,
+                                  profile=stage_profile, escalate_after=escalate_after)
             save(nm, r)
             save_fidelity(nm, rep)
             save_genre(nm, grep)
             results[nm] = r
         return results
 
-    fast_model = llm.resolve_model(llm.get_profile(profile_override or "fast"))
-    quality_model = llm.resolve_model(llm.get_profile(profile_override or "quality"))
-    _log(f"models — fast: {fast_model} | quality: {quality_model}")
+    def _resolved(tier: str) -> str:
+        try:
+            return llm.resolve_model(llm.get_profile(profile_override or tier))
+        except Exception:
+            return "(unavailable)"
+    fast_model = _resolved("fast")
+    quality_model = _resolved("quality")
+    quality_high_model = _resolved("quality_high")
+    _log(f"models — fast: {fast_model} | quality: {quality_model} | quality_high: {quality_high_model}")
     if resume:
         _log(f"resume: loading any completed stages from {out}/")
 
@@ -657,11 +721,11 @@ def run(
         _spec("structure",
               lambda: analyze_structure(source, profile_override),
               _summarize_structure,
-              lambda fb: analyze_structure(source, profile_override, feedback=fb)),
+              lambda fb, p=None: analyze_structure(source, p or profile_override, feedback=fb)),
         _spec("characters",
               lambda: extract_characters(source, profile_override),
               _summarize_characters,
-              lambda fb: extract_characters(source, profile_override, feedback=fb)),
+              lambda fb, p=None: extract_characters(source, p or profile_override, feedback=fb)),
     ])
     structure, characters = g["structure"], g["characters"]
     _log(f"      logline: {structure.get('logline', '(parse failed)')[:80]}")
@@ -674,8 +738,9 @@ def run(
                   lambda: design_moodboard(structure, source.get("text", ""), genre_spec,
                                            max_scenes=max_scenes, profile=profile_override),
                   _summarize_moodboard,
-                  lambda fb: design_moodboard(structure, source.get("text", ""), genre_spec,
-                                              max_scenes=max_scenes, profile=profile_override, feedback=fb)),
+                  lambda fb, p=None: design_moodboard(structure, source.get("text", ""), genre_spec,
+                                                       max_scenes=max_scenes, profile=p or profile_override,
+                                                       feedback=fb)),
         ])
         moodboard = g["moodboard"]
         _log(f"      moodboard: {moodboard.get('overall_aesthetic', '?')[:80]}")
@@ -692,11 +757,11 @@ def run(
         _spec("scenes",
               lambda: segment_scenes(source, structure, profile=profile_override),
               _summarize_scenes,
-              lambda fb: segment_scenes(source, structure, profile=profile_override, feedback=fb)),
+              lambda fb, p=None: segment_scenes(source, structure, profile=p or profile_override, feedback=fb)),
         _spec("casting",
               lambda: cast_characters(structure, characters, profile_override),
               _summarize_casting,
-              lambda fb: cast_characters(structure, characters, profile_override, feedback=fb)),
+              lambda fb, p=None: cast_characters(structure, characters, p or profile_override, feedback=fb)),
     ])
     scenes, casting = g["scenes"], g["casting"]
     _log(f"      {len(scenes.get('scenes', []))} scenes; cast {len(casting.get('casting', []))}")
@@ -714,24 +779,24 @@ def run(
         _spec("soundscape",
               lambda: design_soundscape(structure, scenes, profile_override),
               _summarize_soundscape,
-              lambda fb: design_soundscape(structure, scenes, profile_override, feedback=fb)),
+              lambda fb, p=None: design_soundscape(structure, scenes, p or profile_override, feedback=fb)),
         _spec("visuals",
               lambda: design_visuals(structure, scenes, profile_override),
               _summarize_visuals,
-              lambda fb: design_visuals(structure, scenes, profile_override, feedback=fb)),
+              lambda fb, p=None: design_visuals(structure, scenes, p or profile_override, feedback=fb)),
         _spec("cinematography",
               lambda: plan_cinematography(structure, scenes, profile_override),
               _summarize_cinematography,
-              lambda fb: plan_cinematography(structure, scenes, profile_override, feedback=fb)),
+              lambda fb, p=None: plan_cinematography(structure, scenes, p or profile_override, feedback=fb)),
     ])
     soundscape, visuals, cinematography = g["soundscape"], g["visuals"], g["cinematography"]
 
     # ── 8/10  screenplay draft ────────────────────────────────────────────────
-    def _draft(fb=None):
+    def _draft(fb=None, p=None):
         return draft_screenplay(
             source, structure, characters, scenes,
             soundscape=soundscape, visuals=visuals, cinematography=cinematography,
-            casting=casting, max_scenes=max_scenes, profile=profile_override, feedback=fb,
+            casting=casting, max_scenes=max_scenes, profile=p or profile_override, feedback=fb,
         )
     g = run_group(f"8/10 screenplay (first {max_scenes} scenes)", "draft", [
         _spec("screenplay", lambda: _draft(), _summarize_screenplay, _draft),
@@ -741,11 +806,11 @@ def run(
     (out / "screenplay.fountain").write_text(fountain, encoding="utf-8")
 
     # ── 9/10  storyboard (fuses casting + art + camera + score per moment) ────
-    def _board(fb=None):
+    def _board(fb=None, p=None):
         return plan_storyboard(
             structure, scenes, casting, soundscape, visuals, cinematography,
             characters=characters, draft=draft, genre=genre_spec,
-            profile=profile_override, feedback=fb,
+            profile=p or profile_override, feedback=fb,
         )
     g = run_group("9/10", "storyboard", [
         _spec("storyboard", lambda: _board(), _summarize_storyboard, _board),
