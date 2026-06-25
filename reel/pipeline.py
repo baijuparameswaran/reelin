@@ -494,23 +494,29 @@ def _gated(
     name: str,
     initial_result: dict,
     summarize_fn: Callable,
-    rerun_fn: Callable,            # rerun_fn(feedback: str, profile: str | None) -> dict
-    fidelity_fn: Callable | None = None,  # fidelity_fn(result) -> report | None
+    rerun_fn: Callable,             # rerun_fn(feedback: str, profile: str | None) -> dict
+    fidelity_fn: Callable | None = None,
     min_score: int = 70,
-    genre_fn: Callable | None = None,     # genre_fn(result) -> report | None
+    genre_fn: Callable | None = None,
     genre_min: int = 70,
-    profile: str | None = None,    # resolved profile name for this stage (display + escalation)
-    escalate_after: int = 3,       # consecutive low-score reruns before trying a better model
+    profile: str | None = None,     # resolved profile name (display + escalation)
+    escalate_after: int = 3,        # consecutive low-score reruns before gradual escalation
+    escalate_score_gap: int = 20,   # escalate immediately when score is this far below threshold
 ) -> tuple[dict, dict | None, dict | None]:
-    """Show gate for initial_result; re-run with feedback until approved. The
-    story-fidelity and genre-alignment scores (if their fns are given) are computed
-    for each candidate result and shown at the gate so the operator can decide
-    whether to re-iterate.
+    """Show gate for initial_result; re-run with feedback until approved.
 
-    Tracks consecutive low-score reruns: if either fidelity or genre stays below
-    threshold for `escalate_after` iterations in a row, the stage is escalated to the
-    next higher profile (fast → quality → quality_high) and the rerun function is
-    called with the new profile name. Rerun lambdas must accept (feedback, profile=None).
+    Two escalation paths (fast → quality → quality_high):
+
+    1. Immediate: if fidelity OR genre is more than `escalate_score_gap` points below
+       its threshold on the rerun just requested, switch to the next profile right away
+       (don't wait for multiple attempts — a huge gap means the current model clearly
+       can't handle this stage).
+
+    2. Gradual: if scores are consistently below threshold for `escalate_after`
+       consecutive reruns, escalate to the next profile tier.
+
+    Both paths reset the counter on escalation. If already at quality_high, a clear
+    message is logged instead. Rerun lambdas must accept (feedback, profile=None).
 
     Returns (approved_result, fidelity_report, genre_report). Raises PipelineStopped.
     """
@@ -535,29 +541,47 @@ def _gated(
         if decision.stop:
             raise PipelineStopped(name)
 
-        # Track consecutive low-score reruns for model escalation.
-        fid_low = (report is not None
-                   and isinstance(report.get("fidelity_score"), (int, float))
-                   and report["fidelity_score"] < min_score)
-        gen_low = (grep is not None
-                   and isinstance(grep.get("genre_score"), (int, float))
-                   and grep["genre_score"] < genre_min)
-        if fid_low or gen_low:
-            low_score_run += 1
-        else:
-            low_score_run = 0  # reset if scores recovered (user re-running for other reasons)
+        # Extract numeric scores (None when a checker wasn't run / returned no score).
+        fid_score = report.get("fidelity_score") if report else None
+        gen_score = grep.get("genre_score") if grep else None
+        fid_score = fid_score if isinstance(fid_score, (int, float)) else None
+        gen_score = gen_score if isinstance(gen_score, (int, float)) else None
 
-        # Auto-escalate to a better model after repeated misalignment.
-        if low_score_run >= escalate_after and current_profile:
+        fid_low  = fid_score is not None and fid_score < min_score
+        gen_low  = gen_score is not None and gen_score < genre_min
+        fid_huge = fid_score is not None and escalate_score_gap > 0 and fid_score < min_score - escalate_score_gap
+        gen_huge = gen_score is not None and escalate_score_gap > 0 and gen_score < genre_min - escalate_score_gap
+
+        def _try_escalate(reason: str) -> bool:
+            """Promote current_profile one tier; log and return True if escalated."""
+            nonlocal current_profile, low_score_run
+            if not current_profile:
+                return False
             next_p = llm.next_profile(current_profile)
             if next_p:
-                _log(f"      ↑ [{name}] escalating {current_profile} → {next_p} "
-                     f"after {low_score_run} consecutive low-score iterations")
+                _log(f"      ↑ [{name}] {reason} — escalating {current_profile} → {next_p}")
                 current_profile = next_p
                 low_score_run = 0
-            else:
-                _log(f"      [{name}] already at top profile ({current_profile}); "
-                     f"continuing — try stronger feedback or edit the output manually")
+                return True
+            _log(f"      [{name}] {reason} but already at top profile ({current_profile}); "
+                 f"try stronger feedback or edit manually")
+            return False
+
+        if fid_huge or gen_huge:
+            # Path 1 — immediate: score is massively off, don't wait.
+            parts = []
+            if fid_huge:
+                parts.append(f"fidelity {fid_score}/100 (>{escalate_score_gap} pts below {min_score})")
+            if gen_huge:
+                parts.append(f"genre {gen_score}/100 (>{escalate_score_gap} pts below {genre_min})")
+            _try_escalate(f"huge misalignment ({'; '.join(parts)})")
+        elif fid_low or gen_low:
+            # Path 2 — gradual: accumulate consecutive low-score reruns.
+            low_score_run += 1
+            if low_score_run >= escalate_after:
+                _try_escalate(f"{low_score_run} consecutive low-score iterations")
+        else:
+            low_score_run = 0   # scores recovered; reset counter
 
         iteration += 1
         _log(f"      re-running {name}  [{_model_label(current_profile)}]  with feedback …")
@@ -629,6 +653,7 @@ def run(
     # per stage (open model, per policy). Toggle via config `genre.{steer,enforce}`.
     rt_cfg = llm.config().get("runtime", {})
     escalate_after = int(rt_cfg.get("escalate_after", 3))
+    escalate_score_gap = int(rt_cfg.get("escalate_score_gap", 20))
     gen_cfg = llm.config().get("genre", {})
     gen_enforce = bool(gen_cfg.get("enforce", True))
     gen_steer = bool(gen_cfg.get("steer", True))
@@ -721,7 +746,8 @@ def run(
             r, rep, grep = _gated(gate, nm, raws[nm], s["summarize"], s["rerun"],
                                   fidelity_fn=fid_fn, min_score=fid_min,
                                   genre_fn=gen_fn, genre_min=gen_min,
-                                  profile=stage_profile, escalate_after=escalate_after)
+                                  profile=stage_profile, escalate_after=escalate_after,
+                                  escalate_score_gap=escalate_score_gap)
             save(nm, r)
             save_fidelity(nm, rep)
             save_genre(nm, grep)
