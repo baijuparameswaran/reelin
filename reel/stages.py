@@ -145,7 +145,7 @@ STAGES: list[Stage] = [
     Stage("moodboard_tiles", ["moodboard"], _moodboard_tiles, produces="moodboard",
           desc="render moodboard reference tiles to images (image provider)"),
     Stage("scene_render", ["storyboard", "casting"], _scene_render, produces="scene_render",
-          desc="render scenes frame-by-frame to video (video provider)"),
+          desc="render frame clips → per-scene stitch → movie.mp4 (video provider)"),
     Stage("fidelity", ["source", "screenplay_fountain"], _fidelity,
           optional=("storyboard",),
           desc="check the draft aligns with the original story (open text model)"),

@@ -281,16 +281,16 @@ def _frame_char_anchor(frame: dict, cast_index: dict, out: Path) -> Path | None:
 
 def _render_scene_frames(storyboard: dict, casting: dict, out: Path,
                          max_scenes: int | None = None) -> dict:
-    """Next phase (after storyboard + screenplay): render each storyboard frame as
-    a **video clip** (Veo image-to-video), seeded for the first frame of a scene by
-    the in-frame character's representation image (the reference from the image
-    stage), and **chained from the previous frame's last image** so motion is
-    continuous within the scene. Scene boundaries reset the chain (a cut). No
-    intermediate stills are generated — image generation is reserved for the
-    character representation. Best-effort, idempotent. Returns a render manifest.
+    """Render each storyboard frame as a video clip (Veo image-to-video), then
+    stitch each scene's clips into a per-scene video (output/video/scene_NN.mp4)
+    and assemble all scene videos into the final movie (output/video/movie.mp4).
 
-    `max_scenes` caps how many SCENES are rendered (default 1, prototype) —
-    but EVERY shot/frame within each rendered scene is always rendered.
+    Identity seeding: the first frame of each scene seeds from the in-frame
+    character's representation image; subsequent frames chain from the previous
+    clip's last frame for continuity within the scene. Scene boundary = hard cut.
+
+    max_scenes caps how many scenes are rendered; every shot within each rendered
+    scene is always included. Best-effort + idempotent (skips existing files).
     """
     if not i2v.enabled():
         _log(f"      scene render skipped — {i2v.unavailable_hint()}")
@@ -316,10 +316,11 @@ def _render_scene_frames(storyboard: dict, casting: dict, out: Path,
         board = board[:max_scenes]              # limit scenes, never the shots within
     for scene in board:
         snum = scene.get("scene_number", "x")
-        sdir = vdir / f"scene_{snum:02d}" if isinstance(snum, int) else vdir / f"scene_{snum}"
+        sdir = vdir / (f"scene_{snum:02d}" if isinstance(snum, int) else f"scene_{snum}")
         sdir.mkdir(exist_ok=True)
-        prev_tail = None                      # reset each scene → hard cut between scenes
+        prev_tail = None                        # reset each scene → hard cut between scenes
         frames_out = []
+
         for fr in scene.get("frames", []):
             fnum = fr.get("frame", len(frames_out) + 1)
             prompt = fr.get("image_prompt") or fr.get("image") or fr.get("moment", "")
@@ -345,9 +346,29 @@ def _render_scene_frames(storyboard: dict, casting: dict, out: Path,
                 "seed": str(Path(seed).relative_to(out)) if seed and Path(seed).exists() else None,
                 "clip": str(clip.relative_to(out)) if clip.exists() else None,
             })
-        manifest["scenes"].append({"scene_number": snum, "frames": frames_out})
 
-    # Stitch every rendered clip (scene order, then frame order) into one movie.
+        # Stitch this scene's frame clips into a scene-level video.
+        scene_vid = vdir / (f"scene_{snum:02d}.mp4" if isinstance(snum, int) else f"scene_{snum}.mp4")
+        scene_vid_rel: str | None = None
+        if scene_vid.exists():
+            scene_vid_rel = str(scene_vid.relative_to(out))   # already done (resume)
+        else:
+            scene_clips = [out / fr["clip"] for fr in frames_out
+                           if fr.get("clip") and (out / fr["clip"]).exists()]
+            if scene_clips:
+                if i2v.stitch(scene_clips, scene_vid):
+                    scene_vid_rel = str(scene_vid.relative_to(out))
+                    _log(f"      scene {snum}: stitched {len(scene_clips)} clip(s) → {scene_vid.name}")
+                else:
+                    _log(f"      ⚠ scene {snum}: per-scene stitch failed")
+
+        manifest["scenes"].append({
+            "scene_number": snum,
+            "frames": frames_out,
+            "scene_video": scene_vid_rel,
+        })
+
+    # Final assembly: stitch scene videos (preferred) or raw clips into movie.mp4.
     movie = _assemble_movie(manifest, out)
     if movie:
         manifest["movie"] = str(movie.relative_to(out))
@@ -356,13 +377,24 @@ def _render_scene_frames(storyboard: dict, casting: dict, out: Path,
     return manifest
 
 
+def _scene_videos_in_order(manifest: dict, out: Path) -> list[Path]:
+    """Per-scene stitched video paths in playback order."""
+    videos: list[Path] = []
+    for scene in sorted(manifest.get("scenes", []),
+                        key=lambda s: s.get("scene_number") if isinstance(s.get("scene_number"), int) else 1e9):
+        rel = scene.get("scene_video")
+        if rel and (out / rel).exists():
+            videos.append(out / rel)
+    return videos
+
+
 def _clips_in_order(manifest: dict, out: Path) -> list[Path]:
-    """All rendered clip paths in playback order: by scene_number, then frame."""
+    """Individual frame clip paths in playback order (fallback for final stitch)."""
     clips: list[Path] = []
     for scene in sorted(manifest.get("scenes", []),
-                        key=lambda s: (s.get("scene_number") if isinstance(s.get("scene_number"), int) else 1e9)):
+                        key=lambda s: s.get("scene_number") if isinstance(s.get("scene_number"), int) else 1e9):
         for fr in sorted(scene.get("frames", []),
-                         key=lambda f: (f.get("frame") if isinstance(f.get("frame"), int) else 1e9)):
+                         key=lambda f: f.get("frame") if isinstance(f.get("frame"), int) else 1e9):
             rel = fr.get("clip")
             if rel and (out / rel).exists():
                 clips.append(out / rel)
@@ -370,12 +402,17 @@ def _clips_in_order(manifest: dict, out: Path) -> list[Path]:
 
 
 def _assemble_movie(manifest: dict, out: Path) -> Path | None:
-    """Concatenate the manifest's clips into output/video/movie.mp4. Best-effort —
-    returns the movie path on success, else None (a failure never breaks the run)."""
+    """Concatenate into output/video/movie.mp4. Prefers per-scene videos (cleaner
+    seams at scene boundaries); falls back to raw frame clips. Best-effort."""
+    movie = out / "video" / "movie.mp4"
+    scene_vids = _scene_videos_in_order(manifest, out)
+    if scene_vids:
+        _log(f"      assembling movie from {len(scene_vids)} scene video(s) …")
+        return movie if i2v.stitch(scene_vids, movie) else None
     clips = _clips_in_order(manifest, out)
     if not clips:
         return None
-    movie = out / "video" / "movie.mp4"
+    _log(f"      assembling movie from {len(clips)} frame clip(s) …")
     return movie if i2v.stitch(clips, movie) else None
 
 
@@ -817,26 +854,37 @@ def run(
     ])
     storyboard = g["storyboard"]
 
-    # Next phase: with storyboard + screenplay done, render scenes frame by frame
-    # (still per frame → image-to-video clip), chaining clips for continuity. Best-
-    # effort: a no-op on hosts without a video backend (see config `video`).
+    # ── 10/11  video render — explicit stage: clips → per-scene video → movie ───
+    # Depends on: storyboard (frames + prompts), casting (character images for seeding).
+    # Produces: output/video/scene_NN/frame_MM.mp4  (frame clips)
+    #           output/video/scene_NN.mp4            (per-scene stitch)
+    #           output/video/movie.mp4               (final assembly)
+    # Best-effort: skipped gracefully when no video backend is available.
     scene_render = {}
-    if i2v.enabled():
-        _log(f"      rendering scenes frame by frame (image-to-video; "
-             f"{max_scenes} scenes, all shots each) …")
+    if not i2v.enabled():
+        _log(f"10/11 video render — skipped ({i2v.unavailable_hint()})")
+    else:
+        backend_label = i2v.backend()
+        total_scenes = min(max_scenes, len(storyboard.get("storyboard", []))) if max_scenes else len(storyboard.get("storyboard", []))
+        _log(f"10/11 video render  [{backend_label}]  "
+             f"({total_scenes} scene(s), all shots, per-scene stitch + final assembly) …")
         scene_render = _render_scene_frames(storyboard, casting, out, max_scenes=max_scenes)
         if scene_render:
             ok = scene_render.get("clips", 0)
             failed = scene_render.get("failed", 0)
-            total = ok + failed
+            total_clips = ok + failed
+            scenes_stitched = sum(1 for s in scene_render.get("scenes", []) if s.get("scene_video"))
+            total_scenes_rendered = len(scene_render.get("scenes", []))
+            movie = scene_render.get("movie")
             if failed and ok:
-                _log(f"      ⚠ scene render: {ok}/{total} clips produced, {failed} failed — "
-                     f"check logs above for details; clips → {out}/video/")
+                _log(f"      ⚠ {ok}/{total_clips} clips, {failed} failed — "
+                     f"{scenes_stitched}/{total_scenes_rendered} scene video(s)"
+                     + (f" → {movie}" if movie else ""))
             elif failed and not ok:
-                _log(f"      ⚠ scene render: 0/{total} clips produced — all frames failed; "
-                     f"check logs above for the error")
+                _log(f"      ⚠ 0/{total_clips} clips — all frames failed; check logs above")
             else:
-                _log(f"      clips → {out}/video/ ({ok} clips)")
+                _log(f"      {ok} clips → {scenes_stitched}/{total_scenes_rendered} scene video(s)"
+                     + (f" → {movie}" if movie else " (stitch pending)"))
 
     # Aggregate the per-stage fidelity checks into one pipeline story-fidelity score.
     fidelity_summary = {}
@@ -860,10 +908,10 @@ def run(
                  + (f"; off-genre in {overall_g['off_genre_stages']}" if overall_g.get("off_genre_stages") else ""))
     llm.set_direction(None)   # clear steering once the creative stages are done
 
-    # ── 10/10  assemble artifacts ─────────────────────────────────────────────
+    # ── 11/11  assemble artifacts ─────────────────────────────────────────────
     # Per-stage JSON + screenplay.fountain are already written above (incremental,
     # crash-safe). Here we add the per-character files and the combined manifest.
-    _log("10/10 assemble artifacts …")
+    _log("11/11 assemble artifacts …")
 
     chars_dir = out / "characters"
     chars_dir.mkdir(exist_ok=True)
