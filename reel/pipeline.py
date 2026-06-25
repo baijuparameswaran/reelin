@@ -309,7 +309,7 @@ def _render_scene_frames(storyboard: dict, casting: dict, out: Path,
 
     vdir = out / "video"
     vdir.mkdir(exist_ok=True)
-    manifest = {"continuity": continuity, "clips": 0, "scenes": []}
+    manifest = {"continuity": continuity, "clips": 0, "failed": 0, "scenes": []}
 
     board = storyboard.get("storyboard", [])
     if max_scenes:
@@ -335,6 +335,9 @@ def _render_scene_frames(storyboard: dict, casting: dict, out: Path,
                     manifest["clips"] += 1
                     if continuity:
                         prev_tail = i2v.last_frame(clip, sdir / f"frame_{tag}_tail.png") or seed
+                else:
+                    manifest["failed"] += 1
+                    _log(f"      ⚠ scene {snum} frame {tag} — clip not produced")
 
             frames_out.append({
                 "frame": fnum,
@@ -758,7 +761,17 @@ def run(
              f"{max_scenes} scenes, all shots each) …")
         scene_render = _render_scene_frames(storyboard, casting, out, max_scenes=max_scenes)
         if scene_render:
-            _log(f"      clips → {out}/video/ ({scene_render.get('clips', 0)} clips)")
+            ok = scene_render.get("clips", 0)
+            failed = scene_render.get("failed", 0)
+            total = ok + failed
+            if failed and ok:
+                _log(f"      ⚠ scene render: {ok}/{total} clips produced, {failed} failed — "
+                     f"check logs above for details; clips → {out}/video/")
+            elif failed and not ok:
+                _log(f"      ⚠ scene render: 0/{total} clips produced — all frames failed; "
+                     f"check logs above for the error")
+            else:
+                _log(f"      clips → {out}/video/ ({ok} clips)")
 
     # Aggregate the per-stage fidelity checks into one pipeline story-fidelity score.
     fidelity_summary = {}
