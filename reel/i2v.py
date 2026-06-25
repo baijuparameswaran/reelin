@@ -206,6 +206,7 @@ def generate_clip(images, prompt: str, out_path: Path) -> bool:
     b = backend()
     # Veo can do text-to-video; the other backends require a seed image.
     if not imgs and b not in ("gemini", "veo"):
+        _log(f"      ⚠ clip skipped — no seed image available and {b!r} backend requires one")
         return False
     try:
         if b in ("gemini", "veo"):
@@ -214,12 +215,13 @@ def generate_clip(images, prompt: str, out_path: Path) -> bool:
             return _gen_diffusers(imgs, prompt, out_path)
         if b in ("comfyui", "http"):
             return _gen_http(imgs, prompt, out_path)
+        _log(f"      ⚠ clip skipped — unknown video backend {b!r}")
         return False
     except (urllib.error.URLError, socket.timeout, TimeoutError) as e:
-        _log(f"      video backend error ({e}); kept frame still only")
+        _log(f"      ⚠ video backend error: {e}")
         return False
     except Exception as e:  # model load / OOM / decode — stay non-fatal
-        _log(f"      clip render failed ({type(e).__name__}: {e}); kept frame still only")
+        _log(f"      ⚠ clip render failed ({type(e).__name__}: {e})")
         return False
 
 
