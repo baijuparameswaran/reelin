@@ -57,25 +57,26 @@ judge neutrally). A human-in-the-loop gate reviews/iterates each stage.
   `update-all`, `install-cron`. Run pipeline as `python -m reel.cli`.
 
 ## Hardware reality (binding constraint)
-Host `Priya-Laptop`, WSL2/Ubuntu 24.04. **No NVIDIA GPU (Intel iGPU only) →
-CPU-only inference.** WSL RAM raised to **~12 GB** (`MemTotal` ≈ 12 GB; 16 GB
-laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`) — up from the
-original 7.6 GB cap. 4 GB swap. 872 GB disk.
-- Usable models ~3–8B. An 8B q5 model (~5.7 GB) now loads without swapping, so
-  the `quality` tier is comfortable. `num_ctx` still **4096** (raising to 8192
-  is now plausible at 12 GB but untested — would reduce prompt truncation).
-- Inference is slow (few tok/s). An early 5-stage sample run took hours of wall
-  clock (inflated by laptop sleep); the pipeline is now 10 stages, so expect
-  longer. Treat runs as batch jobs — and note HITL gates add operator wait time
-  unless `hitl.enabled: false` (or rely on the `timeout_seconds` auto-approve).
-- **WSL memory has been raised to ~12 GB** (`%UserProfile%\.wslconfig`: `[wsl2]`
-  / `memory=12GB`, then `wsl --shutdown`), so the `quality` 8B tier no longer
-  OOMs. If you ever revert to the 7.6 GB cap, the 8B tier gets tight again.
-- **Slow stages & timeouts:** generation streams, so `runtime.request_timeout_seconds`
-  (now **600 s**) is the max gap *to the next token*, not a total cap. The first
-  token is the long pole — it includes model (re)load + CPU prefill — and is
-  worst for the heavy `storyboard` stage (largest prompt). If it still trips,
-  raise the knob (or set 0 = wait forever) and `--resume`.
+Host `Priya-Laptop`, WSL2/Ubuntu 24.04. **NVIDIA GeForce RTX 2070 Super, 8 GB
+VRAM** (confirmed via `nvidia-smi`). WSL RAM ~12 GB (`MemTotal` ≈ 12 GB; 16 GB
+laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
+872 GB disk.
+- Installed models and VRAM fit: `qwen3:4b` (2.5 GB, full GPU), `qwen3:8b`
+  (5.2 GB, full GPU), `gemma3:12b` (8.1 GB, partial offload ~85% GPU).
+- **GPU requires the official Ollama installer, not the snap.** The snap package
+  (v0.24.0) uses strict confinement that blocks `/dev/nvidia*` access — models
+  fall back to 100% CPU. Install via:
+  `curl -fsSL https://ollama.com/install.sh | sh`
+  Verify with `ollama ps` — look for non-zero "Size VRAM" after loading a model.
+- **With GPU:** first-token latency ~2–5 s (vs ~30–60 s on CPU). `request_timeout_seconds`
+  now **120 s** (was 600 s). **Intel NPU is not accessible from WSL2** — no
+  `/dev/accel`, no OpenVINO; GPU is the only accelerator usable by Ollama.
+- **23 GB RAM** enables GPU+CPU split for models larger than VRAM: qwen3:14b
+  (~8.9 GB, ~90% GPU) and qwen3:30b (~19 GB, ~42% GPU + ~11 GB CPU RAM).
+- Profile model assignments: `fast`=qwen3:4b (100% GPU, ~80 tok/s), `quality`=qwen3:8b
+  (100% GPU, ~40 tok/s), `thinking`=qwen3:14b (~90% GPU, ~25 tok/s, num_ctx 16384),
+  `quality_high`=qwen3:30b (42% GPU + CPU, ~8 tok/s, best quality escalation target).
+- `max_parallel_agents: 2` — GPU holds two 4B or one 8B+4B simultaneously.
 
 ## Conventions & decisions
 - **Model-agnostic by design:** agents pick a *profile* (`fast`/`quality`), never
@@ -229,16 +230,39 @@ original 7.6 GB cap. 4 GB swap. 872 GB disk.
 - **Genre + moodboard steer the whole run; both grade-able stages stay neutral.**
   Verified the steering exemption (creative `llm.generate` gets the direction;
   `models.text` graders don't). Moodboard `tiles` are capped to `max_scenes`.
-- **Recommended next user action:** run one full end-to-end pass (`make run` /
-  `make demo`) to confirm all stages incl. genre+moodboard produce clean JSON, then
-  `python -m reel.cli render --fresh` for video. *(WSL RAM at ~12 GB; storyboard
-  inactivity timeout at 600 s.)*
+- **Recommended next user action:** Enable GPU by replacing the snap Ollama:
+  `! curl -fsSL https://ollama.com/install.sh | sh` (then re-pull models with
+  `ollama pull qwen3:4b && ollama pull qwen3:8b && ollama pull gemma3:12b`).
+  Verify GPU with `ollama ps` — "PROCESSOR" column should show "GPU" or "GPU+CPU".
+  Then run `make run` / `make demo` for a full end-to-end pass.
 - **Next up (next iterations):** auto-render moodboard `tiles` (opt-in, like casting
   images); per-scene clip assembly (ffmpeg concat); input chunking for long texts
   (truncated ~12k chars); draft *all* scenes not just first N; richer ingest
   (PDF/EPUB/.fdx); then the *next phase* (edit / sound mix / final cut).
 
 ## Session log
+- 2026-06-25 — **Better models for 23 GB RAM + 8 GB VRAM.** Intel NPU confirmed
+  inaccessible from WSL2 (no `/dev/accel`, no OpenVINO). With 22 GB available RAM,
+  models larger than VRAM are now viable via GPU+CPU split. Upgraded `thinking`
+  profile: qwen3:8b → **qwen3:14b** (~8.9 GB, ~90% GPU, num_ctx 16384, think:true)
+  — synthesis stages (storyboard/screenplay/structure) benefit most from extra
+  params + CoT. Upgraded `quality_high`: gemma3:12b → **qwen3:30b** (~19 GB,
+  42% GPU + 11 GB CPU RAM, think:true) — best available escalation target on this
+  hardware. `fast`/`quality` unchanged (qwen3:4b/8b already perfectly sized).
+  Pull needed: `ollama pull qwen3:14b && ollama pull qwen3:30b`.
+- 2026-06-25 — **GPU enablement + model tuning.** Identified that the Ollama snap
+  package (v0.24.0) uses strict confinement blocking `/dev/nvidia*` access, causing
+  100% CPU inference despite an RTX 2070 Super (8 GB VRAM) being present. Fixed
+  `config/models.yaml`: uncommented and enabled `num_gpu: -1` (full GPU offload);
+  raised `num_ctx` from 4096 → 8192 for fast/quality/thinking profiles (VRAM
+  headroom); kept quality_high at 4096 (partial offload for gemma3:12b); raised
+  `max_parallel_agents` 1 → 2 (GPU can hold two models concurrently); lowered
+  `request_timeout_seconds` 600 → 120 (GPU first-token ~2–5 s vs 30–60 s on CPU).
+  Updated CLAUDE.md hardware section (was "Intel iGPU only → CPU-only", now
+  documents the actual RTX 2070). **User action required** to take effect:
+  replace the snap with the official Ollama installer (see Recommended next action).
+
+
 - 2026-06-22 — **Genre + moodboard agents, full-detail storyboard/screenplay,
   standalone video render.** Added two cross-cutting agents that are fixed once and
   shape every stage. **`reel/agents/genre.py`**: one genre per run (priority
