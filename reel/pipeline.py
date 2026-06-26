@@ -229,6 +229,7 @@ def _render_casting_images(casting: dict, out: Path) -> int:
     n = 0
     for c in casting.get("casting", []):
         slug = _slug(c.get("name", "character"))
+        kind = c.get("kind", "person")
         character = c.get("character") or {}
         target = character if character else c
         prompt = (character.get("visual_prompt")
@@ -236,8 +237,10 @@ def _render_casting_images(casting: dict, out: Path) -> int:
                   or c.get("visual_prompt") or c.get("physical_form")
                   or c.get("name", ""))
         if not prompt:
+            _log(f"      ⚠ {c.get('name','?')} ({kind}) — no visual_prompt; skipping render")
             continue
         img = cast_dir / f"{slug}.png"
+        _log(f"      rendering {c.get('name','?')} [{kind}] …")
         if img.exists() or imagegen.generate_image(prompt, img):
             target["image_path"] = str(img.relative_to(out))
             n += 1
@@ -343,11 +346,16 @@ def _render_scene_frames(storyboard: dict, casting: dict, out: Path,
             # character's representation image (identity reference).
             seed = prev_tail if (prev_tail and continuity) else _frame_char_anchor(fr, cast_index, out)
             clip = sdir / f"frame_{tag}.mp4"
+            tail_img = sdir / f"frame_{tag}_tail.png"
             if not clip.exists():
                 if i2v.generate_clip([seed] if seed else [], prompt, clip):
                     manifest["clips"] += 1
+                    # Always extract the tail frame so every clip has one on disk.
+                    # Continuity chains it forward as the next-clip seed;
+                    # ffmpeg stitching benefits from having clean cut-points regardless.
+                    tail = i2v.last_frame(clip, tail_img)
                     if continuity:
-                        prev_tail = i2v.last_frame(clip, sdir / f"frame_{tag}_tail.png") or seed
+                        prev_tail = tail or seed
                 else:
                     manifest["failed"] += 1
                     _log(f"      ⚠ scene {snum} frame {tag} — clip not produced")
@@ -761,8 +769,10 @@ def run(
             return "(unavailable)"
     fast_model = _resolved("fast")
     quality_model = _resolved("quality")
+    thinking_model = _resolved("thinking")
     quality_high_model = _resolved("quality_high")
-    _log(f"models — fast: {fast_model} | quality: {quality_model} | quality_high: {quality_high_model}")
+    _log(f"models — fast: {fast_model} | quality: {quality_model} | "
+         f"thinking: {thinking_model} | quality_high: {quality_high_model}")
     if resume:
         _log(f"resume: loading any completed stages from {out}/")
 
@@ -820,12 +830,9 @@ def run(
         ])
         moodboard = g["moodboard"]
         _log(f"      moodboard: {moodboard.get('overall_aesthetic', '?')[:80]}")
-        # Render the moodboard's reference tiles via the image backend (Gemini when
-        # keyed). The spec stays on open models; only the tiles become images.
-        if imagegen.enabled() and moodboard.get("tiles"):
-            if _render_moodboard_tiles(moodboard, out):
-                save("moodboard", moodboard)
-                _log(f"      moodboard tiles → {out}/moodboard/")
+        n_tiles = len(moodboard.get("tiles") or [])
+        if n_tiles:
+            _log(f"      moodboard: {n_tiles} tile(s) kept as text cues for storyboard")
         apply_direction()   # fold the moodboard into the steering for every stage below
 
     # ── 3–4/10  scenes + casting (scenes←structure, casting←characters) ───────
@@ -886,7 +893,8 @@ def run(
         return plan_storyboard(
             structure, scenes, casting, soundscape, visuals, cinematography,
             characters=characters, draft=draft, genre=genre_spec,
-            profile=p or profile_override, feedback=fb,
+            moodboard=moodboard,
+            profile=p or profile_override, feedback=fb, out=out,
         )
     g = run_group("9/10", "storyboard", [
         _spec("storyboard", lambda: _board(), _summarize_storyboard, _board),
