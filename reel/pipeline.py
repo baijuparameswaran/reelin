@@ -902,6 +902,7 @@ def run(
             structure, scenes, casting, soundscape, visuals, cinematography,
             characters=characters, draft=draft, genre=genre_spec,
             moodboard=moodboard,
+            source_text=source.get("text", ""),
             profile=p or profile_override, feedback=fb, out=out,
         )
     g = run_group("9/10", "storyboard", [

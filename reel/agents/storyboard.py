@@ -46,7 +46,7 @@ Film:
 - Logline: {logline}
 - Genre: {genre}
 - Tone: {tone}
-
+{story_block}
 STORYBOARD STRUCTURE:
 
 For each scene produce:
@@ -73,7 +73,8 @@ Each panel must include:
    - duration: estimated screen time e.g. "3s" "6s" "12s"
    - characters_in_frame: list of character names visible
    - action: physical movement or event (what happens / moves — drives video motion)
-   - dialogue: list of {{speaker, line, vo}} — attributed lines from the screenplay \
+   - dialogue: list of {{speaker, line, vo}} — copy VERBATIM from the matching \
+screenplay_shot.dialogue; do not paraphrase, trim, or invent lines; \
 (vo: true for voice-over); empty list if silent
    - sound: ambient bed + specific sound events audible in this panel
    - emotional_note: the emotion this panel must evoke in the audience
@@ -140,8 +141,13 @@ Colour palette: deep navy and warm amber. Cinematic, photorealistic."
 }}
 
 Rules:
+- FIDELITY FIRST: every panel's action and events must be grounded in the source \
+material above. Do not invent scenes, add character motivations, or introduce \
+relationships not present in the story.
+- Dialogue is LOCKED: copy each line verbatim from `screenplay_shots.dialogue` \
+into the matching panel's `dialogue` list. Never paraphrase, merge, or add lines.
 - One panel per camera shot — every shot in the coverage, in order (never merge or drop)
-- Align each panel with its screenplay shot; bake in the attributed dialogue
+- Align each panel with its screenplay shot; bake in the verbatim attributed dialogue
 - image_prompt is self-contained and render-ready — the character look, setting, \
 camera grammar, motion, and audio must ALL be in the prompt
 - If the scene bundle includes a `moodboard_tile`, use its `visual_reference` text \
@@ -314,6 +320,19 @@ def _collect_casting_images(casting: dict, out: Path | None) -> list[Path]:
     return imgs
 
 
+def _story_block(source_text: str, max_chars: int = 2500) -> str:
+    """Source excerpt for the fidelity anchor at the top of the storyboard prompt."""
+    text = (source_text or "").strip()
+    if not text:
+        return ""
+    excerpt = text[:max_chars] + ("\n[… excerpt truncated]" if len(text) > max_chars else "")
+    return (
+        "\nSOURCE MATERIAL (primary fidelity anchor — every panel must reflect "
+        "what actually happens in this story; do not invent events or embellish "
+        "beyond what the source supports):\n" + excerpt + "\n"
+    )
+
+
 def plan_storyboard(
     structure: dict,
     scenes: dict,
@@ -325,23 +344,49 @@ def plan_storyboard(
     draft: dict | None = None,
     genre: dict | str | None = None,
     moodboard: dict | None = None,
+    source_text: str = "",
     profile: str | None = None,
     feedback: str | None = None,
     out: str | Path | None = None,
 ) -> dict:
+    """Build the storyboard scene by scene.
+
+    Each scene is sent in its own LLM call with the full source text as an anchor,
+    so the model's attention stays focused on one scene at a time rather than
+    trying to hold a massive multi-scene JSON bundle in context. The per-scene
+    results are collected and returned in the combined storyboard shape.
+    """
     profile = profile or llm.agent_profile("storyboard")
     bundles = _scene_bundles(scenes, casting, soundscape, visuals, cinematography,
                              characters=characters, draft=draft, moodboard=moodboard)
     genre_name = (genre.get("genre") if isinstance(genre, dict) else genre) \
         or structure.get("genre", "drama")
-    prompt = llm.with_feedback(
-        PROMPT.format(
-            logline=structure.get("logline", ""),
-            genre=genre_name,
-            tone=structure.get("tone", ""),
-            bundles=json.dumps(bundles, ensure_ascii=False, indent=2),
-        ),
-        feedback,
-    )
-    raw = llm.generate(prompt, profile=profile, system=SYSTEM, as_json=True)
-    return llm.safe_json(raw)
+    story_blk = _story_block(source_text)
+    logline = structure.get("logline", "")
+    tone = structure.get("tone", "")
+
+    board_scenes = []
+    storyboard_style = ""
+
+    for bundle in bundles:
+        single_bundle = json.dumps([bundle], ensure_ascii=False, indent=2)
+        prompt = llm.with_feedback(
+            PROMPT.format(
+                logline=logline,
+                genre=genre_name,
+                tone=tone,
+                story_block=story_blk,
+                bundles=single_bundle,
+            ),
+            feedback,
+        )
+        raw = llm.generate(prompt, profile=profile, system=SYSTEM, as_json=True)
+        result = llm.safe_json(raw)
+        if not storyboard_style and result.get("storyboard_style"):
+            storyboard_style = result["storyboard_style"]
+        board_scenes.extend(result.get("storyboard", []))
+
+    return {
+        "storyboard_style": storyboard_style,
+        "storyboard": board_scenes,
+    }
