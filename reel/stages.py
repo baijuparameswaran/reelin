@@ -91,12 +91,14 @@ def _screenplay(ctx, *, profile=None, feedback=None, max_scenes=1, **_):
         cinematography=ctx.get("cinematography"), casting=ctx.get("casting"),
         max_scenes=max_scenes, profile=profile, feedback=feedback)
 
-def _storyboard(ctx, *, profile=None, feedback=None, **_):
+def _storyboard(ctx, *, out, profile=None, feedback=None, **_):
     return plan_storyboard(
         ctx["structure"], ctx["scenes"], ctx["casting"], ctx["soundscape"],
         ctx["visuals"], ctx["cinematography"],
         characters=ctx.get("characters"), draft=ctx.get("screenplay"),
-        profile=profile, feedback=feedback)
+        source_text=(ctx.get("source") or {}).get("text", ""),
+        moodboard=ctx.get("moodboard"),
+        profile=profile, feedback=feedback, out=out)
 
 def _casting_images(ctx, *, out, **_):
     from . import pipeline as P                      # lazy: avoid import cycle
@@ -139,7 +141,7 @@ STAGES: list[Stage] = [
           desc="Fountain draft (shots, attributed dialogue, V.O.)"),
     Stage("storyboard", ["structure", "scenes", "casting", "soundscape", "visuals",
                          "cinematography"], _storyboard,
-          optional=("characters", "screenplay"),
+          optional=("characters", "screenplay", "source", "moodboard"),
           desc="production storyboard: scene header + visual/audio overview + panels with full camera grammar"),
     Stage("casting_images", ["casting"], _casting_images, produces="casting",
           desc="render character representation images (image provider)"),
