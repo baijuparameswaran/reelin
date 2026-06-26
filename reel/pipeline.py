@@ -612,6 +612,10 @@ def run(
     already approved stays on disk. Re-run with `resume=True` to load those
     checkpoints and continue from the first stage that hasn't been completed.
     """
+    # Clear any direction left over from a previous run that may have crashed or
+    # been interrupted before reaching the llm.set_direction(None) at the end.
+    llm.set_direction(None)
+
     t0 = time.time()
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
