@@ -29,10 +29,10 @@ dialogue. Use the camera coverage below to decide the shots.
 
 Story logline: {logline}
 Tone: {tone}
-
+{story_block}
 Characters in this scene (use these EXACT names as speakers):
 {characters}
-{casting_block}
+{casting_block}{prior_scenes_block}
 Scene to write:
 - Slugline: {slugline}
 - What happens: {summary}
@@ -58,8 +58,11 @@ Respond with JSON in exactly this shape:
 }}
 
 Rules:
+- Stay faithful to the source material — do not invent events, relationships, or
+  dialogue not supported by the story excerpt above.
 - Derive shots from the camera coverage when given; otherwise pick the key beats.
 - EVERY dialogue line MUST have a `speaker` that matches a character name above.
+- Do NOT repeat or contradict anything already established in prior scenes.
 - Use `voiceover` only when narration / interior monologue genuinely serves the
   scene (e.g. reflection over action); set it to null when not needed.
 - Use modifier "O.S." for a speaker heard but not seen; "V.O." voice is the
@@ -183,6 +186,37 @@ def _scene_char_brief(names: list[str], lookup: dict[str, dict]) -> str:
     return "\n".join(rows) or "- (none extracted)"
 
 
+def _story_block(source_text: str, max_chars: int = 2500) -> str:
+    """Truncated source excerpt so the agent stays anchored to the actual story."""
+    text = (source_text or "").strip()
+    if not text:
+        return ""
+    excerpt = text[:max_chars]
+    if len(text) > max_chars:
+        excerpt += "\n[… excerpt truncated]"
+    return f"Source material (stay faithful — adapt from this, do not invent):\n{excerpt}\n"
+
+
+def _prior_scenes_block(drafted: list[dict]) -> str:
+    """Compact summary of already-drafted scenes for cross-scene continuity."""
+    if not drafted:
+        return ""
+    lines = ["Previously drafted scenes (do NOT repeat, contradict, or recap):"]
+    for d in drafted:
+        slug = d.get("slugline", f"Scene {d.get('number', '?')}")
+        shots = d.get("shots", [])
+        # One-line summary: first shot description + any dialogue speakers seen
+        first_desc = shots[0].get("description", "") if shots else ""
+        speakers = sorted({
+            dl.get("speaker", "") for s in shots
+            for dl in (s.get("dialogue") or []) if dl.get("speaker")
+        })
+        detail = first_desc[:80] + ("…" if len(first_desc) > 80 else "")
+        speaker_note = f" [speakers: {', '.join(speakers)}]" if speakers else ""
+        lines.append(f"  - {slug}: {detail}{speaker_note}")
+    return "\n".join(lines) + "\n"
+
+
 def draft_screenplay(
     source: dict,
     structure: dict,
@@ -199,6 +233,7 @@ def draft_screenplay(
     profile = profile or llm.agent_profile("screenplay")
     logline = structure.get("logline", source["title"])
     tone = structure.get("tone", "")
+    source_text = source.get("text", "")
     char_lookup = _char_lookup(characters)
     casting_lookup = _casting_lookup(casting or {})
     sound_lookup = _soundscape_lookup(soundscape or {})
@@ -208,6 +243,7 @@ def draft_screenplay(
         f"REVISION REQUEST (apply throughout all scenes):\n{feedback}\n\n"
         if feedback else ""
     )
+    story_blk = _story_block(source_text)
 
     scene_list = scenes.get("scenes", [])
     drafted = []
@@ -219,8 +255,10 @@ def draft_screenplay(
             revision_note=revision_note,
             logline=logline,
             tone=tone,
+            story_block=story_blk,
             characters=_scene_char_brief(scene_chars, char_lookup),
             casting_block=_scene_casting_brief(scene_chars, casting_lookup),
+            prior_scenes_block=_prior_scenes_block(drafted),
             slugline=slugline,
             scene_number=scene_num if scene_num is not None else 0,
             summary=scene.get("summary", ""),
