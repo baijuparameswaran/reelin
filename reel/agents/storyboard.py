@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 
 from .. import llm
 
@@ -143,6 +144,8 @@ Rules:
 - Align each panel with its screenplay shot; bake in the attributed dialogue
 - image_prompt is self-contained and render-ready — the character look, setting, \
 camera grammar, motion, and audio must ALL be in the prompt
+- If the scene bundle includes a `moodboard_tile`, use its `visual_reference` text \
+as a tonal and composition anchor when writing `image_prompt`s for that scene's panels
 - emotional_note and transition are required on every panel
 - Keep character names consistent with the cast
 
@@ -176,6 +179,7 @@ def _scene_bundles(
     cinematography: dict,
     characters: dict | None = None,
     draft: dict | None = None,
+    moodboard: dict | None = None,
 ) -> list[dict]:
     """Merge per-scene designs into rich bundles for the prompt.
 
@@ -191,9 +195,13 @@ def _scene_bundles(
     cin_by_scene = {s.get("scene_number"): s for s in cinematography.get("scenes", [])}
     draft_by_scene = {s.get("number", s.get("scene_number")): s
                       for s in (draft or {}).get("scenes", [])}
+    # Moodboard tiles are text-only visual cues (one per scene, in order).
+    # They travel as text through the storyboard so image generation is not required
+    # at this stage; the storyboard uses the label + image_prompt as a reference brief.
+    mood_tiles = list((moodboard or {}).get("tiles") or [])
 
     bundles = []
-    for scene in scenes.get("scenes", []):
+    for i, scene in enumerate(scenes.get("scenes", [])):
         num = scene.get("number")
         slugline = scene.get("slugline", "")
         slugline_parsed = _parse_slugline(slugline)
@@ -221,6 +229,7 @@ def _scene_bundles(
         snd = sound_by_scene.get(num, {})
         cin = cin_by_scene.get(num, {})
         scr = draft_by_scene.get(num, {})
+        mood_tile = mood_tiles[i] if i < len(mood_tiles) else {}
 
         bundles.append({
             "scene_number": num,
@@ -273,8 +282,36 @@ def _scene_bundles(
                 }
                 for sh in scr.get("shots", [])
             ],
+            # Moodboard tile for this scene: text-only visual reference brief.
+            # Use the label as a tonal anchor and image_prompt as the render cue
+            # when composing image_prompts for each panel.
+            "moodboard_tile": {
+                "label": mood_tile.get("label", ""),
+                "visual_reference": mood_tile.get("image_prompt", ""),
+            } if mood_tile else None,
         })
     return bundles
+
+
+def _collect_casting_images(casting: dict, out: Path | None) -> list[Path]:
+    """Gather unique casting reference images from output/casting/*.png.
+
+    Returns paths in character order. Missing files are silently skipped so the
+    call degrades gracefully when images haven't been rendered yet.
+    """
+    if out is None:
+        return []
+    imgs: list[Path] = []
+    seen: set[str] = set()
+    for c in casting.get("casting", []):
+        ch = c.get("character", c)
+        path_str = ch.get("image_path", "")
+        if path_str and path_str not in seen:
+            seen.add(path_str)
+            p = Path(path_str) if Path(path_str).is_absolute() else out / path_str
+            if p.exists():
+                imgs.append(p)
+    return imgs
 
 
 def plan_storyboard(
@@ -287,12 +324,14 @@ def plan_storyboard(
     characters: dict | None = None,
     draft: dict | None = None,
     genre: dict | str | None = None,
+    moodboard: dict | None = None,
     profile: str | None = None,
     feedback: str | None = None,
+    out: str | Path | None = None,
 ) -> dict:
     profile = profile or llm.agent_profile("storyboard")
     bundles = _scene_bundles(scenes, casting, soundscape, visuals, cinematography,
-                             characters=characters, draft=draft)
+                             characters=characters, draft=draft, moodboard=moodboard)
     genre_name = (genre.get("genre") if isinstance(genre, dict) else genre) \
         or structure.get("genre", "drama")
     prompt = llm.with_feedback(
