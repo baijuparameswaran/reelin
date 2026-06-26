@@ -3,8 +3,3 @@
 # dependency is PyYAML for the human-editable model config.
 PyYAML>=6.0
 
-# Encrypted API key storage (Gemini key). keyrings.cryptfile provides a
-# password-protected encrypted keyring that works on WSL2 without a desktop
-# session (no Gnome Keyring / KWallet required).
-keyring>=25.0
-keyrings.cryptfile>=1.3

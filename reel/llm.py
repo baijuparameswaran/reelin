@@ -13,6 +13,7 @@ crashed daemon does. Tune via `runtime.request_timeout_seconds` in models.yaml.
 """
 from __future__ import annotations
 
+import base64
 import json
 import re
 import socket
@@ -36,6 +37,7 @@ class Profile:
     model: str
     fallbacks: list[str] = field(default_factory=list)
     options: dict = field(default_factory=dict)
+    think: bool | None = None  # per-profile override; None = use runtime.think global
 
 
 @lru_cache(maxsize=1)
@@ -130,7 +132,9 @@ def get_profile(name: str) -> Profile:
     if name not in profiles:
         raise KeyError(f"Unknown profile {name!r}; available: {list(profiles)}")
     p = profiles[name]
-    return Profile(name, p["model"], p.get("fallbacks", []), p.get("options", {}))
+    think = p.get("think")  # explicit bool in yaml → per-profile override
+    return Profile(name, p["model"], p.get("fallbacks", []), p.get("options", {}),
+                   think=think)
 
 
 def agent_profile(agent: str) -> str:
@@ -163,9 +167,16 @@ def _is_thinking_model(model: str) -> bool:
     return any(m in model.lower() for m in _THINKING_MODELS)
 
 
+_VISION_MODELS = ("gemma3", "llava", "bakllava", "qwen2-vl", "minicpm-v", "moondream")
+
+def _is_vision_model(model: str) -> bool:
+    return any(m in model.lower() for m in _VISION_MODELS)
+
+
 # Ordered quality tiers — lower index = lighter/faster, higher = heavier/better.
-# Used by the pipeline to auto-escalate a stage's model when alignment keeps failing.
-_PROFILE_TIERS: tuple[str, ...] = ("fast", "quality", "quality_high")
+# "thinking" sits between quality and quality_high: same qwen3:8b but with reasoning
+# traces enabled, giving much better synthesis for multi-artifact stages.
+_PROFILE_TIERS: tuple[str, ...] = ("fast", "quality", "thinking", "quality_high")
 
 
 def next_profile(name: str) -> str | None:
@@ -185,6 +196,7 @@ def generate(
     system: str | None = None,
     as_json: bool = False,
     steer: bool = True,
+    images: list | None = None,
 ) -> str:
     """Single-turn generation against a local model selected by `profile`.
 
@@ -195,6 +207,10 @@ def generate(
     When a global creative `direction()` is set (e.g. genre) and `steer` is True,
     it is prepended to the system message so the stage leans that way. Pass
     `steer=False` for neutral calls (graders/checkers) — `models.text` does.
+
+    `images` is an optional list of file paths or raw bytes to attach as vision
+    inputs. Only sent when the resolved model supports vision; ignored silently
+    for text-only models (avoids Ollama 400 errors).
     """
     p = get_profile(profile)
     model = resolve_model(p)
@@ -203,7 +219,21 @@ def generate(
     messages: list[dict] = []
     if sys_msg:
         messages.append({"role": "system", "content": sys_msg})
-    messages.append({"role": "user", "content": prompt})
+
+    user_msg: dict = {"role": "user", "content": prompt}
+    # Attach images only when the resolved model is vision-capable.
+    if images and _is_vision_model(model):
+        encoded: list[str] = []
+        for img in images:
+            if isinstance(img, (str, Path)):
+                p_img = Path(img)
+                if p_img.exists():
+                    encoded.append(base64.b64encode(p_img.read_bytes()).decode())
+            elif isinstance(img, (bytes, bytearray)):
+                encoded.append(base64.b64encode(img).decode())
+        if encoded:
+            user_msg["images"] = encoded
+    messages.append(user_msg)
 
     # Merge profile options with the global GPU knob (profile takes precedence).
     opts = dict(p.options)
@@ -217,9 +247,11 @@ def generate(
         "stream": True,
         "options": opts,
     }
+    # Per-profile think override takes precedence over the global runtime.think flag.
     # Only send `think` for models that actually support it — Ollama returns HTTP
     # 400 for non-thinking models (e.g. mistral) even with think=False.
-    if think_enabled() and _is_thinking_model(model):
+    think = p.think if p.think is not None else think_enabled()
+    if think and _is_thinking_model(model):
         payload["think"] = True
     if as_json:
         payload["format"] = "json"

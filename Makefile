@@ -23,8 +23,8 @@ setup-image: ## Install optional deps for casting image rendering (diffusers/tor
 	$(PIP) install -r requirements-image.txt
 	@echo "image rendering deps installed (image.backend: diffusers)"
 
-demo: ## Run the bundled sample story (fast profile, 1 scene — all shots — prototype) [RESUME=1]
-	$(PY) -m reel.cli samples/sample_story.txt --profile fast --max-scenes 1 $(if $(RESUME),--resume,)
+demo: ## Run the bundled sample story (1 scene — all shots — per-agent profiles) [RESUME=1] [PROFILE=fast]
+	$(PY) -m reel.cli samples/sample_story.txt --max-scenes 1 $(if $(PROFILE),--profile $(PROFILE),) $(if $(RESUME),--resume,)
 
 run: ## Run on your own file:  make run SRC=path/to/story.txt [SCENES=1] [RESUME=1]
 	$(PY) -m reel.cli $(SRC) --max-scenes $(or $(SCENES),1) $(if $(RESUME),--resume,)

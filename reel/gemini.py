@@ -7,43 +7,68 @@ Docs:
   * Images: https://ai.google.dev/gemini-api/docs/image-generation
   * Video:  https://ai.google.dev/gemini-api/docs/video
 
-The API key is read from the environment — `GEMINIAPIKEY` (this project's name),
-falling back to `GEMINI_API_KEY` / `GOOGLE_API_KEY`. Everything is best-effort:
-callers catch failures and degrade (keep the text prompt) so a missing key or a
-network hiccup never breaks the pipeline.
+The API key is stored in a permissions-protected file at ~/.config/reel/gemini_key
+(chmod 600) — outside the project directory and never in env vars. Managed via
+`python -m reel.secrets set/get/delete/status`. The key is read once per process
+and cached; no interactive prompts are needed at runtime (avoids the
+keyrings.cryptfile TTY requirement that caused silent render skips on --resume).
 """
 from __future__ import annotations
 
 import base64
 import json
-import os
+import stat
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
 
 BASE = "https://generativelanguage.googleapis.com"
-_KEYRING_SERVICE = "reel"
-_KEYRING_USERNAME = "GEMINIAPIKEY"
+
+# File-based key store: ~/.config/reel/gemini_key  (chmod 600, owner-only)
+_KEY_FILE = Path.home() / ".config" / "reel" / "gemini_key"
+
+# In-process cache — read the file once per pipeline run, not on every API call.
+_CACHED_KEY: str | None = None
+_KEY_CHECKED: bool = False  # False = not yet read; True = already attempted
 
 
-def _keyring_get() -> str | None:
-    """Look up the Gemini API key from the encrypted system keyring.
-    Returns None silently if keyring is unavailable or the key isn't stored."""
+def _file_get() -> str | None:
+    """Read the Gemini API key from the protected credentials file.
+
+    Returns None (silently) when the file doesn't exist. Logs a clear warning
+    when the file exists but can't be read (permissions, corruption, etc.) so
+    the user knows to re-run `python -m reel.secrets set`.
+    """
+    if not _KEY_FILE.exists():
+        return None
     try:
-        import keyring
-        v = keyring.get_password(_KEYRING_SERVICE, _KEYRING_USERNAME)
-        return v.strip() if v else None
-    except Exception:
+        key = _KEY_FILE.read_text(encoding="utf-8").strip()
+        return key or None
+    except Exception as e:
+        print(f"[reel] ⚠ Gemini key file found but unreadable ({_KEY_FILE}): {e}",
+              flush=True)
         return None
 
 
 def api_key() -> str | None:
-    """Resolve the Gemini API key from the encrypted keyring only.
+    """Resolve the Gemini API key. Reads the credentials file once per process
+    and caches the result — no interactive prompts, no per-call file I/O.
 
-    Store the key with:  python -m reel.secrets set
+    Store or update the key with:  python -m reel.secrets set
     """
-    return _keyring_get()
+    global _CACHED_KEY, _KEY_CHECKED
+    if not _KEY_CHECKED:
+        _CACHED_KEY = _file_get()
+        _KEY_CHECKED = True
+    return _CACHED_KEY
+
+
+def _invalidate_key_cache() -> None:
+    """Force the next api_key() call to re-read the file (used by secrets.set)."""
+    global _CACHED_KEY, _KEY_CHECKED
+    _CACHED_KEY = None
+    _KEY_CHECKED = False
 
 
 def available() -> bool:
