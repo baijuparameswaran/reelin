@@ -125,7 +125,7 @@ runtime:
   # at once OOMs, so keep this at 1 here. On a GPU host with enough VRAM to hold
   # two models, raise to 2-4 to actually parallelize the independent branches
   # (structure ‖ characters, scenes ‖ casting, soundscape ‖ visuals ‖ cinematography).
-  max_parallel_agents: 1
+  max_parallel_agents: 2   # RTX 2070 8 GB holds two 4B models simultaneously
 
   # Generation is streamed, so this is an *inactivity* timeout: the max seconds
   # to wait for the next token before treating the daemon as hung. It does NOT
@@ -134,7 +134,9 @@ runtime:
   # CPU — slowest for the heavy storyboard stage, and worse if the model was
   # unloaded during a long review-gate pause. Keep this comfortably above that.
   # Set to 0 to wait indefinitely (fine for batch jobs — Ctrl-C still pauses).
-  request_timeout_seconds: 600
+  # On GPU (RTX 2070) first-token latency is ~2–5 s vs ~30–60 s on CPU, so
+  # 120 s is plenty. Keep higher if falling back to CPU (e.g. gemma3:12b overflow).
+  request_timeout_seconds: 360
 
   # Let thinking models (e.g. Qwen3) emit their reasoning trace before answering.
   # Enabled: Qwen3 reasons before producing the final JSON (better structure/
@@ -151,17 +153,14 @@ runtime:
   #    N > 0      : offload exactly N transformer layers to GPU (partial offload
   #                 when the model is larger than VRAM — the rest runs on CPU).
   #
-  # Leave commented out to use Ollama's default (auto-detect).
-  # Uncomment and set 0 to force CPU; set -1 to explicitly request full GPU.
-  # Per-profile options.num_gpu (in profiles below) overrides this global knob.
-  #
-  # WSL2 + NVIDIA: Ollama inside WSL2 picks up the GPU automatically via the
-  #   CUDA-for-WSL2 driver — install the Windows NVIDIA driver (≥ 527.x) and
-  #   Ollama will use the GPU with no further config. Verify with: ollama ps
-  #   (look for a non-zero "Size VRAM" after loading a model).
-  # Intel iGPU (this host): no CUDA/ROCm support in WSL2 — CPU only for now.
-  #
-  # num_gpu: -1
+  # WSL2 + NVIDIA RTX 2070 Super (8 GB VRAM, this host):
+  #   Ollama picks up the GPU via CUDA-for-WSL2. Requires the official Ollama
+  #   installer (not the snap — snap confinement blocks /dev/nvidia* access).
+  #   Install: curl -fsSL https://ollama.com/install.sh | sh
+  #   Verify: ollama ps — look for non-zero "Size VRAM" after loading a model.
+  #   Set 0 to force CPU; omit / set -1 to let Ollama auto-select full GPU.
+  #   Per-profile options.num_gpu overrides this global knob.
+  num_gpu: -1
 
   # How many consecutive low-score reruns (fidelity OR genre below threshold)
   # trigger an automatic model escalation for that stage.
@@ -183,53 +182,65 @@ runtime:
 min_ollama_version: "0.7.0"
 
 profiles:
-  # Fast tier — default for iteration on modest CPU-only hardware.
-  # GPU note: with ≥ 6 GB VRAM the 4B fits entirely; raise num_ctx to 8192
-  #           and max_parallel_agents to 2 for meaningful speedup.
+  # Fast tier — qwen3:4b (2.5 GB). Fits entirely in the RTX 2070 8 GB VRAM
+  # with plenty of room left. Expect ~60–100 tok/s on GPU vs ~10 tok/s on CPU.
   fast:
     model: qwen3:4b
     fallbacks: [qwen2.5:latest, mistral:7b-instruct, phi3:mini]
     options:
       temperature: 0.7
-      num_ctx: 4096
-      # num_ctx: 8192   # GPU hosts — fits in VRAM, fewer prompt truncations
+      num_ctx: 8192     # 8 GB VRAM — 4B model leaves ~5 GB headroom for KV cache
 
-  # Quality tier — slower, better structure/instruction-following.
-  # Comfortable after bumping WSL RAM to ~12 GB (see CLAUDE.md).
-  # GPU note: 8B q4 ≈ 5 GB VRAM; num_ctx 8192 is safe with ≥ 8 GB VRAM.
+  # Quality tier — qwen3:8b (5.2 GB). Fits entirely in VRAM with ~2.8 GB spare
+  # for KV cache. Expect ~30–50 tok/s on GPU. Best general-purpose tier.
   quality:
     model: qwen3:8b
     fallbacks: [llama3:8b, qwen2:7b-instruct-q5_K_M, qwen2.5:latest]
     options:
       temperature: 0.8
-      num_ctx: 4096
-      # num_ctx: 8192   # GPU hosts
+      num_ctx: 8192     # safe at 8 GB VRAM with qwen3:8b (5.2 GB model)
 
-  # High-quality tier — gemma3:12b. Best instruction-following + JSON fidelity
-  # at this RAM budget; falls back to qwen3:8b if not pulled. Use for the
-  # heaviest stages (storyboard, screenplay, structure) where output quality
-  # matters most. At ~9-10 GB total with KV cache it fits the 12 GB ceiling.
-  # GPU note: 12B q4 ≈ 8 GB VRAM; requires a 10+ GB VRAM card for full offload.
-  #           Partial offload (e.g. num_gpu: 20) still speeds up prefill significantly.
+  # Thinking tier — qwen3:14b with reasoning traces enabled. At ~8.9 GB it fits
+  # ~90% in VRAM (8 GB GPU + ~0.9 GB CPU), so it's nearly full-GPU. Significantly
+  # better synthesis than 8b — the storyboard, screenplay, and structure stages
+  # fuse many upstream artifacts and gain the most from extra parameters + CoT.
+  # Expect ~20–25 tok/s on this GPU. Pull: ollama pull qwen3:14b
+  thinking:
+    model: qwen3:14b
+    fallbacks: [qwen3:8b, qwen3:4b, qwen2.5:latest]
+    options:
+      temperature: 0.7
+      num_ctx: 16384    # 23 GB RAM + mostly-GPU: large context fits; helps storyboard
+    think: true         # per-profile override — always enable reasoning for this tier
+
+  # High-quality tier — qwen3:30b. At ~19 GB it splits across 8 GB VRAM + ~11 GB
+  # CPU RAM (22 GB available — comfortable). Expect ~7–9 tok/s; slow but the best
+  # quality available on this hardware. Escalation target after thinking tier fails.
+  # Has built-in thinking (think: true below) for best instruction-following.
+  # Pull: ollama pull qwen3:30b  (~19 GB download)
+  # Vision fallback: gemma3:27b (~17 GB, vision-capable) if qwen3:30b not pulled.
   quality_high:
-    model: gemma3:12b
-    fallbacks: [qwen3:8b, llama3:8b, qwen2.5:latest]
+    model: qwen3:30b
+    fallbacks: [gemma3:27b, gemma3:12b, qwen3:8b]
     options:
       temperature: 0.8
-      num_ctx: 4096
-      # num_ctx: 8192   # GPU hosts with ≥ 10 GB VRAM
+      num_ctx: 8192     # balanced: enough context without blowing the CPU-RAM KV cache
+    think: true
 
 # Default profile each agent uses (override per run with `--profile`).
+# thinking tier for stages that synthesise many upstream artifacts with structural
+# reasoning (structure, storyboard). Screenplay is creative writing + Fountain
+# formatting — quality prose wins over chain-of-thought there.
 agent_profiles:
-  structure:       quality_high
+  structure:       thinking
   characters:      fast
   casting:         fast
   scenes:          fast
   soundscape:      fast
   visuals:         fast
   cinematography:  fast
-  storyboard:      quality_high
-  screenplay:      quality_high
+  storyboard:      thinking
+  screenplay:      quality
   fidelity:        quality
   genre:           quality
   moodboard:       quality
