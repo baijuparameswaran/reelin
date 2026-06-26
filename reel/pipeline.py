@@ -612,9 +612,13 @@ def run(
     already approved stays on disk. Re-run with `resume=True` to load those
     checkpoints and continue from the first stage that hasn't been completed.
     """
-    # Clear any direction left over from a previous run that may have crashed or
-    # been interrupted before reaching the llm.set_direction(None) at the end.
-    llm.set_direction(None)
+    # On a fresh run, clear any direction left over from a previous run that may
+    # have crashed before reaching the llm.set_direction(None) at the end.
+    # On a resumed run, leave it alone — genre and moodboard checkpoints are loaded
+    # shortly below and apply_direction() re-establishes the correct direction
+    # before any creative stage runs.
+    if not resume:
+        llm.set_direction(None)
 
     t0 = time.time()
     out = Path(out_dir)
