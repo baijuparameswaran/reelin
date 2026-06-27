@@ -252,6 +252,103 @@ def has_ffmpeg() -> bool:
     return _sh.which("ffmpeg") is not None
 
 
+def overlays_enabled() -> bool:
+    """True when overlay burning is configured AND ffmpeg is available."""
+    return bool(_cfg().get("overlays", {}).get("enabled", False)) and has_ffmpeg()
+
+
+def _esc(text: str) -> str:
+    """Escape a string for an ffmpeg drawtext `text=` value."""
+    return (text.replace("\\", "\\\\")
+               .replace("'", "\\'")
+               .replace(":", "\\:")
+               .replace("[", "\\[")
+               .replace("]", "\\]"))
+
+
+def add_overlays(clip_path: Path, out_path: Path, *,
+                 dialogue_lines: list[str] | None = None,
+                 shot_label: str | None = None) -> bool:
+    """Burn text overlays onto a clip via ffmpeg drawtext filters.
+
+    dialogue_lines — subtitle text lines shown centered near the bottom.
+    shot_label     — short identifier shown top-left (e.g. "S1·F2·MCU").
+
+    When out_path == clip_path the overlay is done in-place (writes to a sibling
+    temp file, then atomically renames it over the original).
+
+    Returns True on success. Never raises; logs and returns False on any error.
+    If ffmpeg is unavailable, returns False immediately.
+    """
+    if not has_ffmpeg():
+        _log("      overlays skipped — ffmpeg not found")
+        return False
+
+    ocfg = _cfg().get("overlays", {})
+    font_size = int(ocfg.get("font_size", 24))
+    sub_color = str(ocfg.get("subtitle_color", "white"))
+    label_color = str(ocfg.get("label_color", "yellow"))
+
+    filters: list[str] = []
+
+    # Top-left shot/scene identifier.
+    if shot_label and ocfg.get("shot_info", True):
+        lbl = _esc(str(shot_label)[:60])
+        lbl_sz = max(14, font_size - 6)
+        filters.append(
+            f"drawtext=text='{lbl}':fontsize={lbl_sz}:"
+            f"fontcolor={label_color}:x=10:y=10:"
+            f"box=1:boxcolor=black@0.5:boxborderw=4"
+        )
+
+    # Centred subtitles stacked upward from the bottom.
+    if dialogue_lines and ocfg.get("subtitles", True):
+        row_h = font_size + 6
+        for i, line in enumerate(reversed(dialogue_lines[:4])):
+            text = _esc(str(line)[:90])
+            y_off = 16 + i * row_h
+            filters.append(
+                f"drawtext=text='{text}':fontsize={font_size}:"
+                f"fontcolor={sub_color}:x=(w-text_w)/2:y=h-th-{y_off}:"
+                f"box=1:boxcolor=black@0.65:boxborderw=6"
+            )
+
+    if not filters:
+        # Nothing to draw; just copy if paths differ.
+        if Path(out_path).resolve() != Path(clip_path).resolve():
+            import shutil
+            shutil.copy2(clip_path, out_path)
+        return True
+
+    vf = ",".join(filters)
+    # Write to a sibling temp file, then rename (handles in-place cleanly).
+    tmp = Path(clip_path).with_suffix(".ovr_tmp.mp4")
+    try:
+        cmd = ["ffmpeg", "-y", "-i", str(clip_path),
+               "-vf", vf,
+               "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+               "-c:a", "copy",
+               str(tmp)]
+        r = subprocess.run(cmd, capture_output=True, timeout=180)
+        if r.returncode == 0 and tmp.exists() and tmp.stat().st_size > 0:
+            out = Path(out_path)
+            if out.exists():
+                out.unlink()
+            tmp.rename(out)
+            return True
+        _log(f"      overlay failed: {r.stderr.decode(errors='replace')[-300:].strip()}")
+        return False
+    except Exception as e:
+        _log(f"      overlay error ({type(e).__name__}: {e})")
+        return False
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except Exception:
+                pass
+
+
 def stitch(clips: list, out_path: Path, *, reencode: bool = False) -> bool:
     """Concatenate `clips` (in the given order) into a single movie at `out_path`
     via ffmpeg's concat demuxer. Tries a fast lossless stream-copy first; if that

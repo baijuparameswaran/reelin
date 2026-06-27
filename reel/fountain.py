@@ -167,12 +167,15 @@ def to_storyboard(scenes: list[dict], soundscape: dict, visuals: dict, casting: 
         frames = []
         for fnum, action in enumerate(beats, start=1):
             who, _img = _resolve_character(action, sc["dialogue"], casting, out)
-            # quote a line of dialogue (if any) so Veo voices it
-            said = ""
+            # Collect all dialogue lines audible in this beat; prefer lines from
+            # the character in frame, then include other speakers as heard O.S.
+            speech_parts: list[str] = []
             for spk, line in sc["dialogue"]:
                 if who and who.split()[0].lower() in spk.lower():
-                    said = f' {spk} says: "{line}".'
-                    break
+                    speech_parts.insert(0, f'{spk} says: "{line}"')
+                else:
+                    speech_parts.append(f'{spk} (O.S.): "{line}"')
+            said = (" " + " ".join(speech_parts[:3]) + ".") if speech_parts else ""
             camera, shot_type = _camera(idx, fnum - 1, len(beats), cine)
             prompt = (f"{sc['slugline']}. {action}"
                       f"{said}"

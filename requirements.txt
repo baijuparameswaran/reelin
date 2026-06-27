@@ -3,3 +3,8 @@
 # dependency is PyYAML for the human-editable model config.
 PyYAML>=6.0
 
+# Google GenAI SDK — used for Veo video generation and Gemini image generation.
+# The urllib fallback in gemini.py remains active for environments where this
+# package is unavailable, so the SDK is optional for the text pipeline.
+google-genai>=1.0
+

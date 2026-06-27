@@ -29,6 +29,7 @@ import re
 from pathlib import Path
 
 from .. import llm
+from .ingest import scene_source_context
 
 SYSTEM = (
     "You are a professional storyboard supervisor. You translate a complete scene "
@@ -186,6 +187,7 @@ def _scene_bundles(
     characters: dict | None = None,
     draft: dict | None = None,
     moodboard: dict | None = None,
+    source: dict | None = None,
 ) -> list[dict]:
     """Merge per-scene designs into rich bundles for the prompt.
 
@@ -289,12 +291,15 @@ def _scene_bundles(
                 for sh in scr.get("shots", [])
             ],
             # Moodboard tile for this scene: text-only visual reference brief.
-            # Use the label as a tonal anchor and image_prompt as the render cue
-            # when composing image_prompts for each panel.
             "moodboard_tile": {
                 "label": mood_tile.get("label", ""),
                 "visual_reference": mood_tile.get("image_prompt", ""),
             } if mood_tile else None,
+            # Per-scene source context: the chunk(s) of the story that this scene
+            # corresponds to.  Used in the per-scene storyboard LLM call so the
+            # model sees the specific passage rather than a global truncated head.
+            "_source_context": scene_source_context(
+                source or {}, scene.get("chunk_indices")) if source else "",
         })
     return bundles
 
@@ -320,16 +325,15 @@ def _collect_casting_images(casting: dict, out: Path | None) -> list[Path]:
     return imgs
 
 
-def _story_block(source_text: str, max_chars: int = 2500) -> str:
-    """Source excerpt for the fidelity anchor at the top of the storyboard prompt."""
-    text = (source_text or "").strip()
+def _story_block(context_text: str) -> str:
+    """Source context for one scene — fidelity anchor in the storyboard prompt."""
+    text = (context_text or "").strip()
     if not text:
         return ""
-    excerpt = text[:max_chars] + ("\n[… excerpt truncated]" if len(text) > max_chars else "")
     return (
-        "\nSOURCE MATERIAL (primary fidelity anchor — every panel must reflect "
-        "what actually happens in this story; do not invent events or embellish "
-        "beyond what the source supports):\n" + excerpt + "\n"
+        "\nSOURCE MATERIAL for this scene (primary fidelity anchor — every panel "
+        "must reflect what actually happens here; do not invent events or embellish "
+        "beyond what the source supports):\n" + text + "\n"
     )
 
 
@@ -344,24 +348,24 @@ def plan_storyboard(
     draft: dict | None = None,
     genre: dict | str | None = None,
     moodboard: dict | None = None,
-    source_text: str = "",
+    source_text: str = "",        # kept for backward compat with old callers
+    source: dict | None = None,   # preferred: full source dict with chunks
     profile: str | None = None,
     feedback: str | None = None,
     out: str | Path | None = None,
 ) -> dict:
     """Build the storyboard scene by scene.
 
-    Each scene is sent in its own LLM call with the full source text as an anchor,
-    so the model's attention stays focused on one scene at a time rather than
-    trying to hold a massive multi-scene JSON bundle in context. The per-scene
-    results are collected and returned in the combined storyboard shape.
+    Each scene is sent in its own LLM call. The source context injected is the
+    specific chunk(s) mapped to that scene (from scenes[*].chunk_indices), so
+    the model sees the relevant passage rather than a generic head truncation.
     """
     profile = profile or llm.agent_profile("storyboard")
     bundles = _scene_bundles(scenes, casting, soundscape, visuals, cinematography,
-                             characters=characters, draft=draft, moodboard=moodboard)
+                             characters=characters, draft=draft, moodboard=moodboard,
+                             source=source)
     genre_name = (genre.get("genre") if isinstance(genre, dict) else genre) \
         or structure.get("genre", "drama")
-    story_blk = _story_block(source_text)
     logline = structure.get("logline", "")
     tone = structure.get("tone", "")
 
@@ -369,6 +373,11 @@ def plan_storyboard(
     storyboard_style = ""
 
     for bundle in bundles:
+        # Extract (and remove) the private source context field before sending
+        # the bundle JSON to the model — the context goes into story_block instead.
+        scene_ctx = bundle.pop("_source_context", "") or source_text
+        story_blk = _story_block(scene_ctx)
+
         single_bundle = json.dumps([bundle], ensure_ascii=False, indent=2)
         prompt = llm.with_feedback(
             PROMPT.format(
