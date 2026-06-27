@@ -103,7 +103,8 @@ def plan_cinematography(
     profile = profile or llm.agent_profile("cinematography")
     scene_list = json.dumps(
         [
-            {k: s[k] for k in ("number", "slugline", "summary", "purpose")
+            {k: s[k] for k in ("number", "slugline", "summary", "purpose",
+                                "source_line", "chunk_indices")
              if k in s}
             for s in scenes.get("scenes", [])
         ],
