@@ -92,11 +92,13 @@ def _screenplay(ctx, *, profile=None, feedback=None, max_scenes=1, **_):
         max_scenes=max_scenes, profile=profile, feedback=feedback)
 
 def _storyboard(ctx, *, out, profile=None, feedback=None, **_):
+    src = ctx.get("source") or {}
     return plan_storyboard(
         ctx["structure"], ctx["scenes"], ctx["casting"], ctx["soundscape"],
         ctx["visuals"], ctx["cinematography"],
         characters=ctx.get("characters"), draft=ctx.get("screenplay"),
-        source_text=(ctx.get("source") or {}).get("text", ""),
+        source=src,
+        source_text=src.get("text", ""),   # backward-compat fallback
         moodboard=ctx.get("moodboard"),
         profile=profile, feedback=feedback, out=out)
 

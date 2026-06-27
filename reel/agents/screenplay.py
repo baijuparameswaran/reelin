@@ -13,6 +13,7 @@ import json
 from datetime import date
 
 from .. import llm
+from .ingest import scene_source_context
 
 SYSTEM = (
     "You are a professional screenwriter and shot-list director. You break a "
@@ -58,9 +59,13 @@ Respond with JSON in exactly this shape:
 }}
 
 Rules:
-- Stay faithful to the source material — do not invent events, relationships, or
-  dialogue not supported by the story excerpt above.
-- Derive shots from the camera coverage when given; otherwise pick the key beats.
+- FIDELITY FIRST: Every shot description, action beat, and dialogue line must be
+  directly traceable to an event in the SOURCE MATERIAL above. Do not invent events,
+  locations, character actions, or relationships not present in the source.
+- Do NOT embellish beyond what the source supports — if the source doesn't say a
+  character does something, don't have them do it.
+- Derive shots from the camera coverage when given; otherwise cover the key beats
+  from the scene summary (which itself comes from the source).
 - EVERY dialogue line MUST have a `speaker` that matches a character name above.
 - Do NOT repeat or contradict anything already established in prior scenes.
 - Use `voiceover` only when narration / interior monologue genuinely serves the
@@ -186,15 +191,18 @@ def _scene_char_brief(names: list[str], lookup: dict[str, dict]) -> str:
     return "\n".join(rows) or "- (none extracted)"
 
 
-def _story_block(source_text: str, max_chars: int = 2500) -> str:
-    """Truncated source excerpt so the agent stays anchored to the actual story."""
-    text = (source_text or "").strip()
+def _story_block(context_text: str) -> str:
+    """Source excerpt — the primary fidelity anchor for a single scene's shots."""
+    text = (context_text or "").strip()
     if not text:
         return ""
-    excerpt = text[:max_chars]
-    if len(text) > max_chars:
-        excerpt += "\n[… excerpt truncated]"
-    return f"Source material (stay faithful — adapt from this, do not invent):\n{excerpt}\n"
+    return (
+        "SOURCE MATERIAL — primary fidelity anchor "
+        "(every shot and dialogue line must be traceable to an actual event in this "
+        "excerpt; do not invent characters, relationships, or plot points not present "
+        "here):\n"
+        f"{text}\n"
+    )
 
 
 def _prior_scenes_block(drafted: list[dict]) -> str:
@@ -233,7 +241,6 @@ def draft_screenplay(
     profile = profile or llm.agent_profile("screenplay")
     logline = structure.get("logline", source["title"])
     tone = structure.get("tone", "")
-    source_text = source.get("text", "")
     char_lookup = _char_lookup(characters)
     casting_lookup = _casting_lookup(casting or {})
     sound_lookup = _soundscape_lookup(soundscape or {})
@@ -243,11 +250,14 @@ def draft_screenplay(
         f"REVISION REQUEST (apply throughout all scenes):\n{feedback}\n\n"
         if feedback else ""
     )
-    story_blk = _story_block(source_text)
 
     scene_list = scenes.get("scenes", [])
     drafted = []
     for scene in scene_list[:max_scenes]:
+        # Per-scene source context: use the chunk(s) mapped to this scene so the
+        # model sees only the relevant passage rather than a truncated global head.
+        scene_ctx = scene_source_context(source, scene.get("chunk_indices"))
+        story_blk = _story_block(scene_ctx)
         scene_num = scene.get("number")
         scene_chars = scene.get("characters", [])
         slugline = scene.get("slugline", "INT. LOCATION - DAY")

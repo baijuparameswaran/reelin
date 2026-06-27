@@ -82,6 +82,18 @@ video:
   seconds: 4
   fps: 24
   size: 768
+  # --- clip overlays (requires ffmpeg on PATH) ---
+  # When enabled, each rendered shot clip gets text burned in via ffmpeg drawtext:
+  #   subtitles — dialogue lines shown centred at the bottom (caption style)
+  #   shot_info — scene/shot/type label shown top-left (useful for dailies review)
+  # Overlay is applied in-place after the Veo clip is downloaded, before stitching.
+  overlays:
+    enabled: false        # set true to burn overlays onto every shot clip
+    subtitles: true       # show dialogue lines as centred captions at the bottom
+    shot_info: true       # show "SN·FN·TYPE" label top-left
+    font_size: 24
+    subtitle_color: "white"
+    label_color: "yellow"
 
 # Story-fidelity checking. After each stage is approved, the fidelity agent checks
 # that stage's output stays consistent with the ORIGINAL story (runs on the OPEN

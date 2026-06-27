@@ -1,13 +1,88 @@
 """Ingest agent: load and normalize raw source material.
 
 Accepts any plain-text book / short story / script and returns a normalized
-record the downstream creative agents can rely on. (Richer formats — PDF, EPUB,
-.fountain, .fdx — are a later iteration; this keeps the thin slice robust.)
+record the downstream creative agents can rely on. The text is also split into
+overlapping chunks so that per-scene agents can reference only the portion of
+the story relevant to their scene rather than truncating to a fixed head.
 """
 from __future__ import annotations
 
 import re
 from pathlib import Path
+
+# Chunk tuning.  3 000-char chunks with 300-char overlap give ~1 chunk per scene
+# for a typical short story and keep each chunk well inside any model's context.
+CHUNK_SIZE = 3000
+CHUNK_OVERLAP = 300
+
+
+def chunk_text(text: str,
+               size: int = CHUNK_SIZE,
+               overlap: int = CHUNK_OVERLAP) -> list[dict]:
+    """Split text into overlapping chunks, preferring paragraph/sentence breaks.
+
+    Returns a list of {"index", "start", "end", "text"} records. Adjacent
+    chunks overlap by `overlap` characters so that scenes that straddle a
+    boundary appear fully in at least one chunk.
+    """
+    chunks: list[dict] = []
+    start = 0
+    idx = 0
+    text_len = len(text)
+    while start < text_len:
+        end = min(start + size, text_len)
+        # Try to break at a natural boundary within the trailing 20% of the chunk.
+        if end < text_len:
+            search_from = max(start, end - max(200, size // 5))
+            boundary = text.rfind("\n\n", search_from, end)
+            if boundary == -1:
+                boundary = text.rfind(". ", search_from, end)
+            if boundary != -1:
+                end = boundary + 1       # include the punctuation / blank line
+        chunks.append({"index": idx, "start": start, "end": end,
+                        "text": text[start:end]})
+        if end >= text_len:
+            break                        # reached the end — no more chunks
+        next_start = end - overlap
+        if next_start <= start:          # guard against degenerate short text
+            next_start = start + 1
+        start = next_start
+        idx += 1
+    return chunks
+
+
+def scene_source_context(source: dict,
+                          chunk_indices: list[int] | None,
+                          max_chars: int = 6000) -> str:
+    """Return the source text relevant to a scene from its chunk indices.
+
+    Falls back to the head of the full text when chunks are absent (old
+    checkpoints) or no indices are mapped yet. Adjacent chunks are joined
+    with a separator; overlap at boundaries is accepted (the model ignores it).
+    """
+    chunks: list[dict] = source.get("chunks") or []
+    full_text: str = source.get("text", "")
+
+    if not chunks or not chunk_indices:
+        # No chunk data — return the head of the full text.
+        return full_text[:max_chars]
+
+    # Collect chunks in index order, deduplicated.
+    seen: set[int] = set()
+    parts: list[str] = []
+    for idx in sorted(set(chunk_indices)):
+        if idx in seen or idx < 0 or idx >= len(chunks):
+            continue
+        seen.add(idx)
+        parts.append(chunks[idx]["text"])
+
+    if not parts:
+        return full_text[:max_chars]
+
+    combined = "\n".join(parts)
+    if len(combined) > max_chars:
+        combined = combined[:max_chars] + "\n[… excerpt truncated]"
+    return combined
 
 
 def ingest(path: str | Path) -> dict:
@@ -19,8 +94,11 @@ def ingest(path: str | Path) -> dict:
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
 
     # Naive title guess: a short first non-empty line reads like a title.
-    first_line = next((l.strip() for l in text.splitlines() if l.strip()), "")
-    title = first_line if 0 < len(first_line) <= 80 else p.stem.replace("_", " ").title()
+    first_line = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
+    title = (first_line if 0 < len(first_line) <= 80
+             else p.stem.replace("_", " ").title())
+
+    chunks = chunk_text(text)
 
     return {
         "source_path": str(p),
@@ -28,4 +106,6 @@ def ingest(path: str | Path) -> dict:
         "text": text,
         "word_count": len(text.split()),
         "char_count": len(text),
+        "chunks": chunks,
+        "chunk_count": len(chunks),
     }

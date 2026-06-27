@@ -212,14 +212,11 @@ def _slug(name: str) -> str:
     return re.sub(r"[^\w]+", "_", (name or "").lower()).strip("_") or "character"
 
 
-def _render_casting_images(casting: dict, out: Path) -> int:
-    """Render ONE image per character — the **character representation** — via the
-    image backend (Gemini). This is the only image generation in the pipeline; the
-    character image is the reference handed to the video stage for identity. Stores
-    the path on each entry. Idempotent (skips files on disk) for cheap --resume.
-
-    The character look lives in the `character` block; older flat-schema casting
-    (top-level visual_prompt) is tolerated.
+def _render_casting_images(casting: dict, out: Path,
+                           active_names: set[str] | None = None) -> int:
+    """Render ONE image per character — the character representation — via the
+    image backend. Capped to `active_names` when provided (characters that appear
+    in the scenes being rendered). Idempotent (skips existing files on --resume).
     """
     if not imagegen.available():
         _log(f"      character renders skipped — {imagegen.unavailable_hint()}")
@@ -228,19 +225,23 @@ def _render_casting_images(casting: dict, out: Path) -> int:
     cast_dir.mkdir(exist_ok=True)
     n = 0
     for c in casting.get("casting", []):
-        slug = _slug(c.get("name", "character"))
+        name = c.get("name", "")
+        if active_names is not None and name not in active_names:
+            _log(f"      {name} — not in active scenes; skipping render")
+            continue
+        slug = _slug(name or "character")
         kind = c.get("kind", "person")
         character = c.get("character") or {}
         target = character if character else c
         prompt = (character.get("visual_prompt")
                   or character.get("physical_form")
                   or c.get("visual_prompt") or c.get("physical_form")
-                  or c.get("name", ""))
+                  or name)
         if not prompt:
-            _log(f"      ⚠ {c.get('name','?')} ({kind}) — no visual_prompt; skipping render")
+            _log(f"      ⚠ {name} ({kind}) — no visual_prompt; skipping render")
             continue
         img = cast_dir / f"{slug}.png"
-        _log(f"      rendering {c.get('name','?')} [{kind}] …")
+        _log(f"      rendering {name} [{kind}] …")
         if img.exists() or imagegen.generate_image(prompt, img):
             target["image_path"] = str(img.relative_to(out))
             n += 1
@@ -280,6 +281,57 @@ def _render_moodboard_tiles(moodboard: dict, out: Path) -> int:
             tile["image_path"] = str(img.relative_to(out))
             n += 1
     return n
+
+
+def _panel_video_prompt(panel: dict, audio_overview: dict | None = None) -> str:
+    """Build an audio-enriched Veo prompt from a storyboard panel.
+
+    Veo 3 renders native synchronized audio from the prompt, so we fold in:
+      - image_prompt  — visual scene, camera, action (the primary content)
+      - sound         — per-panel ambient bed + sound events
+      - dialogue      — quoted speech so Veo voices the lines
+    Scene-level audio_overview (score cue, ambient) fills in when the panel
+    has no explicit sound field.
+    """
+    base = (panel.get("image_prompt") or panel.get("action") or panel.get("moment", "")).strip()
+
+    # Per-panel sound (preferred); fall back to scene-level audio overview.
+    sound = (panel.get("sound") or "").strip()
+    if not sound and audio_overview:
+        parts_ = [p for p in [
+            audio_overview.get("ambient", ""),
+            audio_overview.get("score_cue", ""),
+        ] if p]
+        sound = "; ".join(parts_)
+
+    # Dialogue formatted as quoted speech — Veo voices these lines.
+    speech: list[str] = []
+    for d in (panel.get("dialogue") or []):
+        speaker = (d.get("speaker") or "").strip()
+        line = (d.get("line") or "").strip()
+        if speaker and line:
+            tag = "narrates" if d.get("vo") else "says"
+            speech.append(f'{speaker} {tag}: "{line}"')
+
+    chunks = [base]
+    if sound:
+        chunks.append(f"Audio: {sound}.")
+    if speech:
+        chunks.append("Dialogue: " + " ".join(speech) + ".")
+    return " ".join(c for c in chunks if c)
+
+
+def _panel_dialogue_lines(panel: dict) -> list[str]:
+    """Format dialogue entries from a storyboard panel as subtitle strings."""
+    lines = []
+    for d in (panel.get("dialogue") or []):
+        speaker = (d.get("speaker") or "").strip()
+        line = (d.get("line") or "").strip()
+        if speaker and line:
+            lines.append(f"{speaker}: {line}")
+        elif line:
+            lines.append(line)
+    return lines
 
 
 def _frame_char_anchor(frame: dict, cast_index: dict, out: Path) -> Path | None:
@@ -333,12 +385,14 @@ def _render_scene_frames(storyboard: dict, casting: dict, out: Path,
         sdir.mkdir(exist_ok=True)
         prev_tail = None                        # reset each scene → hard cut between scenes
         frames_out = []
+        # scene-level audio overview for panels that have no explicit sound field
+        audio_overview = scene.get("audio_overview") or {}
         # `panels` is the new schema; fall back to `frames` for old checkpoints
         panels = scene.get("panels") or scene.get("frames", [])
 
         for fr in panels:
             fnum = fr.get("panel") or fr.get("frame", len(frames_out) + 1)
-            prompt = fr.get("image_prompt") or fr.get("action") or fr.get("moment", "")
+            prompt = _panel_video_prompt(fr, audio_overview)
             tag = f"{int(fnum):02d}" if isinstance(fnum, int) else str(fnum)
 
             # Seed: continue from the previous frame's tail (carries the look
@@ -350,6 +404,15 @@ def _render_scene_frames(storyboard: dict, casting: dict, out: Path,
             if not clip.exists():
                 if i2v.generate_clip([seed] if seed else [], prompt, clip):
                     manifest["clips"] += 1
+                    # Burn subtitle + shot-label overlays onto the clip (in-place)
+                    # when the operator enables them in config video.overlays.
+                    if i2v.overlays_enabled():
+                        dlg = _panel_dialogue_lines(fr)
+                        stype = fr.get("shot_type") or ""
+                        shot_lbl = f"S{snum}·F{tag}" + (f"·{stype}" if stype else "")
+                        i2v.add_overlays(clip, clip,
+                                         dialogue_lines=dlg or None,
+                                         shot_label=shot_lbl)
                     # Always extract the tail frame so every clip has one on disk.
                     # Continuity chains it forward as the next-clip seed;
                     # ffmpeg stitching benefits from having clean cut-points regardless.
@@ -857,11 +920,17 @@ def run(
     scenes, casting = g["scenes"], g["casting"]
     _log(f"      {len(scenes.get('scenes', []))} scenes; cast {len(casting.get('casting', []))}")
 
-    # Render a basic portrait per character from its casting visual_prompt and
-    # store the path in the casting details (part of the casting stage).
+    # Render character portraits only for characters appearing in the scenes that
+    # will actually be rendered (1..max_scenes).  Capping here avoids burning API
+    # quota on characters the video stage will never reference.
     if imagegen.enabled():
-        _log("      rendering character portraits …")
-        if _render_casting_images(casting, out):
+        active_chars: set[str] = set()
+        for sc in scenes.get("scenes", [])[:max_scenes]:
+            for nm in (sc.get("characters") or []):
+                active_chars.add(nm)
+        _log(f"      rendering character portraits for {len(active_chars)} "
+             f"character(s) in scene(s) 1..{max_scenes} …")
+        if _render_casting_images(casting, out, active_names=active_chars or None):
             save("casting", casting)
             _log(f"      portraits → {out}/casting/")
 
@@ -902,7 +971,8 @@ def run(
             structure, scenes, casting, soundscape, visuals, cinematography,
             characters=characters, draft=draft, genre=genre_spec,
             moodboard=moodboard,
-            source_text=source.get("text", ""),
+            source=source,                      # full source dict with chunks
+            source_text=source.get("text", ""), # backward-compat fallback
             profile=p or profile_override, feedback=fb, out=out,
         )
     g = run_group("9/10", "storyboard", [
