@@ -67,10 +67,12 @@ Respond with JSON in exactly this shape:
 'weathered Nordic character actor, late-career'; for an animal the breed/species \
 and temperament; for a group the collective casting identity",
         "features": "the ACTOR's OWN intrinsic, role-independent look — an \
-invented but specific, consistent person: face shape, eyes, natural hair, build, \
-height, bearing. NOT the character's age/costume. Animals/birds: species/breed, \
-size, natural coloring, markings, plumage/coat, eyes. This is the identity anchor \
-reused to keep the face consistent across every shot",
+invented but source-grounded person: ONLY include attributes explicitly described \
+or directly implied by the source story (e.g. 'tall', 'grey-haired'). Do NOT add \
+face shape, eye colour, or hair texture unless the story states them. Keep \
+unspecified attributes generic ('medium build', 'indeterminate age range'). \
+Animals/birds: species/breed, size, coloring/markings only as described in source. \
+This is the identity anchor reused to keep the look consistent across every shot",
         "visual_prompt": "a concise text-to-image prompt to render the ACTOR as \
 THEMSELVES — a clear portrait (framing open: headshot through full figure), \
 neutral expression, plain studio background, everyday neutral clothing, NO \
@@ -109,6 +111,11 @@ Rules:
 - Invent the actor; do NOT name or imitate a real, identifiable person.
 - character.physical_form must be internally consistent and reusable across scenes.
 - genre and tone should color the casting (gritty drama vs. heightened fantasy, etc.)
+- STORY FIDELITY: Do NOT add physical attributes (face shape, eye colour, hair
+  texture, body proportions, skin tone) that the source character description does
+  not mention. Unspecified attributes stay generic. Descriptors like 'weathered',
+  'gaunt', or 'imposing' are only valid if the story uses them or clearly implies
+  them — do not intensify or elaborate beyond the source.
 
 CHARACTER BREAKDOWN:
 {characters}

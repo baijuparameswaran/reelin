@@ -29,10 +29,12 @@ HOST="${OLLAMA_HOST:-http://localhost:11434}"
 
 INCLUDE_FALLBACKS=0
 RUN_TEST=1
+GPU_FILTER=1
 for arg in "$@"; do
   case "$arg" in
     --all) INCLUDE_FALLBACKS=1 ;;
     --no-test) RUN_TEST=0 ;;
+    --no-gpu-filter) GPU_FILTER=0 ;;
     *) echo "unknown arg: $arg" >&2; exit 2 ;;
   esac
 done
@@ -50,6 +52,8 @@ if ! curl -fsS "${HOST}/api/version" >/dev/null 2>&1; then
 fi
 CUR_VER="$(curl -fsS "${HOST}/api/version" | sed -E 's/.*"version":"([^"]+)".*/\1/')"
 MIN_VER="$("$PY" -m reel.manifest --min-ollama 2>/dev/null || echo 0.0.0)"
+HW="$("$PY" -m reel.manifest --hardware 2>/dev/null || echo "unknown hardware")"
+log "Hardware: $HW"
 
 # 2. Version gate (does not abort — pulls of already-supported models still work).
 lowest="$(printf '%s\n%s\n' "$CUR_VER" "$MIN_VER" | sort -V | head -1)"
@@ -63,9 +67,14 @@ EOF
 fi
 
 # 3. Pull models.
-log "Ollama $CUR_VER — pulling models (fallbacks=$INCLUDE_FALLBACKS)"
 MANIFEST_ARGS=()
 [ "$INCLUDE_FALLBACKS" = 1 ] && MANIFEST_ARGS+=(--include-fallbacks)
+[ "$GPU_FILTER"        = 1 ] && MANIFEST_ARGS+=(--runnable-only)
+if [ "$GPU_FILTER" = 1 ]; then
+  log "Ollama $CUR_VER — pulling models that fit hardware (--no-gpu-filter to pull all; fallbacks=$INCLUDE_FALLBACKS)"
+else
+  log "Ollama $CUR_VER — pulling all manifest models, no hardware filter (fallbacks=$INCLUDE_FALLBACKS)"
+fi
 mapfile -t MODELS < <("$PY" -m reel.manifest "${MANIFEST_ARGS[@]}")
 for m in "${MODELS[@]}"; do
   echo "── pull $m"

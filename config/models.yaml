@@ -148,14 +148,14 @@ runtime:
   # Set to 0 to wait indefinitely (fine for batch jobs — Ctrl-C still pauses).
   # On GPU (RTX 2070) first-token latency is ~2–5 s vs ~30–60 s on CPU, so
   # 120 s is plenty. Keep higher if falling back to CPU (e.g. gemma3:12b overflow).
-  request_timeout_seconds: 360
+  request_timeout_seconds: 0    # 0 = wait indefinitely; set to 120 once GPU (Ollama official installer) is active
 
   # Let thinking models (e.g. Qwen3) emit their reasoning trace before answering.
-  # Enabled: Qwen3 reasons before producing the final JSON (better structure/
-  # instruction-following). NB on a CPU-only host this is much slower — the
-  # reasoning stream adds many tokens per stage (a single stage can take 15-20 min).
-  # Set false to skip thinking for faster (lower-reasoning) runs.
-  think: true
+  # Disabled (false): faster runs; models answer directly without a reasoning preamble.
+  # Enabled (true): Qwen3 reasons before producing final JSON — better structure and
+  # instruction-following, but roughly doubles token output (~2× slower per stage).
+  # Per-profile `think:` keys override this global flag for individual tiers.
+  think: false
 
   # GPU layer offload for Ollama (the `num_gpu` request option).
   #   -1 / unset : Ollama auto-detects CUDA/ROCm and offloads as many layers
@@ -212,23 +212,24 @@ profiles:
       temperature: 0.8
       num_ctx: 8192     # safe at 8 GB VRAM with qwen3:8b (5.2 GB model)
 
-  # Thinking tier — qwen3:14b with reasoning traces enabled. At ~8.9 GB it fits
-  # ~90% in VRAM (8 GB GPU + ~0.9 GB CPU), so it's nearly full-GPU. Significantly
-  # better synthesis than 8b — the storyboard, screenplay, and structure stages
-  # fuse many upstream artifacts and gain the most from extra parameters + CoT.
-  # Expect ~20–25 tok/s on this GPU. Pull: ollama pull qwen3:14b
-  thinking:
+  # Synthesis tier — qwen3:14b. At ~8.9 GB it fits ~90% in VRAM (8 GB GPU +
+  # ~0.9 GB CPU), so it's nearly full-GPU. Significantly better synthesis than 8b
+  # — the storyboard, screenplay, and structure stages fuse many upstream artifacts
+  # and gain the most from the extra parameters. Expect ~20–25 tok/s on this GPU.
+  # Pull: ollama pull qwen3:14b
+  # Reasoning traces (think: true) give higher quality but roughly double token
+  # output. Set think: true here to re-enable per-profile.
+  synthesis:
     model: qwen3:14b
     fallbacks: [qwen3:8b, qwen3:4b, qwen2.5:latest]
     options:
       temperature: 0.7
       num_ctx: 16384    # 23 GB RAM + mostly-GPU: large context fits; helps storyboard
-    think: true         # per-profile override — always enable reasoning for this tier
+    think: false        # set true to re-enable reasoning traces for this profile
 
   # High-quality tier — qwen3:30b. At ~19 GB it splits across 8 GB VRAM + ~11 GB
   # CPU RAM (22 GB available — comfortable). Expect ~7–9 tok/s; slow but the best
   # quality available on this hardware. Escalation target after thinking tier fails.
-  # Has built-in thinking (think: true below) for best instruction-following.
   # Pull: ollama pull qwen3:30b  (~19 GB download)
   # Vision fallback: gemma3:27b (~17 GB, vision-capable) if qwen3:30b not pulled.
   quality_high:
@@ -237,21 +238,21 @@ profiles:
     options:
       temperature: 0.8
       num_ctx: 8192     # balanced: enough context without blowing the CPU-RAM KV cache
-    think: true
+    think: false        # set true to re-enable reasoning traces for this profile
 
 # Default profile each agent uses (override per run with `--profile`).
 # thinking tier for stages that synthesise many upstream artifacts with structural
 # reasoning (structure, storyboard). Screenplay is creative writing + Fountain
 # formatting — quality prose wins over chain-of-thought there.
 agent_profiles:
-  structure:       thinking
+  structure:       synthesis
   characters:      fast
   casting:         fast
   scenes:          fast
   soundscape:      fast
   visuals:         fast
   cinematography:  fast
-  storyboard:      thinking
+  storyboard:      synthesis
   screenplay:      quality
   fidelity:        quality
   genre:           quality

@@ -17,6 +17,7 @@ import base64
 import json
 import re
 import socket
+import subprocess
 import urllib.request
 import urllib.error
 from dataclasses import dataclass, field
@@ -29,6 +30,128 @@ CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "models.yaml"
 
 # Hardware-derived cap: keep prompts within the num_ctx budget of small local models.
 MAX_CHARS = 12_000
+
+# ── hardware detection ────────────────────────────────────────────────────────
+
+# Approximate VRAM/RAM footprint in MB for common models (quantized weights).
+# Used when a model isn't yet pulled and its size can't be queried from Ollama.
+# Sizes assume the default q4_K_M (or equivalent) quantization tier.
+_MODEL_SIZE_MB: dict[str, int] = {
+    "qwen3:0.6b":          520,
+    "qwen3:1.7b":        1_100,
+    "qwen3:4b":          2_560,
+    "qwen3:8b":          5_200,
+    "qwen3:14b":         9_000,
+    "qwen3:30b":        19_000,
+    "qwen3:32b":        20_000,
+    "qwen2.5:latest":    4_700,
+    "qwen2.5:7b":        4_700,
+    "qwen2:7b":          4_100,
+    "gemma3:4b":         3_300,
+    "gemma3:12b":        8_100,
+    "gemma3:27b":       17_000,
+    "llama3:8b":         4_700,
+    "llama3.1:8b":       4_700,
+    "llama3.2:3b":       2_000,
+    "mistral:latest":    4_100,
+    "mistral:7b-instruct": 4_100,
+    "phi3:mini":         2_300,
+    "phi3:latest":       2_300,
+    "phi4:latest":       9_100,
+    "deepseek-r1:7b":    4_700,
+    "deepseek-r1:14b":   9_000,
+    "deepseek-r1:32b":  19_500,
+    "qwq:32b":          19_500,
+}
+
+
+@lru_cache(maxsize=1)
+def gpu_vram_mb() -> int | None:
+    """Total GPU VRAM in MB (sum across all GPUs), or None when nvidia-smi is absent."""
+    try:
+        out = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+            text=True, stderr=subprocess.DEVNULL, timeout=5,
+        )
+        vals = [int(x.strip()) for x in out.strip().splitlines() if x.strip().isdigit()]
+        return sum(vals) if vals else None
+    except Exception:
+        return None
+
+
+@lru_cache(maxsize=1)
+def system_ram_mb() -> int:
+    """Total system RAM in MB (from /proc/meminfo MemTotal)."""
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    return int(line.split()[1]) // 1024
+    except Exception:
+        pass
+    return 8_192  # conservative fallback
+
+
+def hardware_summary() -> str:
+    """One-line hardware description for log messages."""
+    vram = gpu_vram_mb()
+    ram = system_ram_mb()
+    gpu_str = f"GPU {vram} MB VRAM" if vram else "no GPU detected"
+    return f"{gpu_str}, RAM {ram} MB"
+
+
+@lru_cache(maxsize=1)
+def _installed_model_sizes() -> dict[str, int]:
+    """Installed Ollama model tag → file size in MB."""
+    try:
+        tags = _api("/api/tags", method="GET")
+        return {m["name"]: m["size"] // (1024 * 1024) for m in tags.get("models", [])}
+    except Exception:
+        return {}
+
+
+def _model_size_mb(tag: str) -> int | None:
+    """Approximate VRAM/RAM footprint of a model in MB.
+
+    Tries installed Ollama models first (accurate), then our built-in table
+    (for models not yet pulled), then a family-name prefix match.
+    """
+    installed = _installed_model_sizes()
+    if tag in installed:
+        return installed[tag]
+    for name, size in installed.items():
+        if name.startswith(tag):
+            return size
+    if tag in _MODEL_SIZE_MB:
+        return _MODEL_SIZE_MB[tag]
+    base = tag.split(":")[0]
+    for known, size in _MODEL_SIZE_MB.items():
+        if known.startswith(base + ":"):
+            return size
+    return None  # unknown — caller should treat as "assume fits"
+
+
+def can_run_model(
+    tag: str,
+    *,
+    vram_mb: int | None = None,
+    ram_mb: int | None = None,
+) -> bool:
+    """True if the model's estimated size fits within GPU VRAM + 80% of system RAM.
+
+    Models that exceed this are not impossible to run (Ollama CPU-offloads the
+    overflow), but they'll be slow or OOM.  Unknown sizes pass through so we
+    never silently drop a model we have no data on.
+    """
+    size = _model_size_mb(tag)
+    if size is None:
+        return True
+    if vram_mb is None:
+        vram_mb = gpu_vram_mb() or 0
+    if ram_mb is None:
+        ram_mb = system_ram_mb()
+    usable = vram_mb + int(ram_mb * 0.80)
+    return size <= usable
 
 
 @dataclass
@@ -83,6 +206,22 @@ def think_enabled() -> bool:
     Only applied when the resolved model actually supports thinking (see
     `_is_thinking_model`). Override with config `runtime.think: true/false`."""
     return bool(config().get("runtime", {}).get("think", False))
+
+
+def unload_model(profile: str) -> None:
+    """Force-unload a model from Ollama memory before a feedback retry.
+
+    Sets keep_alive=0 on a no-op generate call, which tells Ollama to evict the
+    model immediately.  This clears the KV cache so the next call loads a
+    completely fresh context with no residue from the previous attempt.
+    Best-effort: silently ignored if Ollama is unreachable or the call fails.
+    """
+    try:
+        p = get_profile(profile)
+        model = resolve_model(p)
+        _api("/api/generate", {"model": model, "prompt": "", "keep_alive": 0})
+    except Exception:
+        pass
 
 
 def _api(
@@ -143,12 +282,33 @@ def agent_profile(agent: str) -> str:
 
 
 def resolve_model(profile: Profile) -> str:
-    """Preferred model if installed, else the first installed fallback."""
+    """Preferred installed model that fits in available GPU VRAM + RAM.
+
+    Selection order:
+      1. Profile's preferred model — if installed AND fits.
+      2. First fallback that is installed AND fits.
+      3. Preferred model installed but too large (slow CPU offload, warns user).
+      4. First installed fallback regardless of size.
+      5. Any installed model (last resort).
+    """
     have = installed_models()
+    vram_mb = gpu_vram_mb() or 0
+    ram_mb = system_ram_mb()
 
     def present(tag: str) -> bool:
         return any(m == tag or m.startswith(tag) for m in have)
 
+    def fits(tag: str) -> bool:
+        return can_run_model(tag, vram_mb=vram_mb, ram_mb=ram_mb)
+
+    # First pass: installed + fits in hardware.
+    if present(profile.model) and fits(profile.model):
+        return profile.model
+    for fb in profile.fallbacks:
+        if present(fb) and fits(fb):
+            return fb
+
+    # Second pass: installed but oversized — Ollama will CPU-offload the overflow.
     if present(profile.model):
         return profile.model
     for fb in profile.fallbacks:
@@ -176,7 +336,7 @@ def _is_vision_model(model: str) -> bool:
 # Ordered quality tiers — lower index = lighter/faster, higher = heavier/better.
 # "thinking" sits between quality and quality_high: same qwen3:8b but with reasoning
 # traces enabled, giving much better synthesis for multi-artifact stages.
-_PROFILE_TIERS: tuple[str, ...] = ("fast", "quality", "thinking", "quality_high")
+_PROFILE_TIERS: tuple[str, ...] = ("fast", "quality", "synthesis", "quality_high")
 
 
 def next_profile(name: str) -> str | None:
