@@ -656,6 +656,7 @@ def _gated(
 
         iteration += 1
         _log(f"      re-running {name}  [{_model_label(current_profile)}]  with feedback …")
+        llm.unload_model(current_profile)
         result = rerun_fn(decision.feedback, current_profile)
 
 
@@ -840,10 +841,10 @@ def run(
             return "(unavailable)"
     fast_model = _resolved("fast")
     quality_model = _resolved("quality")
-    thinking_model = _resolved("thinking")
+    synthesis_model = _resolved("synthesis")
     quality_high_model = _resolved("quality_high")
     _log(f"models — fast: {fast_model} | quality: {quality_model} | "
-         f"thinking: {thinking_model} | quality_high: {quality_high_model}")
+         f"synthesis: {synthesis_model} | quality_high: {quality_high_model}")
     if resume:
         _log(f"resume: loading any completed stages from {out}/")
 

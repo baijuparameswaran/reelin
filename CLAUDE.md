@@ -74,8 +74,10 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
 - **23 GB RAM** enables GPU+CPU split for models larger than VRAM: qwen3:14b
   (~8.9 GB, ~90% GPU) and qwen3:30b (~19 GB, ~42% GPU + ~11 GB CPU RAM).
 - Profile model assignments: `fast`=qwen3:4b (100% GPU, ~80 tok/s), `quality`=qwen3:8b
-  (100% GPU, ~40 tok/s), `thinking`=qwen3:14b (~90% GPU, ~25 tok/s, num_ctx 16384),
+  (100% GPU, ~40 tok/s), `synthesis`=qwen3:14b (~90% GPU, ~25 tok/s, num_ctx 16384),
   `quality_high`=qwen3:30b (42% GPU + CPU, ~8 tok/s, best quality escalation target).
+  Reasoning traces (`think`) are **disabled** for all profiles — set `runtime.think:
+  true` (or per-profile `think: true`) to re-enable (~2× slower but higher quality).
 - `max_parallel_agents: 2` — GPU holds two 4B or one 8B+4B simultaneously.
 
 ## Conventions & decisions
@@ -241,6 +243,16 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
   (PDF/EPUB/.fdx); then the *next phase* (edit / sound mix / final cut).
 
 ## Session log
+- 2026-06-27 — **Disabled reasoning traces + GPU-aware model selection.** Set
+  `runtime.think: false` and `think: false` on the `thinking` and `quality_high`
+  profiles — all stages now answer directly without a CoT preamble (~2× faster per
+  stage; re-enable with `runtime.think: true` or a per-profile override). Added
+  GPU-aware model selection to `reel/llm.py`: `gpu_vram_mb()` + `system_ram_mb()` +
+  `can_run_model(tag)` check each model's quantized weight size against available
+  VRAM + 80% of system RAM; `resolve_model` prefers models that fit. `manifest.py`
+  gained `--runnable-only` (only emit models that fit hardware) and `--hardware`
+  (print summary). `scripts/update-models.sh` now logs detected hardware, defaults
+  to pulling only runnable models, and accepts `--no-gpu-filter` to override.
 - 2026-06-25 — **Better models for 23 GB RAM + 8 GB VRAM.** Intel NPU confirmed
   inaccessible from WSL2 (no `/dev/accel`, no OpenVINO). With 22 GB available RAM,
   models larger than VRAM are now viable via GPU+CPU split. Upgraded `thinking`
