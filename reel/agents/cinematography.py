@@ -65,12 +65,12 @@ Respond with JSON in exactly this shape:
         {{
           "shot_number": 1,
           "moment": "the dramatic beat or action this shot covers",
-          "type": "wide | medium | close-up | extreme-close-up | two-shot | \
-over-shoulder | insert | POV | establishing",
-          "angle": "eye-level | low | high | bird's-eye | Dutch-tilt | worm's-eye",
-          "movement": "static | pan | tilt | dolly-in | dolly-out | tracking | \
-crane-up | crane-down | handheld | Steadicam | whip-pan | zoom-in | zoom-out",
-          "lens": "wide-angle | normal | telephoto | macro | anamorphic",
+          "type": "wide shot | medium shot | close-up | extreme close-up | two-shot | \
+over-the-shoulder | insert | POV shot | establishing shot",
+          "angle": "eye-level | low angle | high angle | bird's eye view | Dutch tilt | worms eye",
+          "movement": "static | pan | tilt | dolly in | dolly out | tracking | \
+crane up | crane down | handheld | Steadicam | aerial view | zoom in | zoom out",
+          "lens": "wide-angle lens | normal lens | telephoto lens | macro lens | anamorphic lens",
           "framing": "specific compositional note",
           "emotional_function": "what this shot communicates to the audience"
         }}

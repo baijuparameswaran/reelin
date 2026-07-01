@@ -1,0 +1,49 @@
+{
+  "fetched_at": "2026-07-01T00:01:49+00:00",
+  "url": "https://ai.google.dev/gemini-api/docs/veo",
+  "section_hash": "0b053a1cc79c2952592a",
+  "terms_found": {
+    "style_keywords": [
+      "cinematic",
+      "film noir",
+      "stop-motion",
+      "3d animated",
+      "cartoon",
+      "photorealistic",
+      "sci-fi",
+      "horror film"
+    ],
+    "focus_types": [
+      "shallow focus",
+      "deep focus",
+      "soft focus",
+      "macro lens",
+      "wide-angle lens"
+    ],
+    "camera_movements": [
+      "aerial view",
+      "dolly shot",
+      "tracking",
+      "panning",
+      "worms eye",
+      "eye-level",
+      "pov shot"
+    ],
+    "shot_types": [
+      "wide shot",
+      "close-up",
+      "extreme close-up",
+      "pov shot",
+      "two-shot",
+      "eye-level",
+      "top-down"
+    ],
+    "audio_cues": [
+      "dialogue",
+      "sound effects",
+      "ambient noise",
+      "soundscape"
+    ]
+  },
+  "terms_missing": {}
+}

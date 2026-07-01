@@ -26,23 +26,26 @@ judge neutrally). A human-in-the-loop gate reviews/iterates each stage.
   dep is PyYAML; the Ollama client is stdlib `urllib` (in `reel/llm.py`). Image
   rendering adds **optional** deps (`diffusers`/`torch`/etc., see
   `requirements-image.txt`) — the text pipeline runs without them.
-- `reel/` — package. `models.py` (**unified AI-model abstraction + provider
-  policy** — the front door for text/image/video), `stages.py` (**per-stage
+- `reel/` — package. `models.py` (**provider policy + open-text front door** —
+  grader agents import this; `text()` is the only public function, always routes
+  to Ollama with `steer=False` so graders stay neutral), `stages.py` (**per-stage
   registry + `run_stage` for independent invocation**), `llm.py` (open-model
   client: model-agnostic Ollama + profile/fallback + `with_feedback` + the global
   creative-**direction** steering hook `set_direction`), `pipeline.py`
-  (orchestration + per-stage gates), `gate.py`
-  (human-in-the-loop review gate), `imagegen.py` (pluggable text-to-image +
-  img2img backend; default backend **Gemini**), `gemini.py` (Google Gemini REST
-  helpers — image generation + Veo video, stdlib urllib, API key from env), `i2v.py`
-  (pluggable image-to-video backend — default **Gemini Veo**; also diffusers
-  LTX/Wan or a remote endpoint), `stock.py` (free CC stock-photo lookup —
-  *currently unused*: kept for the diffusers actor-reference workflow), `cli.py`
-  (entry), `manifest.py` (model list for the updater), `fountain.py` (Fountain
-  parser + screenplay→storyboard/shot builder for rendering; `to_storyboard` folds
-  cinematography camera grammar into the render plan), `agents/` (ingest, **genre**,
-  structure, **moodboard**, characters, casting, scenes, soundscape, visuals,
-  cinematography, storyboard, screenplay, fidelity).
+  (orchestration + per-stage gates), `gate.py` (human-in-the-loop review gate),
+  `imagegen.py` (pluggable text-to-image; backends: **Gemini** default, diffusers,
+  auto1111), `gemini.py` (Google Gemini REST helpers — image generation + Veo
+  video, stdlib urllib, API key from env), `i2v.py` (pluggable image-to-video;
+  default **Gemini Veo**; also diffusers LTX/Wan or a remote endpoint; Veo
+  pre-flight prompt verifier via `veo_guide.verify_prompt`), `veo_guide.py` (Veo
+  prompting guide snapshot + staleness check + `verify_prompt` — validates every
+  prompt against the five-element guide before Gemini API submission; manual refresh
+  via `python -m reel.cli veo-sync`), `cli.py` (entry), `manifest.py` (model list
+  for the updater), `fountain.py` (Fountain parser + screenplay→storyboard/shot
+  builder for rendering; `to_storyboard` folds cinematography camera grammar into
+  Veo-aligned prompts using strict element ordering and Veo vocabulary), `agents/`
+  (ingest, **genre**, structure, **moodboard**, characters, casting, scenes,
+  soundscape, visuals, cinematography, storyboard, screenplay, fidelity).
 - `config/models.yaml` — model profiles, per-agent profile map, `hitl` gate
   knobs, `genre` block (value/steer/enforce/min_score), `moodboard` block
   (enabled/steer), `fidelity` block, `image` block (backend/model — default
@@ -88,9 +91,10 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
   ONLY for image + video generation, and only if `GEMINIAPIKEY` is set; every
   text/LLM stage always uses the local OPEN models (Ollama).** Image/video config
   backends are `auto` → resolve to `gemini` when a key exists, else the
-  `open_backend` (diffusers/comfyui). `reel.models` is the front door
-  (`text()`/`generate_image()`/`generate_clip()` + `providers()`); `reel.llm` is
-  the open-text engine behind `models.text`. No Gemini text path exists by design.
+  `open_backend` (diffusers/comfyui). `reel.models` exposes only `text()` for
+  grader agents; image/video are invoked directly via `reel.imagegen` and `reel.i2v`
+  from `pipeline.py`. `reel.llm` is the open-text engine behind `models.text`. No
+  Gemini text path exists by design.
 - **Story-fidelity at every stage (`reel/agents/fidelity.py`, open model):** each
   stage's output is scored against the **original story text** by
   `fidelity.check_stage` (`fidelity_score` 0-100, drift / omissions /
@@ -180,26 +184,25 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
   `run_group()` in `pipeline.py` is the checkpoint-aware stage runner (load → or
   compute concurrently → gate → save); stop raises `PipelineStopped`, caught in
   `cli.main`. A stage interrupted mid-flight is never half-saved — it re-runs.
-- **Casting still keeps the actor vs. character data model** (an `actor` block —
-  the performer's own, role-independent features — and a `character` block — that
-  actor aged/costumed/styled into the role), but **image generation is limited to
-  the character representation only**: exactly one image per character
+- **Casting data model:** each entry has an `actor` block (performer's own features)
+  and a `character` block (that actor aged/costumed into the role). **Image
+  generation renders the character only** — exactly one image per character
   (`output/casting/<name>.png`) from `character.visual_prompt`, via the **Gemini
-  image API** (`imagegen` backend `gemini`, default model `gemini-3.1-flash-image`).
-  This character image is the **identity reference** handed to the video stage. No
-  actor render, no stock photo (the old Openverse → actor → character img2img chain
-  is retired; `stock.py` is dormant). Best-effort: no API key → skip with a hint.
-- **Scene rendering = image-to-video (next phase):** after storyboard + screenplay,
-  the pipeline renders each storyboard frame as a **video clip** via `i2v`
+  image API** (`imagegen` backend `gemini`, default model `gemini-2.5-flash-image`).
+  This character image is the **identity seed** for Veo. No actor render, no stock
+  photo lookup — the old Openverse → actor → character img2img chain and `stock.py`
+  have been removed. Best-effort: no API key → skip with a hint.
+- **Scene rendering = image-to-video:** after storyboard + screenplay, the pipeline
+  renders each storyboard panel as a **video clip** via `i2v`
   (`pipeline._render_scene_frames` → `output/video/`), default backend **Gemini
-  Veo** (`veo-3.1-fast-generate-preview`). The **character representation image**
-  is the reference: the first frame of a scene is seeded from the in-frame
-  character's `output/casting/<name>.png` (identity); later frames are seeded from
-  the previous frame's last image for **continuity within a scene** (scene boundary
-  = reset = cut). No intermediate stills — image generation is reserved for the
-  character. Pluggable (`video` block): `gemini`/`veo`, `diffusers` (LTX/Wan on a
-  GPU via `pipeline_class`), `comfyui`/`http`, or `none`. Best-effort: no API key
-  → skip with a hint.
+  Veo** (`veo-3.1-lite-generate-preview`). The first panel of each scene is seeded
+  from the in-frame character's `output/casting/<name>.png` (identity anchor); later
+  panels use the previous clip's last frame for **continuity** (scene boundary = cut).
+  **Every Veo prompt is verified** against the guide before submission (`veo_guide.
+  verify_prompt` — checks the five required elements + audio cue formatting; issues
+  logged as warnings, never blocking). Pluggable (`video` block): `gemini`/`veo`,
+  `diffusers` (LTX/Wan on a GPU), `comfyui`/`http`, or `none`. Best-effort: no API
+  key → skip with a hint.
 - On this host prefer `--profile fast` (one model, no 5 GB reloads between agents).
 - Update cadence lives in `scripts/update-models.sh` (pull + version-check +
   smoke test + log), wired weekly/monthly via `make install-cron`, runnable
@@ -208,41 +211,54 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
 - Version control: git, branch `main`.
 
 ## Current state
-- **Status:** The pipeline now runs **genre → structure/characters → moodboard →
+- **Status:** The pipeline runs **genre → structure/characters → moodboard →
   scenes/casting → soundscape/visuals/cinematography → screenplay → storyboard →
   render**, with a human-in-the-loop gate per stage plus per-stage **fidelity** and
-  **genre** scoring. The earlier creative stages were validated end-to-end on the
-  sample; the newest additions (genre, moodboard, steering, full-detail storyboard/
-  screenplay, standalone render) are **import/byte-compile/offline-verified and the
-  genre agent is live-verified** (auto-detect + guidance + enforce on the sample),
-  but a full single end-to-end run with everything on is still slow/pending on this
-  CPU host.
-- **Qwen3 installed** (`qwen3:8b`, `qwen3:4b`) — the old "Ollama too old for Qwen3"
-  blocker is resolved; both profiles resolve to Qwen3.
-- **Gemini image + video are live-verified** (key in `~/.bashrc` as `GEMINIAPIKEY`).
-  Image generation is **limited to the character representation** (one
-  `output/casting/<name>.png` per character); Veo (`reel/i2v.py`) renders scene
-  clips seeded by that image, chained for continuity. **Veo preview tier rate-limits
-  hard (429)** and occasionally returns transient operation errors (code 13) — the
-  `gemini.py` client now **retries both with backoff**. After rendering, clips are
-  **stitched into one `output/video/movie.mp4`** (`i2v.stitch` → ffmpeg concat
-  demuxer, stream-copy with re-encode fallback; native audio preserved) — done
-  automatically at the end of `_render_scene_frames`, or on demand via
-  `python -m reel.cli stitch`.
-- **Genre + moodboard steer the whole run; both grade-able stages stay neutral.**
-  Verified the steering exemption (creative `llm.generate` gets the direction;
-  `models.text` graders don't). Moodboard `tiles` are capped to `max_scenes`.
-- **Recommended next user action:** Enable GPU by replacing the snap Ollama:
-  `! curl -fsSL https://ollama.com/install.sh | sh` (then re-pull models with
-  `ollama pull qwen3:4b && ollama pull qwen3:8b && ollama pull gemma3:12b`).
-  Verify GPU with `ollama ps` — "PROCESSOR" column should show "GPU" or "GPU+CPU".
-  Then run `make run` / `make demo` for a full end-to-end pass.
-- **Next up (next iterations):** auto-render moodboard `tiles` (opt-in, like casting
-  images); per-scene clip assembly (ffmpeg concat); input chunking for long texts
-  (truncated ~12k chars); draft *all* scenes not just first N; richer ingest
-  (PDF/EPUB/.fdx); then the *next phase* (edit / sound mix / final cut).
+  **genre** scoring. All imports and byte-compile clean; genre agent live-verified.
+  Full end-to-end run still pending on this host (GPU required for reasonable speed).
+- **Qwen3 installed** (`qwen3:8b`, `qwen3:4b`). Both profiles resolve to Qwen3.
+- **Gemini image + video live-verified** (key in `~/.bashrc` as `GEMINIAPIKEY`). One
+  character image per character (`output/casting/<name>.png`, `gemini-2.5-flash-image`);
+  Veo renders scene clips (`veo-3.1-lite-generate-preview`), chained for continuity.
+  Veo preview tier rate-limits (429) + transient op errors — `gemini.py` retries
+  both with backoff. Clips stitched into `output/video/movie.mp4` automatically or
+  via `python -m reel.cli stitch`.
+- **Veo prompts are strictly Veo-guide-aligned** (five-element order: Subject →
+  Action → Style → Camera → Focus/Ambiance; three audio cue types; Veo vocabulary
+  throughout) and **verified before every Gemini API call** (`veo_guide.verify_prompt`
+  — issues and warnings logged, generation never blocked). Guide snapshot cached in
+  `config/veo_guide_snapshot.json`; refresh manually with `python -m reel.cli veo-sync`.
+- **Recommended next action:** Enable GPU — replace the snap Ollama:
+  `! curl -fsSL https://ollama.com/install.sh | sh`
+  Then re-pull: `ollama pull qwen3:4b && ollama pull qwen3:8b`.
+  Verify: `ollama ps` → "PROCESSOR" should show GPU or GPU+CPU.
+- **Next up:** moodboard tile auto-render (opt-in); richer ingest (PDF/EPUB/.fdx);
+  draft all scenes (not just first N); edit / sound mix / final cut phase.
 
 ## Session log
+- 2026-06-30 — **Veo guide alignment, Veo prompt verifier, dead code cleanup.**
+  Aligned all Veo video prompts to the official guide's five-element order
+  (Subject → Action → Style → Camera → Focus/Ambiance) and three audio cue types
+  (ambient noise / SFX / quoted dialogue) across all code paths. `fountain.py`
+  `_camera()` now emits Veo vocabulary without labels ("Camera:/Framing:"); `_av()`
+  returns a 3-tuple separating ambient from SFX; `to_storyboard()` assembles
+  elements in strict guide order. `_VEO_FOCUS_FOUNTAIN` and `_VEO_FOCUS` extended
+  to cover natural language shot-type keys (e.g. "close-up", "wide shot") not just
+  abbreviations. `cinematography.py` agent prompt updated to Veo vocabulary
+  (bird's eye view, worms eye, dolly in/out, etc.). `storyboard.py` agent prompt
+  updated: camera angle enum uses Veo terms, `sound` field now documents the
+  ambient | SFX two-part format. `_panel_video_prompt()` in `pipeline.py` splits
+  `panel.sound` on `" | "` into ambient vs. SFX; `audio_overview` feeds the
+  scene-level ambient. Added `veo_guide.verify_prompt()` — checks a prompt against
+  the five required elements and audio formatting; called in `i2v._gen_gemini()`
+  before every Gemini API call and in `cli._gen_video_prompt()` for direct
+  `gen-video` commands. Auto-sync at pipeline startup removed (was noise);
+  `veo-sync` is manual-only. **Dead code removed:** `stock.py` (Openverse lookup,
+  fully dormant), `imagegen._gen_diffusers_img2img` + `_I2I` + `can_img2img` +
+  `generate_image_from` (img2img chain retired), `models.py` public image/video
+  wrappers (now only `text()` + re-exports), `veo_guide.sync_if_stale`. All
+  imports verified clean.
+
 - 2026-06-27 — **Disabled reasoning traces + GPU-aware model selection.** Set
   `runtime.think: false` and `think: false` on the `thinking` and `quality_high`
   profiles — all stages now answer directly without a CoT preamble (~2× faster per

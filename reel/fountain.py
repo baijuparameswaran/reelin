@@ -69,6 +69,62 @@ def parse(text: str) -> list[dict]:
 
 # ── screenplay → storyboard (shots with A/V) ─────────────────────────────────
 
+# Veo prompting guide — focus/lens terms by shot type.
+# Covers both standard abbreviations (from storyboard schema) and the natural
+# language values emitted by the cinematography agent, so the focus hint fires
+# regardless of which path produced the shot_type label.
+_VEO_FOCUS_FOUNTAIN: dict[str, str] = {
+    # abbreviations
+    "ECU": "portrait, extreme close-up, shallow focus",
+    "CU": "portrait, shallow focus",
+    "MCU": "shallow focus",
+    "INSERT": "macro lens",
+    "WS": "deep focus",
+    "ELS": "deep focus",
+    # natural language (cinematography agent output)
+    "EXTREME-CLOSE-UP": "portrait, extreme close-up, shallow focus",
+    "EXTREME CLOSE-UP": "portrait, extreme close-up, shallow focus",
+    "EXTREME CLOSE UP": "portrait, extreme close-up, shallow focus",
+    "CLOSE-UP": "portrait, shallow focus",
+    "CLOSE UP": "portrait, shallow focus",
+    "WIDE": "deep focus",
+    "WIDE SHOT": "deep focus",
+    "ESTABLISHING": "deep focus",
+    "ESTABLISHING SHOT": "deep focus",
+    "TWO-SHOT": "shallow focus",
+    "TWO SHOT": "shallow focus",
+    "OVER-THE-SHOULDER": "shallow focus",
+    "OTS": "shallow focus",
+    "POV": "shallow focus",
+    "POV SHOT": "shallow focus",
+}
+
+# Cinematography agent angle → Veo guide vocabulary.
+_VEO_ANGLE: dict[str, str] = {
+    "bird's-eye": "bird's eye view",
+    "bird's eye": "bird's eye view",
+    "worm's-eye": "worms eye",
+    "worm's eye": "worms eye",
+    "dutch-tilt": "Dutch tilt",
+    "dutch tilt": "Dutch tilt",
+    "high": "high angle",
+    "low": "low angle",
+}
+
+# Cinematography agent movement → Veo guide vocabulary.
+_VEO_MOVEMENT: dict[str, str] = {
+    "dolly-in": "dolly in",
+    "dolly-out": "dolly out",
+    "crane-up": "crane up",
+    "crane-down": "crane down",
+    "whip-pan": "whip pan",
+    "zoom-in": "zoom in",
+    "zoom-out": "zoom out",
+    "steadicam": "Steadicam tracking",
+    "static": "static",
+}
+
+
 def _sample(items: list, k: int) -> list:
     """Up to k items, evenly spread across the list (keep order)."""
     if not items or k <= 0:
@@ -80,8 +136,9 @@ def _sample(items: list, k: int) -> list:
 
 
 def _resolve_character(text: str, scene_dialogue: list, casting: dict, out) -> tuple[str | None, str | None]:
-    """Best character + image for a beat: explicit casting-name match, then alias
-    keywords (crew/sailor/villager), else the scene's first speaking character."""
+    """Best character + image for a beat: explicit name match in the beat text,
+    then any character whose name appears in the surrounding dialogue, else the
+    first cast entry that has a rendered image."""
     from pathlib import Path
     entries = []
     for c in casting.get("casting", []):
@@ -89,17 +146,10 @@ def _resolve_character(text: str, scene_dialogue: list, casting: dict, out) -> t
         entries.append((c.get("name", ""), img))
     blob = (text + " " + " ".join(w for _s, w in scene_dialogue)).lower()
 
-    for name, img in entries:                       # explicit name in the beat
+    for name, img in entries:                       # explicit name in the beat text
         if name and img and name.lower() in (text or "").lower() and (Path(out) / img).exists():
             return name, str(Path(out) / img)
-    aliases = {"crew": "Automation", "generator": "Automation", "automation": "Automation",
-               "sailor": "Saoirse", "ship": "Saoirse", "boat": "Saoirse", "villager": "Villag"}
-    for kw, frag in aliases.items():
-        if kw in blob:
-            for name, img in entries:
-                if frag.lower() in name.lower() and img and (Path(out) / img).exists():
-                    return name, str(Path(out) / img)
-    for name, img in entries:                       # fallback: any present character
+    for name, img in entries:                       # name appears anywhere in the scene dialogue
         if img and (Path(out) / img).exists():
             if name.lower() in blob:
                 return name, str(Path(out) / img)
@@ -112,37 +162,64 @@ def _camera(scene_no: int, frame_idx: int, n_frames: int, cinematography: dict) 
     cinematography.json declares an ordered list of `shots` per scene (type/angle/
     movement/lens/framing). There are usually fewer planned shots than action beats,
     so map each frame to a shot by proportional index — every beat inherits the
-    nearest planned shot's camera grammar. ("", "") when the scene has no entry."""
+    nearest planned shot's camera grammar. ("", "") when the scene has no entry.
+
+    Output uses Veo guide vocabulary throughout — no labeled sections ("Camera:/
+    Framing:"), natural language terms, Veo-normalized angle and movement names.
+    """
     sc = next((s for s in cinematography.get("scenes", []) if s.get("scene_number") == scene_no), {})
     shots = sc.get("shots", []) if isinstance(sc, dict) else []
     if not shots:
         return "", ""
     sh = shots[min(int(frame_idx * len(shots) / max(n_frames, 1)), len(shots) - 1)]
-    parts = []
-    if sh.get("type"):
-        parts.append(f"{sh['type']} shot")
-    if sh.get("angle"):
-        parts.append(f"{sh['angle']} angle")
-    if sh.get("movement"):
-        parts.append(str(sh["movement"]))
-    if sh.get("lens"):
-        parts.append(f"{sh['lens']} lens")
-    clause = ("Camera: " + ", ".join(parts) + ".") if parts else ""
-    if sh.get("framing"):
-        clause += f" Framing: {sh['framing']}."
-    return clause, (sh.get("type") or "")
+
+    raw_type = (sh.get("type") or "").strip()
+    raw_angle = (sh.get("angle") or "").strip().lower()
+    raw_movement = (sh.get("movement") or "").strip().lower()
+    raw_lens = (sh.get("lens") or "").strip()
+    raw_framing = (sh.get("framing") or "").strip()
+
+    parts: list[str] = []
+    # Composition — Veo guide: "wide shot", "close-up", "two-shot", etc.
+    if raw_type:
+        label = raw_type if raw_type.endswith("shot") or raw_type.endswith("view") else f"{raw_type} shot"
+        parts.append(label)
+    # Camera positioning — Veo guide: "eye-level", "low angle", "bird's eye view", "worms eye"
+    if raw_angle:
+        parts.append(_VEO_ANGLE.get(raw_angle, raw_angle))
+    # Camera motion — Veo guide: "dolly in", "tracking", "panning", "aerial view"
+    if raw_movement and raw_movement != "static":
+        parts.append(_VEO_MOVEMENT.get(raw_movement, raw_movement))
+    # Lens — Veo guide: "wide-angle lens", "macro lens", "telephoto lens"
+    if raw_lens:
+        parts.append(f"{raw_lens} lens" if "lens" not in raw_lens.lower() else raw_lens)
+    # Framing note integrated naturally (no "Framing:" label)
+    if raw_framing:
+        parts.append(raw_framing)
+
+    clause = ", ".join(parts) + "." if parts else ""
+    return clause, raw_type
 
 
-def _av(scene_no: int, soundscape: dict, visuals: dict) -> tuple[str, str]:
-    """(visual style, audio) strings for a scene from the design docs."""
+def _av(scene_no: int, soundscape: dict, visuals: dict) -> tuple[str, str, str]:
+    """(visual, ambient, sfx) strings for a scene from the design docs.
+
+    Veo guide separates three audio cue types:
+      ambient — environment's soundscape ("A faint hum in the background")
+      sfx     — explicitly described sounds ("tires screeching loudly")
+    We map: ambient_bed → ambient; sound_events → sfx (explicit, action-driven).
+    """
     snd = next((s for s in soundscape.get("soundscapes", []) if s.get("scene_number") == scene_no), {})
     vis = next((s for s in visuals.get("scenes", []) if s.get("scene_number") == scene_no), {})
     vparts = [vis.get("color_palette"), vis.get("lighting"), vis.get("visual_filter")]
     visual = ", ".join(p for p in vparts if p)
-    aparts = [snd.get("ambient_bed")]
-    aparts += [e.get("sound") if isinstance(e, dict) else str(e) for e in snd.get("sound_events", [])]
-    audio = "; ".join(p for p in aparts if p)
-    return visual, audio
+    # Ambient noise: the environment's soundscape (scene-level bed).
+    ambient = (snd.get("ambient_bed") or "").strip()
+    # SFX: explicitly described sound events (action-driven, panel-specific).
+    sfx_events = [e.get("sound") if isinstance(e, dict) else str(e)
+                  for e in snd.get("sound_events", [])]
+    sfx = ", ".join(p for p in sfx_events if p)
+    return visual, ambient, sfx
 
 
 def to_storyboard(scenes: list[dict], soundscape: dict, visuals: dict, casting: dict,
@@ -158,31 +235,52 @@ def to_storyboard(scenes: list[dict], soundscape: dict, visuals: dict, casting: 
     is cinematography.json; its per-scene shot list drives the camera language.
     """
     cine = cinematography or {}
-    style = "photoreal cinematic, screenplay-driven, camera-directed, native audio"
+    style = "cinematic, photorealistic"
     board = {"storyboard_style": style, "storyboard": []}
     chosen = scenes[:max_scenes] if max_scenes else scenes
     for idx, sc in enumerate(chosen, start=1):
-        visual, audio = _av(idx, soundscape, visuals)
+        visual, ambient, sfx = _av(idx, soundscape, visuals)
         beats = (_sample(sc["action"], max_shots) if max_shots else sc["action"]) or [sc["slugline"]]
         frames = []
         for fnum, action in enumerate(beats, start=1):
             who, _img = _resolve_character(action, sc["dialogue"], casting, out)
-            # Collect all dialogue lines audible in this beat; prefer lines from
-            # the character in frame, then include other speakers as heard O.S.
+            # Dialogue — Veo guide: use quotation marks for specific speech.
+            # In-frame: Speaker says, "line."  Off-screen: "line" (Speaker, off screen).
             speech_parts: list[str] = []
             for spk, line in sc["dialogue"]:
                 if who and who.split()[0].lower() in spk.lower():
-                    speech_parts.insert(0, f'{spk} says: "{line}"')
+                    speech_parts.insert(0, f'{spk} says, "{line}"')
                 else:
-                    speech_parts.append(f'{spk} (O.S.): "{line}"')
-            said = (" " + " ".join(speech_parts[:3]) + ".") if speech_parts else ""
+                    speech_parts.append(f'"{line}" ({spk}, off screen)')
             camera, shot_type = _camera(idx, fnum - 1, len(beats), cine)
-            prompt = (f"{sc['slugline']}. {action}"
-                      f"{said}"
-                      + (f" {camera}" if camera else "")
-                      + " Cinematic, natural motion."
-                      + (f" Visual style: {visual}." if visual else "")
-                      + (f" Audio: {audio}." if audio else ""))
+            # Focus & Ambiance — shot-type-driven lens/focus hint (Veo guide).
+            focus = _VEO_FOCUS_FOUNTAIN.get(shot_type.upper(), "") if shot_type else ""
+
+            # Veo guide element order (strict):
+            # 1 Subject+Action — who/what does what (action beat is the primary vehicle)
+            # 2 Style          — cinematic style keywords
+            # 3 Camera         — positioning (eye-level, aerial view) + motion (dolly, tracking)
+            # 4 Composition    — framing (wide shot, close-up) already encoded in camera clause
+            # 5 Focus & Ambiance — lens/focus term + color/lighting mood
+            # Audio (appended after visuals per guide):
+            #   Ambient noise  — environment's soundscape (ambient_bed)
+            #   SFX            — explicitly described sounds (sound_events)
+            #   Dialogue       — quoted speech (Veo voices these lines)
+            p_parts = [action]                              # 1 Subject + Action
+            p_parts.append("Cinematic, photorealistic.")   # 2 Style
+            if camera:
+                p_parts.append(camera)                     # 3+4 Camera & Composition
+            if visual:                                     # 5 Ambiance (color/lighting)
+                p_parts.append(visual + ".")
+            if focus:                                      # 5 Focus/lens
+                p_parts.append(focus + ".")
+            if ambient:                                    # Audio: ambient noise
+                p_parts.append(ambient + ("." if not ambient.rstrip().endswith(".") else ""))
+            if sfx:                                        # Audio: SFX
+                p_parts.append(sfx + ("." if not sfx.rstrip().endswith(".") else ""))
+            if speech_parts:                               # Audio: dialogue (quoted)
+                p_parts.extend(speech_parts[:3])
+            prompt = " ".join(p.strip() for p in p_parts if p.strip())
             frames.append({
                 "frame": fnum,
                 "moment": action[:80],

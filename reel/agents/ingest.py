@@ -1,9 +1,15 @@
 """Ingest agent: load and normalize raw source material.
 
-Accepts any plain-text book / short story / script and returns a normalized
-record the downstream creative agents can rely on. The text is also split into
-overlapping chunks so that per-scene agents can reference only the portion of
-the story relevant to their scene rather than truncating to a fixed head.
+Accepts plain-text or PDF books / short stories / scripts and returns a
+normalized record the downstream creative agents can rely on. The text is also
+split into overlapping chunks so that per-scene agents can reference only the
+portion of the story relevant to their scene rather than truncating to a fixed
+head.
+
+Supported formats:
+  .txt / .md / .fountain / any plain-text — read directly.
+  .pdf                                    — text extracted via pypdf (install
+                                            with: pip install pypdf).
 """
 from __future__ import annotations
 
@@ -85,9 +91,43 @@ def scene_source_context(source: dict,
     return combined
 
 
+def _extract_pdf(p: Path) -> str:
+    """Extract plain text from a PDF using pypdf.
+
+    Handles searchable PDFs (the typical case for digital screenplays and
+    scripts).  Scanned-image PDFs will return empty/garbled text — those need
+    an OCR pass before ingestion.
+    """
+    try:
+        import pypdf
+    except ImportError as exc:
+        raise ImportError(
+            "pypdf is required for PDF ingestion.  Install it with:\n"
+            "    pip install pypdf"
+        ) from exc
+
+    reader = pypdf.PdfReader(p)
+    pages: list[str] = []
+    for page in reader.pages:
+        page_text = page.extract_text(extraction_mode="layout") or ""
+        # Strip lone page-number lines common in screenplays (e.g. "42." or "42")
+        page_text = re.sub(r"(?m)^[ \t]*\d+\.?[ \t]*$", "", page_text)
+        pages.append(page_text)
+
+    text = "\n\n".join(pages)
+
+    # Collapse runs of spaces introduced by PDF layout positioning, but only
+    # within a line so screenplay indentation is preserved.
+    text = re.sub(r"[ \t]{3,}", "  ", text)
+    return text
+
+
 def ingest(path: str | Path) -> dict:
     p = Path(path)
-    text = p.read_text(encoding="utf-8", errors="replace")
+    if p.suffix.lower() == ".pdf":
+        text = _extract_pdf(p)
+    else:
+        text = p.read_text(encoding="utf-8", errors="replace")
 
     # Normalize line endings and collapse excessive blank lines.
     text = re.sub(r"\r\n?", "\n", text)
