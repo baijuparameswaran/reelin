@@ -109,40 +109,6 @@ def _full_prompt(prompt: str) -> str:
 # ── backends ─────────────────────────────────────────────────────────────────
 
 _PIPE = None   # text->image pipeline, cached across characters (load is expensive)
-_I2I = None    # image->image pipeline (character render from the actor photo)
-
-
-def _gen_diffusers_img2img(prompt: str, init_path: Path, out_path: Path,
-                           strength: float | None = None) -> bool:
-    """Render `prompt` starting FROM the photo at `init_path`, so the result keeps
-    that real face/build. `strength` controls how far it transforms (lower = closer
-    to the reference → stronger identity consistency); defaults to `img2img_strength`."""
-    global _I2I
-    c = _cfg()
-    model = c.get("model", "stabilityai/sd-turbo")
-    if _I2I is None:
-        from diffusers import AutoPipelineForImage2Image
-        from diffusers.utils import load_image  # noqa: F401 (kept for parity)
-        import torch
-        _log(f"      loading img2img model {model} (first use, CPU) …")
-        _I2I = AutoPipelineForImage2Image.from_pretrained(model, torch_dtype=torch.float32)
-        _I2I.to("cpu")
-        _I2I.set_progress_bar_config(disable=True)
-    from PIL import Image
-    width, height = _dims()
-    init = Image.open(init_path).convert("RGB").resize((width, height))
-    strength = float(c.get("img2img_strength", 0.55) if strength is None else strength)
-    # sd-turbo needs steps*strength >= 1, so floor the step count accordingly
-    steps = max(int(c.get("steps", 4)), int(-(-1 // max(strength, 0.05))) + 1)
-    img = _I2I(
-        _full_prompt(prompt),
-        image=init,
-        strength=strength,
-        num_inference_steps=steps,
-        guidance_scale=float(c.get("guidance_scale", 0.0)),
-    ).images[0]
-    img.save(out_path)
-    return True
 
 
 def _gen_diffusers(prompt: str, out_path: Path) -> bool:
@@ -195,13 +161,11 @@ def _gen_auto1111(prompt: str, out_path: Path) -> bool:
     return True
 
 
-def _gen_gemini(prompt: str, out_path: Path, refs: list | None = None) -> bool:
+def _gen_gemini(prompt: str, out_path: Path) -> bool:
     c = _cfg()
     return gemini.generate_image(
         prompt, Path(out_path),
-        #model=c.get("model", "gemini-3.1-flash-image"),
         model=c.get("model", "gemini-2.5-flash-image"),
-        refs=refs,
         aspect_ratio=c.get("aspect_ratio"),
         image_size=c.get("image_size"),
         timeout=c.get("timeout_seconds", 300) or 300,
@@ -231,26 +195,3 @@ def generate_image(prompt: str, out_path: Path) -> bool:
         return False
 
 
-def can_img2img() -> bool:
-    """True if a reference-conditioned render is possible right now (diffusers
-    img2img, or Gemini reference images)."""
-    return enabled() and available() and backend() in ("diffusers", "gemini")
-
-
-def generate_image_from(init_path: Path, prompt: str, out_path: Path,
-                        strength: float | None = None) -> bool:
-    """Render `prompt` conditioned on the image at `init_path` (identity anchor) —
-    diffusers img2img, or a Gemini reference image. `strength` (diffusers only;
-    lower = closer to the reference). Falls back to a plain text->image render if
-    reference conditioning isn't possible. Best-effort."""
-    if not prompt:
-        return False
-    if not (init_path and Path(init_path).exists() and can_img2img()):
-        return generate_image(prompt, out_path)
-    try:
-        if backend() == "gemini":
-            return _gen_gemini(prompt, out_path, refs=[init_path])
-        return _gen_diffusers_img2img(prompt, Path(init_path), out_path, strength)
-    except Exception as e:  # noqa: BLE001 — stay non-fatal, degrade to text->image
-        _log(f"      reference render failed ({type(e).__name__}: {e}); falling back to text->image")
-        return generate_image(prompt, out_path)

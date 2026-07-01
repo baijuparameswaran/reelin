@@ -105,8 +105,15 @@ def unavailable_hint() -> str:
 # ── prompt / params ──────────────────────────────────────────────────────────
 
 def _full_prompt(prompt: str) -> str:
-    suffix = _cfg().get("style_suffix", "cinematic, smooth natural motion, consistent character")
-    return f"{prompt.strip()}, {suffix}" if suffix and prompt else (prompt or suffix)
+    # Veo guide: style keywords such as "cinematic", "film noir", "documentary" belong
+    # in the prompt. The suffix is a fallback for when the panel prompt omits style.
+    suffix = _cfg().get("style_suffix", "cinematic, photorealistic")
+    p = prompt.strip()
+    # Only append the suffix when the core style word is absent — avoid duplication.
+    if suffix and p and not any(kw in p.lower() for kw in ("cinematic", "film noir", "documentary",
+                                                              "animation", "cartoon", "stop-motion")):
+        return f"{p}, {suffix}"
+    return p or suffix
 
 
 def _frames(c: dict) -> int:
@@ -117,10 +124,27 @@ def _frames(c: dict) -> int:
 
 def _gen_gemini(images: list[Path], prompt: str, out_path: Path) -> bool:
     """Veo image-to-video via the Gemini API. Seeds from the last keyframe (the
-    reference image produced by the image stage); text-to-video if none given."""
+    reference image produced by the image stage); text-to-video if none given.
+
+    Pre-flight: runs the Veo prompt through the guide verifier before sending to
+    the API.  Issues are logged as warnings (generation always proceeds — the
+    verifier is advisory, not a gate).
+    """
+    from . import veo_guide
+    full_prompt = _full_prompt(prompt)
+    report = veo_guide.verify_prompt(full_prompt)
+    if report["issues"]:
+        _log("⚠  Veo prompt guide — issues detected:")
+        for issue in report["issues"]:
+            _log(f"   • {issue}")
+    if report["warnings"]:
+        _log("   Veo prompt guide — advisory:")
+        for w in report["warnings"]:
+            _log(f"   ℹ {w}")
+
     c = _cfg()
     return gemini.generate_video(
-        _full_prompt(prompt), Path(out_path),
+        full_prompt, Path(out_path),
         image_path=images[-1] if images else None,
         #model=c.get("model", "veo-3.1-fast-generate-preview"),
         model=c.get("model", "veo-3.1-lite-generate-preview"),

@@ -11,18 +11,17 @@ Phase graph:
    (soundscape, visuals, cinematography concurrent)
 
 Creative crew roles:
-  casting       — locks each character's visual form as actor + character layers
-                  (image-ready); can render them (stock photo → actor → character)
-  soundscape    — background score / sound design
-  visuals       — art production (color, props, production design)
+  casting        — locks each character's visual form; renders one character image
+                   per character via Gemini (`output/casting/<name>.png`)
+  soundscape     — background score / sound design
+  visuals        — art production (color, props, production design)
   cinematography — Director of Photography (shot types, angles, movement, lens)
-  storyboard    — fuses casting + art + camera + score into a visual image per moment
+  storyboard     — fuses casting + art + camera + score into a Veo prompt per panel
 
 After storyboard + screenplay, an optional scene-render phase
-(`_render_scene_frames` → `output/video/`) renders each storyboard frame to a
-still then animates it into a clip (image-to-video via `reel.i2v`), chaining clips
-for continuity within a scene. GPU-gated and best-effort: a no-op on CPU-only
-hosts (stills still render where the image backend is available).
+(`_render_scene_frames` → `output/video/`) renders each storyboard panel into a
+video clip via Gemini Veo (`reel.i2v`), seeded by the character's casting image
+for identity continuity. Best-effort: no API key → skips with a hint.
 
 Each LLM stage passes through a human-in-the-loop gate: the operator can
 approve the result, supply revision feedback, or let it auto-approve on
@@ -283,42 +282,122 @@ def _render_moodboard_tiles(moodboard: dict, out: Path) -> int:
     return n
 
 
-def _panel_video_prompt(panel: dict, audio_overview: dict | None = None) -> str:
-    """Build an audio-enriched Veo prompt from a storyboard panel.
+# Veo prompting guide — focus/lens terms by shot type.
+# "portrait" enhances facial detail on close-ups; "deep focus" suits wide
+# Veo focus/lens hint keyed by shot type — abbreviations (storyboard schema)
+# and natural language variants (storyboard agent prose output).
+_VEO_FOCUS: dict[str, str] = {
+    # standard abbreviations
+    "ECU": "portrait, extreme close-up, shallow focus",
+    "CU": "portrait, shallow focus",
+    "MCU": "shallow focus",
+    "INSERT": "macro lens",
+    "WS": "deep focus",
+    "ELS": "deep focus",
+    # natural language (model may output these)
+    "EXTREME CLOSE-UP": "portrait, extreme close-up, shallow focus",
+    "EXTREME CLOSE UP": "portrait, extreme close-up, shallow focus",
+    "CLOSE-UP": "portrait, shallow focus",
+    "CLOSE UP": "portrait, shallow focus",
+    "WIDE SHOT": "deep focus",
+    "WIDE": "deep focus",
+    "ESTABLISHING SHOT": "deep focus",
+    "ESTABLISHING": "deep focus",
+    "POV SHOT": "shallow focus",
+    "POV": "shallow focus",
+    "OTS": "shallow focus",
+    "OVER-THE-SHOULDER": "shallow focus",
+    "TWO-SHOT": "shallow focus",
+}
 
-    Veo 3 renders native synchronized audio from the prompt, so we fold in:
-      - image_prompt  — visual scene, camera, action (the primary content)
-      - sound         — per-panel ambient bed + sound events
-      - dialogue      — quoted speech so Veo voices the lines
-    Scene-level audio_overview (score cue, ambient) fills in when the panel
-    has no explicit sound field.
+
+def _panel_video_prompt(panel: dict, audio_overview: dict | None = None) -> str:
+    """Assemble a Veo-aligned prompt from a storyboard panel.
+
+    Follows the Veo prompting guide's five elements in order:
+      Subject → Action → Style → Camera & Composition → Focus & Ambiance
+    then the three audio cue types:
+      Ambient noise (environment) → Sound effects (explicit) → Dialogue (quoted)
+
+    The storyboard's image_prompt already encodes the five visual elements
+    (character with physical description, action, camera grammar, ambiance, style).
+    This function adds shot-type-driven focus/lens hints and properly structured
+    audio cues — no labeled sections; everything in natural language per the guide.
     """
     base = (panel.get("image_prompt") or panel.get("action") or panel.get("moment", "")).strip()
+    shot_type = (panel.get("shot_type") or "").upper()
+    base_lower = base.lower()
 
-    # Per-panel sound (preferred); fall back to scene-level audio overview.
-    sound = (panel.get("sound") or "").strip()
-    if not sound and audio_overview:
-        parts_ = [p for p in [
-            audio_overview.get("ambient", ""),
-            audio_overview.get("score_cue", ""),
-        ] if p]
-        sound = "; ".join(parts_)
+    # Focus & Ambiance — add lens/focus hint when not already in the base prompt.
+    # Veo guide: "portrait" for CU/ECU, "deep focus" for wide shots, "macro lens" for inserts.
+    focus_hint = ""
+    hint_terms = _VEO_FOCUS.get(shot_type, "")
+    if hint_terms:
+        # Only inject if the key focus keyword isn't already present in the prompt.
+        key = hint_terms.split(",")[0].strip()
+        if key not in base_lower:
+            focus_hint = hint_terms
 
-    # Dialogue formatted as quoted speech — Veo voices these lines.
-    speech: list[str] = []
+    # Veo guide — three distinct audio cue types (applied in this order):
+    #   1. Ambient noise — the environment's soundscape ("A faint hum in the background")
+    #      Source: scene-level audio_overview.ambient + score_cue (atmosphere, not action)
+    #   2. SFX — explicitly described sounds ("tires screeching loudly")
+    #      Source: panel.sound (panel-specific sounds, action-driven)
+    #   3. Dialogue — quoted speech so Veo voices the lines ("line," Speaker says)
+    ao = audio_overview or {}
+    # Scene-level ambient — the environment's soundscape.
+    scene_ambient_parts = [p for p in [ao.get("ambient", ""), ao.get("score_cue", "")] if p]
+    scene_ambient = "; ".join(scene_ambient_parts)
+
+    # Panel-level sound field may contain "ambient | sfx" (newer storyboard schema)
+    # or a plain combined description (older checkpoints). Split on " | " when present.
+    panel_sound_raw = (panel.get("sound") or "").strip()
+    if " | " in panel_sound_raw:
+        panel_ambient, panel_sfx = [s.strip() for s in panel_sound_raw.split(" | ", 1)]
+    else:
+        panel_ambient, panel_sfx = "", panel_sound_raw
+
+    # Prefer panel-specific ambient over scene-level; fall back gracefully.
+    ambient = panel_ambient or scene_ambient
+    sfx = panel_sfx
+    # Avoid duplicating when panel sound is identical to the scene ambient.
+    if sfx and ambient and sfx.strip(".") == ambient.strip("."):
+        sfx = ""
+
+    # Dialogue — Veo guide: use quotation marks for specific speech.
+    # Format: Speaker verb, "line."  /  "line" (voice over).  /  "line" (off screen).
+    dialogue_cues: list[str] = []
     for d in (panel.get("dialogue") or []):
         speaker = (d.get("speaker") or "").strip()
         line = (d.get("line") or "").strip()
-        if speaker and line:
-            tag = "narrates" if d.get("vo") else "says"
-            speech.append(f'{speaker} {tag}: "{line}"')
+        if not line:
+            continue
+        parenthetical = (d.get("parenthetical") or "").strip().strip("()")
+        modifier = (d.get("modifier") or "").strip().upper()
+        if d.get("vo"):
+            tag = f"voice over{', ' + speaker if speaker else ''}"
+            dialogue_cues.append(f'"{line}" ({tag})')
+        elif "O.S." in modifier:
+            tag = f"{speaker + ', ' if speaker else ''}off screen"
+            dialogue_cues.append(f'"{line}" ({tag})')
+        elif speaker:
+            verb = parenthetical if parenthetical else "says"
+            dialogue_cues.append(f'{speaker} {verb}, "{line}"')
+        else:
+            dialogue_cues.append(f'"{line}"')
 
-    chunks = [base]
-    if sound:
-        chunks.append(f"Audio: {sound}.")
-    if speech:
-        chunks.append("Dialogue: " + " ".join(speech) + ".")
-    return " ".join(c for c in chunks if c)
+    # Assemble in Veo guide order:
+    # visual base (subject+action+style+camera+ambiance) → focus hint → ambient → SFX → dialogue
+    parts: list[str] = [base]
+    if focus_hint:
+        parts.append(focus_hint + ".")
+    if ambient:
+        parts.append(ambient + ("." if not ambient.rstrip().endswith(".") else ""))
+    if sfx:
+        parts.append(sfx + ("." if not sfx.rstrip().endswith(".") else ""))
+    parts.extend(dialogue_cues)
+
+    return " ".join(p.strip() for p in parts if p.strip())
 
 
 def _panel_dialogue_lines(panel: dict) -> list[str]:
@@ -335,8 +414,7 @@ def _panel_dialogue_lines(panel: dict) -> list[str]:
 
 
 def _frame_char_anchor(frame: dict, cast_index: dict, out: Path) -> Path | None:
-    """The casting image of the first in-frame character — the identity anchor for
-    a frame's still (so the right actor shows up, consistently)."""
+    """The casting image of the first in-frame character — Veo identity seed."""
     for name in frame.get("characters_in_frame", []):
         rel = cast_index.get(name)
         if rel and (out / rel).exists():

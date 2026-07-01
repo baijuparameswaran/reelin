@@ -66,10 +66,10 @@ never merge or drop shots; align each panel with the matching screenplay shot). 
 Each panel must include:
    - panel: sequential panel number
    - shot_type: ECU / CU / MCU / MS / FS / WS / ELS / POV / OTS / 2S / INSERT
-   - camera_angle: EYE LEVEL / LOW ANGLE / HIGH ANGLE / DUTCH TILT / BIRD'S EYE / WORM'S EYE
-   - camera_movement: STATIC / PAN / TILT / DOLLY IN / DOLLY OUT / TRACK LEFT / TRACK RIGHT \
-/ CRANE UP / CRANE DOWN / HANDHELD / STEADICAM / ZOOM IN / ZOOM OUT / PUSH IN / PULL OUT
-   - lens: focal length e.g. "24mm wide" "50mm normal" "85mm portrait" "135mm telephoto"
+   - camera_angle: EYE LEVEL / LOW ANGLE / HIGH ANGLE / DUTCH TILT / BIRD'S EYE VIEW / WORMS EYE / AERIAL VIEW / TOP-DOWN
+   - camera_movement: STATIC / PAN / TILT / DOLLY IN / DOLLY OUT / TRACKING / \
+CRANE UP / CRANE DOWN / HANDHELD / STEADICAM / AERIAL VIEW / ZOOM IN / ZOOM OUT
+   - lens: focal length e.g. "24mm wide-angle lens" "50mm normal lens" "85mm portrait lens" "135mm telephoto lens"
    - composition: framing note — who/what is where, depth layers, negative space, leading lines
    - duration: estimated screen time e.g. "3s" "6s" "12s"
    - characters_in_frame: list of character names visible
@@ -77,15 +77,32 @@ Each panel must include:
    - dialogue: list of {{speaker, line, vo}} — copy VERBATIM from the matching \
 screenplay_shot.dialogue; do not paraphrase, trim, or invent lines; \
 (vo: true for voice-over); empty list if silent
-   - sound: ambient bed + specific sound events audible in this panel
+   - sound: TWO PARTS — (a) ambient bed first: the environment's soundscape described \
+naturally ("wind howling outside, distant ocean waves"); (b) then SFX: explicitly \
+described action sounds ("a door slams, glass shatters") — separate the two with " | " \
+so the render layer can apply Veo's ambient-noise vs SFX distinction correctly
    - emotional_note: the emotion this panel must evoke in the audience
    - transition: CUT TO / DISSOLVE TO / FADE TO BLACK / MATCH CUT / SMASH CUT / \
 L-CUT / J-CUT / WIPE
-   - image_prompt: a COMPLETE, self-contained prompt for a video generation model — \
-include character locked look (physical_form, wardrobe, defining_feature), setting \
-and key props, color palette and lighting, camera (shot_type / angle / movement / lens), \
-the action, audio atmosphere, and any spoken dialogue — everything the model needs \
-to render this panel without any other context
+   - image_prompt: a COMPLETE, self-contained Veo video generation prompt following \
+the five-element guide order — (1) Subject: character(s) with full locked look \
+(physical_form, wardrobe, defining_feature); (2) Action: exactly what moves or \
+happens in the shot; (3) Style: one or more Veo style keywords — "cinematic", \
+"photorealistic", "film noir", "documentary", "cinéma vérité", etc.; \
+(4) Camera & Composition: shot type in natural language ("wide shot", "close-up", \
+"extreme close-up", "POV shot", "over-the-shoulder shot", "two-shot", "medium shot"), \
+camera angle using Veo vocabulary ("eye-level", "low angle", "high angle", \
+"bird's eye view", "worms eye", "aerial view", "top-down shot", "Dutch tilt"), \
+movement ("static", "dolly in", "dolly out", "tracking", "handheld", "aerial view", \
+"panning", "crane up", "zoom in"), \
+and lens (e.g. "24mm wide-angle lens", "85mm portrait lens", "135mm telephoto lens"); \
+(5) Focus & Ambiance: focus term + color and lighting mood — use "portrait, shallow \
+focus" for CU/ECU shots (Veo guide: enhances facial detail), "deep focus" for WS/ELS \
+(environmental clarity), "macro lens" for INSERT shots; describe lighting and color \
+as mood ("warm golden hour glow", "cold blue-grey shadows", "neon eerie glow", \
+"harsh midday sun", "soft diffused overcast light"). Do NOT include dialogue or sound effects in image_prompt — \
+those live in the panel's dialogue and sound fields and are added to the Veo prompt \
+separately
 
 JSON schema (respond with this shape and nothing else):
 {{
@@ -94,47 +111,44 @@ JSON schema (respond with this shape and nothing else):
     {{
       "scene_number": 1,
       "header": {{
-        "slugline": "INT. LIGHTHOUSE LANTERN ROOM - DUSK",
-        "int_ext": "INT",
-        "location": "Lighthouse lantern room",
-        "time_of_day": "DUSK",
-        "purpose": "Edith confronts the choice that will define her",
-        "characters": ["EDITH"],
-        "duration_estimate": "2m 10s"
+        "slugline": "EXT. LOCATION NAME - TIME OF DAY",
+        "int_ext": "EXT",
+        "location": "Location name from the scene",
+        "time_of_day": "DAY",
+        "purpose": "One sentence narrative purpose of this scene",
+        "characters": ["CHARACTER_A"],
+        "duration_estimate": "1m 30s"
       }},
       "visual_overview": {{
-        "color_palette": "amber and deep navy; warm lantern glow against cold sea dark",
-        "lighting_setup": "practical lantern as key light; blue-grey ambient from windows",
-        "mood": "claustrophobic intimacy breaking open into vast dread"
+        "color_palette": "describe the dominant colors and contrast for this scene",
+        "lighting_setup": "describe the light source(s) and quality",
+        "mood": "one line capturing the emotional atmosphere"
       }},
       "audio_overview": {{
-        "score_cue": "solo cello, sustained low drone building through the scene",
-        "ambient": "wind against glass, faint ocean below",
-        "key_sounds": ["panel 2: the lantern mechanism clicks and stalls",
-                       "panel 4: silence as she makes her decision"]
+        "score_cue": "describe the music/score for this scene",
+        "ambient": "describe the environmental soundscape",
+        "key_sounds": ["panel N: describe the key sound event",
+                       "panel N: describe another key sound event"]
       }},
       "panels": [
         {{
           "panel": 1,
           "shot_type": "WS",
-          "camera_angle": "LOW ANGLE",
+          "camera_angle": "EYE LEVEL",
           "camera_movement": "STATIC",
           "lens": "24mm wide",
-          "composition": "Edith small in frame, lantern room towering above, \
-ocean visible through curved glass behind her",
+          "composition": "describe who/what is where in the frame, depth layers, leading lines",
           "duration": "5s",
-          "characters_in_frame": ["EDITH"],
-          "action": "Edith enters the lantern room, stops. Looks up at the mechanism.",
+          "characters_in_frame": ["CHARACTER_A"],
+          "action": "Describe exactly what moves or happens in this shot.",
           "dialogue": [],
-          "sound": "wind against glass, door creaks shut behind her",
-          "emotional_note": "awe mixed with foreboding",
+          "sound": "describe ambient bed and any specific sound events audible here",
+          "emotional_note": "the emotion this panel must evoke in the audience",
           "transition": "CUT TO",
-          "image_prompt": "Wide shot, low angle, static camera, 24mm lens. EDITH \
-(50s, weathered face, grey-streaked hair pinned tight, navy-wool keeper's uniform, \
-brass-button coat) stands small in the centre of a Victorian lighthouse lantern room. \
-Amber lantern glow as key light, cold blue-grey ocean light from curved glass panels. \
-She looks up at the Fresnel lens mechanism above. Wind-sound against glass. \
-Colour palette: deep navy and warm amber. Cinematic, photorealistic."
+          "image_prompt": "CHARACTER_A (physical description: age, build, hair, wardrobe, \
+defining feature) performs the action in the location. Cinematic, photorealistic. \
+Wide shot, eye-level, static camera, 24mm wide-angle lens. Deep focus. \
+Describe lighting and color palette as mood."
         }}
       ]
     }}

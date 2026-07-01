@@ -72,7 +72,7 @@ video:
   aspect_ratio: "16:9"
   resolution: "720p"
   continuity: true                # chain each clip from the previous frame's last image
-  style_suffix: "cinematic, smooth natural motion, consistent character"
+  style_suffix: "cinematic, photorealistic"   # Veo guide style keywords; appended only when no style is present in the prompt
   poll_seconds: 10
   timeout_seconds: 1200
   # --- diffusers / comfyui backends (only used if backend above is changed) ---
