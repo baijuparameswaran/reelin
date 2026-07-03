@@ -7,6 +7,122 @@ web-series episode — navigating the phases of adaptation, some in parallel.
 Built to run on **locally-hosted open LLMs** (via [Ollama](https://ollama.com)),
 developed in slow, steady iterations.
 
+## Setup — from a new, clean environment
+
+### 1. Prerequisites
+
+- **Python 3.10+** (any recent CPython; no other packaging tooling is used —
+  `requirements.txt` / `requirements-image.txt` + a plain `venv` is the whole
+  story, see below).
+- **[Ollama](https://ollama.com)** — runs every text/LLM agent locally.
+  - **If you have an NVIDIA GPU, install via the official installer script,
+    not your distro's `snap`/`apt` package.** The Ubuntu snap build uses strict
+    confinement that blocks `/dev/nvidia*`, so it silently falls back to
+    100%-CPU inference with no error:
+    ```bash
+    curl -fsSL https://ollama.com/install.sh | sh
+    ```
+  - After pulling a model (next section), confirm the GPU is actually being
+    used: `ollama ps` — look for a non-zero "Size VRAM" against the loaded
+    model. All-CPU still works, just much slower (a few tok/s vs. tens+ on GPU).
+- **`ffmpeg`** on `PATH` — optional but recommended. Needed for stitching
+  rendered clips into `output/video/movie.mp4` and for subtitle/shot-label
+  overlays; without it those two steps are skipped with a warning, everything
+  else is unaffected. `apt install ffmpeg` / `brew install ffmpeg` / etc.
+- **A Gemini API key** — optional, only for character-image + Veo video
+  rendering (see below). The text pipeline (ingest → … → screenplay/storyboard)
+  runs completely without one.
+
+### 2. Install
+
+```bash
+git clone <this-repo-url> reel && cd reel
+make setup          # creates .venv/, installs requirements.txt (PyYAML, pypdf, google-genai)
+make setup-models   # pulls the preferred local models (config/models.yaml) via `ollama pull`
+make models         # verify: shows which installed model each profile ('fast'/'quality'/…) resolves to
+```
+
+`make setup` only touches `.venv/` and installs from `requirements.txt` — it
+never writes a lockfile or a second dependency manifest; that's the single
+source of truth for what the environment needs.
+
+### 3. Optional: Gemini for image + video generation
+
+Everything else in the pipeline runs on local open models; **only** character
+portraits and Veo video clips use Gemini, and only if a key is present:
+
+```bash
+make secrets CMD=set   # paste your key once; stored chmod-600 at ~/.config/reel/gemini_key
+make secrets           # CMD defaults to 'status' — check whether a key is set
+```
+
+(Or set the env var directly: `export GEMINIAPIKEY=…` — also accepts
+`GEMINI_API_KEY` / `GOOGLE_API_KEY`.) Without a key, the casting/video stages
+no-op with a clear hint and the rest of the run is unaffected.
+
+### 4. Optional: local (non-Gemini) image generation
+
+Only needed if you set `image.backend: diffusers` in `config/models.yaml`
+instead of the default `gemini` backend:
+
+```bash
+make setup-image    # installs diffusers/torch/etc. (needs a GPU to be practical)
+```
+
+### 5. Run
+
+```bash
+make demo                # bundled sample story, 1 scene, fast profile
+make demo SCENES=all     # every scene the sample story has
+make demo RESUME=1       # continue a paused/failed run from its last stage
+make run SRC=path/to/story.txt SCENES=3
+```
+
+The pipeline is **model-agnostic**: agents request a *profile* (`fast` /
+`quality` / …), never a model name — if the preferred model isn't pulled, it
+falls back to whatever's installed (see `config/models.yaml`). On a
+single-GPU/CPU-only host, `--profile fast` (one small model, no reloads
+between agents) is much faster than the mixed default.
+
+## Local models & the update cadence
+
+Preferred models are **Qwen3 4B** (fast) and **Qwen3 8B** (quality); larger
+profiles (`synthesis`, `quality_high`) may be configured for bigger hosts — see
+`config/models.yaml`. Pull/refresh them and keep them current:
+
+```bash
+make update         # pull preferred models + smoke test  (the cadence job)
+make update-all     # also pull fallback models
+make install-cron   # weekly + monthly auto-update jobs
+```
+
+`scripts/update-models.sh` checks the Ollama version, detects your hardware and
+prefers models that actually fit it (`reel/manifest.py --hardware`
+/`--runnable-only`), pulls every model the agents depend on, runs a smoke test
+so an update can't silently break the agents, and logs to
+`scripts/model-updates.log`.
+
+## Hardware notes
+
+- **GPU strongly recommended** for the LLM stages (first-token latency ~2–5s on
+  GPU vs. ~30–60s on CPU) and required in practice for Veo/diffusers video
+  generation. CPU-only still works for the text pipeline — just run it as a
+  batch, not interactively.
+- Generation is **streamed**, so `runtime.request_timeout_seconds` in
+  `config/models.yaml` is an *inactivity* window (max gap to the next token),
+  not a cap on total time — a slow stage like `storyboard` runs as long as it
+  needs. Raise it (or set `0` = wait forever) if a stage still trips it, then
+  `--resume`.
+- Each stage's artifact is written to `output/` the moment you approve it, so a
+  failure or timeout in a later stage never discards work already done —
+  re-run with `--resume` to continue.
+- `num_ctx` and which models each profile targets are tuned per-profile in
+  `config/models.yaml` for the RAM/VRAM available; see that file's comments
+  before changing them for a very different host.
+
+See `CLAUDE.md` for this project's specific dev host, current status, and
+session-to-session history.
+
 ## Iteration 1 — "screenplay material"
 
 The agent set converts raw text into screenplay material plus a full creative
@@ -148,9 +264,10 @@ For each storyboard frame it generates a short **clip** (image-to-video):
 - **later frames** are seeded from the **previous frame's last image**, so motion
   is continuous within the scene. A scene boundary resets the chain (a cut).
 
-`--max-scenes` (default 1, prototype) limits how many **scenes** are drafted and
-rendered — but **every shot within each rendered scene is always rendered** (the
-storyboard emits one frame per camera shot; the renderer never caps shots).
+`--max-scenes` (default 1, prototype; pass `all` for every drafted scene) limits
+how many **scenes** are drafted and rendered — but **every shot within each
+rendered scene is always rendered** (the storyboard emits one frame per camera
+shot; the renderer never caps shots).
 
 Output lands in `output/video/scene_NN/frame_MM.mp4` plus a `manifest.json`. After
 the clips are rendered they are **stitched into a single movie** —
@@ -324,58 +441,3 @@ moodboard:
 ```
 
 Standalone: `python -m reel.cli stage moodboard`.
-
-## Quick start
-
-```bash
-make setup          # venv + deps
-make models         # show which local models each profile resolves to
-make demo           # run on the bundled sample story (fast profile)
-make demo RESUME=1  # continue a paused/failed sample run from its last stage
-make run SRC=path/to/story.txt SCENES=3
-```
-
-The pipeline is **model-agnostic**: agents request a *profile* (`fast` /
-`quality`), not a model name. If the preferred model isn't pulled, it falls back
-to whatever's installed (see `config/models.yaml`). On this CPU-only host,
-`--profile fast` (one model, no reloads) is much faster than the mixed default.
-
-## Local models & the update cadence
-
-Preferred models are **Qwen3 4B** (fast) and **Qwen3 8B** (quality). Pull/refresh
-them and keep them current:
-
-```bash
-make update         # pull preferred models + smoke test  (the cadence job)
-make update-all     # also pull fallback models
-make install-cron   # weekly + monthly auto-update jobs
-```
-
-`scripts/update-models.sh` checks the Ollama version (Qwen3 needs a newer Ollama
-than 0.6.5), pulls every model the agents depend on, runs a smoke test so an
-update can't silently break the agents, and logs to `scripts/model-updates.log`.
-
-## Hardware notes (this host)
-
-CPU-only, **~12 GB RAM in WSL** (16 GB laptop; raised from the original 7.6 GB
-cap via `%UserProfile%\.wslconfig` → `[wsl2]` / `memory=12GB`, then
-`wsl --shutdown`). Implications:
-
-- Inference is slow (a few tok/s); run as a batch, not interactively.
-- Generation is **streamed**, so the request timeout is an *inactivity* window
-  (max gap to the next token), not a cap on total time — a slow stage like
-  `storyboard` runs as long as it needs. The first token is the long pole (it
-  includes loading the model into RAM and prefilling the prompt on CPU), so the
-  default `runtime.request_timeout_seconds` is **600**; raise it (or set 0 =
-  wait forever) in `config/models.yaml` if a stage still trips it, then
-  `--resume`.
-- Each stage's artifact is written to `output/` the moment you approve it, so a
-  failure or timeout in a later stage never discards the work already done —
-  re-run with `--resume` to continue.
-- `num_ctx` is capped at 4096 to fit comfortably in RAM. Larger inputs are
-  truncated for now (chunking is a later iteration); at 12 GB, raising to 8192
-  is now plausible but untested.
-- The `quality` tier (8B, ~5.7 GB) now loads without swapping, so it's
-  comfortable at 12 GB RAM.
-
-See `CLAUDE.md` for project vision, decisions, and session-to-session state.
