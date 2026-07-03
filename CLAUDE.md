@@ -195,14 +195,23 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
 - **Scene rendering = image-to-video:** after storyboard + screenplay, the pipeline
   renders each storyboard panel as a **video clip** via `i2v`
   (`pipeline._render_scene_frames` → `output/video/`), default backend **Gemini
-  Veo** (`veo-3.1-lite-generate-preview`). The first panel of each scene is seeded
-  from the in-frame character's `output/casting/<name>.png` (identity anchor); later
-  panels use the previous clip's last frame for **continuity** (scene boundary = cut).
-  **Every Veo prompt is verified** against the guide before submission (`veo_guide.
-  verify_prompt` — checks the five required elements + audio cue formatting; issues
-  logged as warnings, never blocking). Pluggable (`video` block): `gemini`/`veo`,
-  `diffusers` (LTX/Wan on a GPU), `comfyui`/`http`, or `none`. Best-effort: no API
-  key → skip with a hint.
+  Veo** (`veo-3.1-fast-generate-preview`; `veo-3.1-generate-preview`/`-lite-` also
+  available — see `video.model` in `config/models.yaml` for the tradeoffs). The
+  first panel of each scene is seeded from the in-frame character's
+  `output/casting/<name>.png` (identity anchor); later panels use the previous
+  clip's last frame for **continuity** (scene boundary = cut); idempotent by a
+  content hash of prompt+seed (`pipeline._stale`), so a HITL-feedback-revised
+  prompt re-renders instead of silently staying stale. **Every Veo prompt is
+  verified** against the guide before submission (`veo_guide.verify_prompt` —
+  checks the five required elements + audio cue formatting; issues logged as
+  warnings, never blocking); audio cues themselves (ambient/SFX labels,
+  voice-over/off-screen clarity, background-music directive, cross-clip voice
+  consistency) are **constructed** by `veo_guide`'s helper functions
+  (`dialogue_cue`/`ambient_cue`/`sfx_cue`/`music_directive`/
+  `no_subtitles_directive`), not hand-rolled inline, so a future non-Veo backend
+  can supply an equivalent module with the same call shape. Pluggable (`video`
+  block): `gemini`/`veo`, `diffusers` (LTX/Wan on a GPU), `comfyui`/`http`, or
+  `none`. Best-effort: no API key → skip with a hint.
 - On this host prefer `--profile fast` (one model, no 5 GB reloads between agents).
 - Update cadence lives in `scripts/update-models.sh` (pull + version-check +
   smoke test + log), wired weekly/monthly via `make install-cron`, runnable
@@ -214,28 +223,136 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
 - **Status:** The pipeline runs **genre → structure/characters → moodboard →
   scenes/casting → soundscape/visuals/cinematography → screenplay → storyboard →
   render**, with a human-in-the-loop gate per stage plus per-stage **fidelity** and
-  **genre** scoring. All imports and byte-compile clean; genre agent live-verified.
-  Full end-to-end run still pending on this host (GPU required for reasonable speed).
-- **Qwen3 installed** (`qwen3:8b`, `qwen3:4b`). Both profiles resolve to Qwen3.
-- **Gemini image + video live-verified** (key in `~/.bashrc` as `GEMINIAPIKEY`). One
-  character image per character (`output/casting/<name>.png`, `gemini-2.5-flash-image`);
-  Veo renders scene clips (`veo-3.1-lite-generate-preview`), chained for continuity.
-  Veo preview tier rate-limits (429) + transient op errors — `gemini.py` retries
-  both with backoff. Clips stitched into `output/video/movie.mp4` automatically or
-  via `python -m reel.cli stitch`.
+  **genre** scoring. **Live-verified end-to-end on this host**, including a full
+  video render + stitch to `output/video/movie.mp4`, using `--resume` across
+  several sessions on the bundled sample story.
+- **Qwen3 installed** (`qwen3:8b`, `qwen3:4b`). `agent_profiles.scenes` is now
+  `quality` (qwen3:8b) — live comparison against `fast` (qwen3:4b) on the sample
+  story showed 4b mis-numbering/dropping 1-2 scenes per run (partly a matching
+  bug, now fixed — see below) vs. 8b capturing all scenes correctly.
+- **`google-genai` SDK now actually installed** (`pip install google-genai`,
+  currently `2.10.0`) — previously silently absent despite being in
+  `requirements.txt`, so every Gemini/Veo call was going through the raw urllib
+  REST fallback all along. Installing it surfaced real SDK-shape bugs (fixed):
+  `generate_videos`/`GenerateVideosConfig` are plural in this SDK version (code
+  assumed singular); `prompt` is a top-level `generate_videos()` kwarg, not a
+  config field; `Video.from_file()`/`files.download()` are keyword-only
+  (`location=`/`file=`); `enhance_prompt` isn't a documented Veo 3.1 parameter at
+  all (removed); `person_generation`'s allowed value is fixed by generation
+  **mode** per the official parameter table — `"allow_all"` for text-to-video/
+  extension, `"allow_adult"` for image-to-video — not by model tier (was
+  wrongly omitted entirely in one pass, now set conditionally). None of this was
+  live-load-tested end-to-end after the fixes (deliberately, to avoid spending
+  API quota mid-investigation) — only offline signature-binding + Pydantic
+  config validation against the real installed SDK; worth a live smoke test on
+  the next real run.
+- **Gemini image + video live-verified** (key managed via `python -m reel.secrets`).
+  One character image per character (`output/casting/<name>.png`,
+  `gemini-2.5-flash-image`); Veo renders scene clips, default
+  `veo-3.1-fast-generate-preview` (also live-tested this session at the
+  standard `veo-3.1-generate-preview` tier and 1080p — both confirmed working,
+  reverted to `fast` by preference). Veo preview tier rate-limits (429) +
+  transient op errors — `gemini.py` retries both with backoff. Clips stitched
+  into `output/video/movie.mp4` automatically or via `python -m reel.cli stitch`.
+- **Render steps are idempotent by content hash, not just file existence**
+  (`pipeline._content_hash`/`_stale`) — a HITL-feedback-revised prompt
+  (`--resume` or a standalone `stage ... --feedback` rerun) now correctly
+  re-renders a stale casting image/moodboard tile/scene clip instead of being
+  skipped because the file already existed.
+- **Scene-segmentation fidelity guard no longer silently drops scenes** —
+  `segment_scenes`' `source_line`-not-found check (which strips scenes the
+  model may have hallucinated) now returns what it dropped and why, surfaced at
+  the gate and in the stage log, instead of leaving unexplained gaps in the
+  scene numbering. Also fixed: the match was whitespace-sensitive (source text
+  keeps literal `\n` line-wraps; model-written quotes use normal spacing),
+  wrongly flagging real, verbatim quotes as hallucinated.
 - **Veo prompts are strictly Veo-guide-aligned** (five-element order: Subject →
-  Action → Style → Camera → Focus/Ambiance; three audio cue types; Veo vocabulary
-  throughout) and **verified before every Gemini API call** (`veo_guide.verify_prompt`
-  — issues and warnings logged, generation never blocked). Guide snapshot cached in
-  `config/veo_guide_snapshot.json`; refresh manually with `python -m reel.cli veo-sync`.
+  Action → Style → Camera → Focus/Ambiance; verified before every Gemini API
+  call via `veo_guide.verify_prompt`, issues/warnings logged, never blocking).
+  Audio cues (ambient/SFX labels, voice-over/off-screen clarity, background-music
+  directive, no-subtitles, cross-clip voice consistency) are now **constructed**
+  by dedicated `veo_guide` helper functions rather than hand-rolled inline in
+  `pipeline.py`, so a future non-Veo backend can supply an equivalent module.
+  Guide snapshot cached in `config/veo_guide_snapshot.json`; refresh manually
+  with `python -m reel.cli veo-sync`.
+- **Open investigation (not yet implemented):** multi-character reference
+  images for Veo (`reference_images`, up to 3 `ASSET` images, mutually
+  exclusive with continuity per-call) and for Gemini image gen (`refs`, up to
+  20 images, no such exclusivity but not wired through `imagegen.py` yet); Kling
+  3.0 as a possible alternate provider for cross-scene subject-locked
+  generation, not yet vetted against its real API. Full notes in memory
+  (`veo_character_consistency` — see auto-memory for this project).
 - **Recommended next action:** Enable GPU — replace the snap Ollama:
   `! curl -fsSL https://ollama.com/install.sh | sh`
   Then re-pull: `ollama pull qwen3:4b && ollama pull qwen3:8b`.
   Verify: `ollama ps` → "PROCESSOR" should show GPU or GPU+CPU.
-- **Next up:** moodboard tile auto-render (opt-in); richer ingest (PDF/EPUB/.fdx);
-  draft all scenes (not just first N); edit / sound mix / final cut phase.
+- **Next up:** live smoke-test the SDK video-call fixes on a real run; decide on
+  the multi-character-reference policy (see investigation above); moodboard
+  tile auto-render (opt-in); richer ingest (PDF/EPUB/.fdx); draft all scenes
+  (not just first N); edit / sound mix / final cut phase.
 
 ## Session log
+- 2026-07-03 — **google-genai SDK actually installed + real API bugs fixed;
+  Veo audio-cue construction moved into veo_guide.py; scenes profile bumped;
+  model tier explored.** Installed `google-genai` (was missing despite being in
+  `requirements.txt` — every prior "live-verified" Gemini/Veo call had actually
+  been going through the raw urllib REST fallback, not the SDK). This surfaced
+  several real API-shape bugs in `gemini.py`, all fixed and verified **offline**
+  against the installed SDK (signature binding + Pydantic config construction —
+  deliberately not live-called, per an explicit "don't burn Gemini funds"
+  instruction mid-session): `client.models.generate_video` → `generate_videos`
+  and `types.GenerateVideoConfig` → `GenerateVideosConfig` (this SDK version
+  uses plural naming); the image-to-video branch had `prompt` inside
+  `GenerateVideosConfig` (rejected — pydantic `extra_forbidden`), moved to the
+  top-level `generate_videos()` kwarg where it belongs; `types.Video.from_file()`
+  and `client.files.download()` are keyword-only (`location=`/`file=`), not
+  positional; `enhance_prompt` is confirmed absent from the official Veo API
+  parameter table for any 3.1 variant (removed outright, not tier-specific);
+  `person_generation`'s allowed value is fixed by generation **mode** per that
+  same table — `"allow_all"` for text-to-video/extension, `"allow_adult"` for
+  image-to-video/interpolation/reference-images — NOT by model tier as
+  originally assumed; an earlier pass in this same session had wrongly removed
+  the field entirely after a live 400 (the value sent was just wrong for the
+  mode tested), now set conditionally per branch. Also live-tested (before the
+  "stop burning funds" instruction landed) that `resolution` — previously
+  silently dropped by the SDK path since `_generate_video_sdk` never received
+  or forwarded it — now genuinely reaches the API: confirmed 1920×1080 output
+  with an intact AAC audio track at the standard `veo-3.1-generate-preview`
+  tier, disproving the "1080p drops audio" concern as it applies to our direct
+  API path (that risk is specific to Flow-UI export/upscale, not native
+  `generateVideos` calls). **Separately:** moved the Veo-specific audio-cue
+  construction (dialogue attribution, voice-over/off-screen phrasing,
+  ambient/SFX labels, background-music directive, no-subtitles) out of
+  `pipeline._panel_video_prompt` and into new `veo_guide.py` helper functions
+  (`dialogue_cue`/`ambient_cue`/`sfx_cue`/`music_directive`/
+  `no_subtitles_directive`) — confirmed via live doc fetches that Veo has no
+  reserved keyword for voice-over or off-screen dialogue or for suppressing
+  background music (every source, including ours previously, has to fill this
+  gap with plain sentences), so VO/O.S. lines now get an explicit sentence
+  instead of a bare parenthetical tag that risked Veo lip-syncing a
+  should-be-off-camera line to an on-screen face. **Also this session:**
+  live-compared `qwen3:4b` (fast) vs `qwen3:8b` (quality) for the `scenes`
+  stage on the bundled sample story — 8b captured all scenes correctly where
+  4b dropped/mis-numbered 1-2 (compounded by a genuine bug: `segment_scenes`'
+  source-line match was whitespace-sensitive, so a real quote spanning a hard
+  line-wrap in the source text got wrongly flagged as hallucinated and
+  silently dropped — fixed by normalizing whitespace before matching, and
+  separately, dropped scenes are no longer silently discarded at all: shown at
+  the gate + logged with the reason). Promoted `agent_profiles.scenes` to
+  `quality`. **Model tier:** live-confirmed via `ListModels` which Veo models
+  this key can reach (`-generate-preview` / `-fast-generate-preview` /
+  `-lite-generate-preview`, no non-preview GA tier); briefly bumped
+  `video.model` to the standard tier to test quality + unlock
+  `continuity_mode: extend` (Veo 3.1's native video-to-video scene extension,
+  added earlier as `gemini.extend_video`), then reverted to
+  `veo-3.1-fast-generate-preview` by preference. **Open investigation, not
+  implemented:** whether multi-character reference images (Veo's
+  `reference_images`, up to 3 `ASSET` type, confirmed mutually exclusive with
+  continuity per-call; Gemini image gen's `refs`, up to 20, no such
+  exclusivity but not wired through `imagegen.py`) or an alternate provider
+  (Kling 3.0, unvetted marketing claims of single-call multi-scene
+  subject-locking) could better solve character-integrity-across-shots —
+  full notes saved to project memory rather than acted on.
 - 2026-07-02 — **Veo audio-continuity best practices + hash-based render
   invalidation.** Two independent fixes. (1) **Render steps now invalidate on
   feedback, not just file-existence.** `_render_casting_images`,
