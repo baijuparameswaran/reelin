@@ -30,6 +30,7 @@ HITL is controlled via `config/models.yaml` under the `hitl` key.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
@@ -211,11 +212,46 @@ def _slug(name: str) -> str:
     return re.sub(r"[^\w]+", "_", (name or "").lower()).strip("_") or "character"
 
 
+def _content_hash(*parts) -> str:
+    """Short hash over prompt text (and, for image parts, file bytes) — lets a
+    render step tell a stale asset (rendered from a prompt since revised via
+    HITL feedback — e.g. `stage casting --feedback` or a post-resume rerun)
+    apart from one that's still current, instead of trusting file existence
+    alone."""
+    h = hashlib.sha256()
+    for p in parts:
+        if p is None:
+            continue
+        if isinstance(p, Path):
+            try:
+                h.update(p.read_bytes())
+            except OSError:
+                pass
+        else:
+            h.update(str(p).encode("utf-8", "ignore"))
+        h.update(b"\x00")
+    return h.hexdigest()[:16]
+
+
+def _stale(asset: Path, hash_path: Path, current_hash: str) -> bool:
+    """True if `asset` is missing, or was rendered from a prompt that no longer
+    matches (source stage revised since). An asset with no hash sidecar predates
+    this tracking — accepted as the baseline rather than re-rendered."""
+    if not asset.exists():
+        return True
+    if not hash_path.exists():
+        return False
+    return hash_path.read_text().strip() != current_hash
+
+
 def _render_casting_images(casting: dict, out: Path,
                            active_names: set[str] | None = None) -> int:
     """Render ONE image per character — the character representation — via the
     image backend. Capped to `active_names` when provided (characters that appear
-    in the scenes being rendered). Idempotent (skips existing files on --resume).
+    in the scenes being rendered). Idempotent by prompt hash: skips a character
+    whose rendered image still matches its current `visual_prompt`, but
+    re-renders when feedback has revised that prompt since (--resume or a
+    standalone `stage casting --feedback` rerun).
     """
     if not imagegen.available():
         _log(f"      character renders skipped — {imagegen.unavailable_hint()}")
@@ -240,9 +276,18 @@ def _render_casting_images(casting: dict, out: Path,
             _log(f"      ⚠ {name} ({kind}) — no visual_prompt; skipping render")
             continue
         img = cast_dir / f"{slug}.png"
-        _log(f"      rendering {name} [{kind}] …")
-        if img.exists() or imagegen.generate_image(prompt, img):
+        hash_path = cast_dir / f"{slug}.hash"
+        current_hash = _content_hash(prompt)
+        if not _stale(img, hash_path, current_hash):
             target["image_path"] = str(img.relative_to(out))
+            hash_path.write_text(current_hash)
+            n += 1
+            continue
+        _log(f"      rendering {name} [{kind}] …"
+             + (" (prompt revised — re-rendering)" if img.exists() else ""))
+        if imagegen.generate_image(prompt, img):
+            target["image_path"] = str(img.relative_to(out))
+            hash_path.write_text(current_hash)
             n += 1
     return n
 
@@ -255,7 +300,9 @@ def _render_moodboard_tiles(moodboard: dict, out: Path) -> int:
     Idempotent (skips files on disk). Best-effort — never blocks the run.
 
     NB policy: only the moodboard *tiles* (images) use the image provider; the
-    moodboard spec itself is generated on the open text models like every stage."""
+    moodboard spec itself is generated on the open text models like every stage.
+    Idempotent by prompt hash (see `_stale`): re-renders a tile if the moodboard
+    was revised via feedback since it was last rendered."""
     tiles = moodboard.get("tiles") or []
     if not tiles:
         return 0
@@ -276,8 +323,16 @@ def _render_moodboard_tiles(moodboard: dict, out: Path) -> int:
         if look:
             prompt = f"{prompt}. Moodboard look: {look}."
         img = mdir / f"tile_{i:02d}.png"
-        if img.exists() or imagegen.generate_image(prompt, img):
+        hash_path = mdir / f"tile_{i:02d}.hash"
+        current_hash = _content_hash(prompt)
+        if not _stale(img, hash_path, current_hash):
             tile["image_path"] = str(img.relative_to(out))
+            hash_path.write_text(current_hash)
+            n += 1
+            continue
+        if imagegen.generate_image(prompt, img):
+            tile["image_path"] = str(img.relative_to(out))
+            hash_path.write_text(current_hash)
             n += 1
     return n
 
@@ -311,22 +366,35 @@ _VEO_FOCUS: dict[str, str] = {
 }
 
 
-def _panel_video_prompt(panel: dict, audio_overview: dict | None = None) -> str:
+def _panel_video_prompt(panel: dict, audio_overview: dict | None = None, *,
+                        voice_index: dict[str, str] | None = None,
+                        no_bg_music: bool = True,
+                        room_tone: bool = True,
+                        no_subtitles: bool = True) -> str:
     """Assemble a Veo-aligned prompt from a storyboard panel.
 
-    Follows the Veo prompting guide's five elements in order:
+    Visual half follows the Veo prompting guide's five elements in order:
       Subject → Action → Style → Camera & Composition → Focus & Ambiance
-    then the three audio cue types:
-      Ambient noise (environment) → Sound effects (explicit) → Dialogue (quoted)
+    — unlabeled, natural language, per the guide.
 
-    The storyboard's image_prompt already encodes the five visual elements
-    (character with physical description, action, camera grammar, ambiance, style).
-    This function adds shot-type-driven focus/lens hints and properly structured
-    audio cues — no labeled sections; everything in natural language per the guide.
+    Audio half is a single trailing "Audio:" block (ambient → SFX → music/no-music
+    → dialogue). Veo generates audio per clip independently, with no memory of
+    prior clips, so leaving any of these implicit invites drift across a scene's
+    clips: a hallucinated score that wasn't there before, room tone that
+    suddenly gains an echo, or burned-in subtitle text. Spelling each one out
+    explicitly — even the negative "no background music" / "no subtitles" cases —
+    is what keeps the audio track consistent shot to shot (Veo prompting best
+    practice; native audio generation itself cannot be disabled or added after
+    the fact, so this only steers *what* it generates, not *whether* it does).
+
+    voice_index — character name → vocal-quality description (from characters.voice),
+    so the same character sounds the same across separately-generated clips (Veo
+    has no cross-generation voice cloning; this is the manual substitute).
     """
     base = (panel.get("image_prompt") or panel.get("action") or panel.get("moment", "")).strip()
     shot_type = (panel.get("shot_type") or "").upper()
     base_lower = base.lower()
+    voice_index = voice_index or {}
 
     # Focus & Ambiance — add lens/focus hint when not already in the base prompt.
     # Veo guide: "portrait" for CU/ECU, "deep focus" for wide shots, "macro lens" for inserts.
@@ -338,34 +406,34 @@ def _panel_video_prompt(panel: dict, audio_overview: dict | None = None) -> str:
         if key not in base_lower:
             focus_hint = hint_terms
 
-    # Veo guide — three distinct audio cue types (applied in this order):
-    #   1. Ambient noise — the environment's soundscape ("A faint hum in the background")
-    #      Source: scene-level audio_overview.ambient + score_cue (atmosphere, not action)
-    #   2. SFX — explicitly described sounds ("tires screeching loudly")
-    #      Source: panel.sound (panel-specific sounds, action-driven)
-    #   3. Dialogue — quoted speech so Veo voices the lines ("line," Speaker says)
     ao = audio_overview or {}
-    # Scene-level ambient — the environment's soundscape.
-    scene_ambient_parts = [p for p in [ao.get("ambient", ""), ao.get("score_cue", "")] if p]
-    scene_ambient = "; ".join(scene_ambient_parts)
 
-    # Panel-level sound field may contain "ambient | sfx" (newer storyboard schema)
-    # or a plain combined description (older checkpoints). Split on " | " when present.
+    # Ambient (environment) and score/music are kept as two SEPARATE cues (not
+    # merged) — folding a score cue into "ambient" makes both drift together
+    # when Veo hallucinates; keeping them apart lets the no-music directive
+    # below cleanly override just the music half.
     panel_sound_raw = (panel.get("sound") or "").strip()
     if " | " in panel_sound_raw:
         panel_ambient, panel_sfx = [s.strip() for s in panel_sound_raw.split(" | ", 1)]
     else:
         panel_ambient, panel_sfx = "", panel_sound_raw
 
-    # Prefer panel-specific ambient over scene-level; fall back gracefully.
-    ambient = panel_ambient or scene_ambient
+    ambient = panel_ambient or ao.get("ambient", "")
     sfx = panel_sfx
-    # Avoid duplicating when panel sound is identical to the scene ambient.
     if sfx and ambient and sfx.strip(".") == ambient.strip("."):
         sfx = ""
 
+    # Anchor the room tone to consistent acoustics so it doesn't drift between
+    # clips of the same scene (e.g. a sudden echo that wasn't there a shot ago).
+    if room_tone and ambient and not any(
+        t in ambient.lower() for t in ("echo", "reverb", "acoustic", "muffled", "hollow")
+    ):
+        ambient = f"{ambient.rstrip('.')}, dry acoustics, no echo"
+
+    score = (ao.get("score_cue") or "").strip()
+
     # Dialogue — Veo guide: use quotation marks for specific speech.
-    # Format: Speaker verb, "line."  /  "line" (voice over).  /  "line" (off screen).
+    # Format: Speaker (voice) says, "line" in a <tone> tone.  /  "line" (voice over).  /  "line" (off screen).
     dialogue_cues: list[str] = []
     for d in (panel.get("dialogue") or []):
         speaker = (d.get("speaker") or "").strip()
@@ -374,30 +442,43 @@ def _panel_video_prompt(panel: dict, audio_overview: dict | None = None) -> str:
             continue
         parenthetical = (d.get("parenthetical") or "").strip().strip("()")
         modifier = (d.get("modifier") or "").strip().upper()
+        tone = parenthetical or "steady, natural"
+        tone_phrase = tone if any(w in tone.lower() for w in ("tone", "voice")) else f"a {tone} tone"
+        voice = voice_index.get(speaker, "")
+        speaker_desc = f"{speaker} ({voice})" if (speaker and voice) else speaker
         if d.get("vo"):
-            tag = f"voice over{', ' + speaker if speaker else ''}"
+            tag = f"voice over{', ' + speaker_desc if speaker_desc else ''}"
             dialogue_cues.append(f'"{line}" ({tag})')
         elif "O.S." in modifier:
-            tag = f"{speaker + ', ' if speaker else ''}off screen"
+            tag = f"{speaker_desc + ', ' if speaker_desc else ''}off screen"
             dialogue_cues.append(f'"{line}" ({tag})')
-        elif speaker:
-            verb = parenthetical if parenthetical else "says"
-            dialogue_cues.append(f'{speaker} {verb}, "{line}"')
+        elif speaker_desc:
+            dialogue_cues.append(f'{speaker_desc} says, "{line}" in {tone_phrase}')
         else:
             dialogue_cues.append(f'"{line}"')
 
-    # Assemble in Veo guide order:
-    # visual base (subject+action+style+camera+ambiance) → focus hint → ambient → SFX → dialogue
-    parts: list[str] = [base]
+    # Visual half: base (subject+action+style+camera+ambiance) → focus hint.
+    visual_parts: list[str] = [base]
     if focus_hint:
-        parts.append(focus_hint + ".")
-    if ambient:
-        parts.append(ambient + ("." if not ambient.rstrip().endswith(".") else ""))
-    if sfx:
-        parts.append(sfx + ("." if not sfx.rstrip().endswith(".") else ""))
-    parts.extend(dialogue_cues)
+        visual_parts.append(focus_hint + ".")
+    visual = " ".join(p.strip() for p in visual_parts if p.strip())
 
-    return " ".join(p.strip() for p in parts if p.strip())
+    # Audio half: ambient → SFX → music/no-music → dialogue (+ no-subtitles).
+    audio_bits: list[str] = []
+    if ambient:
+        audio_bits.append(ambient + ("." if not ambient.endswith(".") else ""))
+    if sfx:
+        audio_bits.append(sfx + ("." if not sfx.endswith(".") else ""))
+    if score:
+        audio_bits.append(score + ("." if not score.endswith(".") else ""))
+    elif no_bg_music:
+        audio_bits.append("No background music or score.")
+    audio_bits.extend(f"{c}." if not c.endswith(".") else c for c in dialogue_cues)
+    if dialogue_cues and no_subtitles:
+        audio_bits.append("No subtitles or on-screen caption text.")
+
+    audio = ("Audio: " + " ".join(audio_bits)) if audio_bits else ""
+    return (visual + (" " + audio if audio else "")).strip()
 
 
 def _panel_dialogue_lines(panel: dict) -> list[str]:
@@ -423,7 +504,8 @@ def _frame_char_anchor(frame: dict, cast_index: dict, out: Path) -> Path | None:
 
 
 def _render_scene_frames(storyboard: dict, casting: dict, out: Path,
-                         max_scenes: int | None = None) -> dict:
+                         max_scenes: int | None = None,
+                         characters: dict | None = None) -> dict:
     """Render each storyboard frame as a video clip (Veo image-to-video), then
     stitch each scene's clips into a per-scene video (output/video/scene_NN.mp4)
     and assemble all scene videos into the final movie (output/video/movie.mp4).
@@ -432,8 +514,13 @@ def _render_scene_frames(storyboard: dict, casting: dict, out: Path,
     character's representation image; subsequent frames chain from the previous
     clip's last frame for continuity within the scene. Scene boundary = hard cut.
 
+    `characters` (optional, from characters.json) supplies each speaking
+    character's vocal-quality description so dialogue cues stay consistent
+    across separately-generated clips (see `_panel_video_prompt`).
+
     max_scenes caps how many scenes are rendered; every shot within each rendered
-    scene is always included. Best-effort + idempotent (skips existing files).
+    scene is always included. Best-effort + idempotent (skips existing files;
+    re-renders when a feedback revision changed the prompt — see `_stale`).
     """
     if not i2v.enabled():
         _log(f"      scene render skipped — {i2v.unavailable_hint()}")
@@ -441,7 +528,12 @@ def _render_scene_frames(storyboard: dict, casting: dict, out: Path,
     if not i2v.available():
         _log(f"      scene render skipped — {i2v.unavailable_hint()}")
         return {}
-    continuity = bool(i2v._cfg().get("continuity", True))
+    vcfg = i2v._cfg()
+    continuity = bool(vcfg.get("continuity", True))
+    audio_cfg = vcfg.get("audio", {})
+    no_bg_music = bool(audio_cfg.get("no_background_music", True))
+    room_tone = bool(audio_cfg.get("room_tone", True))
+    no_subtitles = bool(audio_cfg.get("no_subtitles", True))
 
     cast_index = {}
     for c in casting.get("casting", []):
@@ -449,6 +541,12 @@ def _render_scene_frames(storyboard: dict, casting: dict, out: Path,
         rel = ch.get("image_path") or c.get("image_path")
         if rel:
             cast_index[c.get("name")] = rel
+
+    voice_index = {
+        c.get("name"): c.get("voice", "")
+        for c in (characters or {}).get("characters", [])
+        if c.get("name") and c.get("voice")
+    }
 
     vdir = out / "video"
     vdir.mkdir(exist_ok=True)
@@ -462,6 +560,7 @@ def _render_scene_frames(storyboard: dict, casting: dict, out: Path,
         sdir = vdir / (f"scene_{snum:02d}" if isinstance(snum, int) else f"scene_{snum}")
         sdir.mkdir(exist_ok=True)
         prev_tail = None                        # reset each scene → hard cut between scenes
+        prev_clip_path = None                   # previous clip mp4 — for continuity_mode: extend
         frames_out = []
         # scene-level audio overview for panels that have no explicit sound field
         audio_overview = scene.get("audio_overview") or {}
@@ -470,7 +569,9 @@ def _render_scene_frames(storyboard: dict, casting: dict, out: Path,
 
         for fr in panels:
             fnum = fr.get("panel") or fr.get("frame", len(frames_out) + 1)
-            prompt = _panel_video_prompt(fr, audio_overview)
+            prompt = _panel_video_prompt(fr, audio_overview, voice_index=voice_index,
+                                         no_bg_music=no_bg_music, room_tone=room_tone,
+                                         no_subtitles=no_subtitles)
             tag = f"{int(fnum):02d}" if isinstance(fnum, int) else str(fnum)
 
             # Seed: continue from the previous frame's tail (carries the look
@@ -479,8 +580,16 @@ def _render_scene_frames(storyboard: dict, casting: dict, out: Path,
             seed = prev_tail if (prev_tail and continuity) else _frame_char_anchor(fr, cast_index, out)
             clip = sdir / f"frame_{tag}.mp4"
             tail_img = sdir / f"frame_{tag}_tail.png"
-            if not clip.exists():
-                if i2v.generate_clip([seed] if seed else [], prompt, clip):
+            hash_path = sdir / f"frame_{tag}.hash"
+            # Hash covers both the prompt AND the seed image bytes: a feedback
+            # revision to an earlier frame changes its tail frame, which changes
+            # this frame's seed, which — even with an unchanged prompt — must
+            # still invalidate this clip so continuity re-chains correctly.
+            current_hash = _content_hash(prompt, seed, prev_clip_path)
+            if _stale(clip, hash_path, current_hash):
+                if clip.exists():
+                    _log(f"      scene {snum} frame {tag} — prompt/seed revised, re-rendering …")
+                if i2v.generate_clip([seed] if seed else [], prompt, clip, prev_clip=prev_clip_path):
                     manifest["clips"] += 1
                     # Burn subtitle + shot-label overlays onto the clip (in-place)
                     # when the operator enables them in config video.overlays.
@@ -495,11 +604,20 @@ def _render_scene_frames(storyboard: dict, casting: dict, out: Path,
                     # Continuity chains it forward as the next-clip seed;
                     # ffmpeg stitching benefits from having clean cut-points regardless.
                     tail = i2v.last_frame(clip, tail_img)
+                    hash_path.write_text(current_hash)
                     if continuity:
                         prev_tail = tail or seed
+                        prev_clip_path = clip
                 else:
                     manifest["failed"] += 1
                     _log(f"      ⚠ scene {snum} frame {tag} — clip not produced")
+            elif continuity:
+                # Already up to date — still chain forward from its tail frame
+                # (previously this branch left prev_tail untouched, so a resumed
+                # run with some frames already rendered would reset newer frames
+                # to the character anchor instead of continuing the scene).
+                prev_tail = tail_img if tail_img.exists() else seed
+                prev_clip_path = clip
 
             frames_out.append({
                 "panel": fnum,
@@ -1073,7 +1191,8 @@ def run(
         total_scenes = min(max_scenes, len(storyboard.get("storyboard", []))) if max_scenes else len(storyboard.get("storyboard", []))
         _log(f"10/11 video render  [{backend_label}]  "
              f"({total_scenes} scene(s), all shots, per-scene stitch + final assembly) …")
-        scene_render = _render_scene_frames(storyboard, casting, out, max_scenes=max_scenes)
+        scene_render = _render_scene_frames(storyboard, casting, out, max_scenes=max_scenes,
+                                            characters=characters)
         if scene_render:
             ok = scene_render.get("clips", 0)
             failed = scene_render.get("failed", 0)

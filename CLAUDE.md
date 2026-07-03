@@ -236,6 +236,53 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
   draft all scenes (not just first N); edit / sound mix / final cut phase.
 
 ## Session log
+- 2026-07-02 — **Veo audio-continuity best practices + hash-based render
+  invalidation.** Two independent fixes. (1) **Render steps now invalidate on
+  feedback, not just file-existence.** `_render_casting_images`,
+  `_render_moodboard_tiles`, `_render_scene_frames` were idempotent purely by
+  `path.exists()`, so a HITL-feedback-revised `visual_prompt`/panel prompt
+  (via `--resume` or a standalone `stage casting --feedback` rerun) silently
+  left a stale image/clip on disk. Added `_content_hash()` (sha256 over prompt
+  text + seed-image bytes) + `_stale()` (compares a `.hash` sidecar) — a
+  revised prompt now forces a re-render; an unchanged one still skips.
+  Pre-existing renders without a sidecar are accepted as baseline (no surprise
+  re-render burn on upgrade) and backfilled. `_render_scene_frames` hashes the
+  seed too, so a regenerated earlier frame's new tail image cascades
+  invalidation to every later frame in that scene (continuity chain). Also
+  fixed a latent bug found in the process: the "already rendered, skip"
+  branch never updated `prev_tail`, so a resumed run with some frames on disk
+  would reset later new frames to the character anchor instead of chaining
+  continuity forward. (2) **Veo audio continuity.** `_panel_video_prompt`
+  (`reel/pipeline.py`) now appends a single trailing `Audio:` block after the
+  five-element visual prompt: ambient is kept strictly separate from
+  score/music (previously merged, which let a hallucinated score piggyback on
+  the ambient cue); explicit `"No background music or score."` is asserted by
+  default whenever the storyboard's `audio_overview.score_cue` is empty (Veo
+  has no memory across separate clip generations, so it can otherwise
+  hallucinate a score mid-scene); ambient is auto-anchored to `"dry acoustics,
+  no echo"` unless it already specifies reverb/echo, so room tone doesn't
+  drift shot to shot; dialogue cues now fold in the speaking character's
+  `characters.voice` description (`voice_index`, new param, sourced from
+  `characters.json` — the manual substitute for Veo's lack of cross-generation
+  voice cloning) and end with `"No subtitles or on-screen caption text."`.
+  All three toggle via new config `video.audio.{no_background_music,room_tone,
+  no_subtitles}` (default on). `_render_scene_frames` gained a `characters`
+  param to build `voice_index`; threaded through all three call sites
+  (`pipeline.run`, `stages.py` `scene_render` — added `characters` as an
+  optional input, `cli.py`'s standalone `render` command). Also added
+  **`gemini.extend_video()`** — Veo 3.1's native video-to-video scene
+  extension (feeds the previous *clip*, not just its last frame, so ambient/
+  music audio carries forward across the cut, not just the visual); wired in
+  as `video.continuity_mode: extend` (default stays `seed`, the proven
+  image-seed path) with automatic fallback to `seed` on any failure — marked
+  experimental in config comments since only non-"fast" veo-3.1-*-preview
+  models are confirmed (via web search of ai.google.dev) to support it, and
+  it requires the input to itself be Veo-generated. Verified everything via
+  byte-compile + stubbed unit tests (no live API calls): hash skip/revise/
+  cascade behavior, backward-compat with pre-existing un-hashed renders,
+  full `_render_scene_frames` prompt assembly incl. voice_index and
+  `prev_clip` threading, and `veo_guide.verify_prompt` still passes the new
+  prompt shape. Not yet exercised against the live Gemini API in this session.
 - 2026-06-30 — **Veo guide alignment, Veo prompt verifier, dead code cleanup.**
   Aligned all Veo video prompts to the official guide's five-element order
   (Subject → Action → Style → Camera → Focus/Ambiance) and three audio cue types

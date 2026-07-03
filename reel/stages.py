@@ -116,7 +116,8 @@ def _moodboard_tiles(ctx, *, out, **_):
 
 def _scene_render(ctx, *, out, **_):
     from . import pipeline as P
-    return P._render_scene_frames(ctx["storyboard"], ctx["casting"], Path(out))
+    return P._render_scene_frames(ctx["storyboard"], ctx["casting"], Path(out),
+                                  characters=ctx.get("characters"))
 
 def _fidelity(ctx, *, profile=None, feedback=None, **_):
     source = ctx["source"]
@@ -150,6 +151,7 @@ STAGES: list[Stage] = [
     Stage("moodboard_tiles", ["moodboard"], _moodboard_tiles, produces="moodboard",
           desc="render moodboard reference tiles to images (image provider)"),
     Stage("scene_render", ["storyboard", "casting"], _scene_render, produces="scene_render",
+          optional=("characters",),
           desc="render frame clips → per-scene stitch → movie.mp4 (video provider)"),
     Stage("fidelity", ["source", "screenplay_fountain"], _fidelity,
           optional=("storyboard",),

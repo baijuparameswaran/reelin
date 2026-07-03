@@ -322,6 +322,57 @@ def _generate_video_sdk(prompt: str, out_path: Path, *,
     raise RuntimeError("Veo SDK returned no video")
 
 
+def extend_video(prev_video_path: Path, prompt: str, out_path: Path, *,
+                 model: str = "veo-3.1-generate-preview",
+                 aspect_ratio: str = "16:9",
+                 poll_seconds: float = 10,
+                 timeout_seconds: float = 1200) -> bool:
+    """Extend a previously Veo-generated clip via native video-to-video scene
+    extension (SDK only — the Gemini Developer API's extend feature isn't on the
+    raw predictLongRunning REST surface `_generate_video_urllib` uses).
+
+    Unlike image-seeding (`generate_video(image_path=...)`, which only carries
+    the last still frame forward), this feeds the whole prior CLIP back in, so
+    Veo continues its ambient/music audio bed as well as the visual across the
+    cut — the fix for audio that resets or drifts between clips of one scene.
+
+    Requires: `prev_video_path` must itself be Veo-generated output (a Veo 3.1
+    API constraint), and a non-"fast" veo-3.1-*-preview `model`. Best-effort —
+    raises on any failure; the caller (`i2v._gen_gemini`) catches this and falls
+    back to the proven image-seed path.
+    """
+    genai, types = _sdk() or (None, None)
+    if genai is None:
+        raise ImportError("google-genai not installed — run: pip install google-genai")
+    client = genai.Client(api_key=api_key())
+
+    prev_video = types.Video.from_file(str(prev_video_path))
+    operation = client.models.generate_video(
+        model=model,
+        video=prev_video,
+        prompt=prompt,
+        config=types.GenerateVideoConfig(
+            aspect_ratio=aspect_ratio,
+            number_of_videos=1,
+            person_generation="allow_adult",
+            enhance_prompt=False,
+        ),
+    )
+    deadline = time.time() + timeout_seconds
+    while not operation.done:
+        if time.time() > deadline:
+            raise TimeoutError(f"Veo extend operation timed out after {timeout_seconds}s")
+        time.sleep(poll_seconds)
+        operation = client.operations.get(operation)
+
+    for gen_video in (operation.result.generated_videos or []):
+        video_bytes = client.files.download(gen_video.video)
+        video_data = bytes(video_bytes) if not isinstance(video_bytes, (bytes, bytearray)) else video_bytes
+        Path(out_path).write_bytes(video_data)
+        return True
+    raise RuntimeError("Veo extend returned no video")
+
+
 def _generate_video_urllib(prompt: str, out_path: Path, *,
                             image_path: Path | None,
                             model: str,

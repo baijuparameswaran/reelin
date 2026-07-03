@@ -153,7 +153,9 @@ def _render_video(argv: list[str]) -> int:
         shutil.move(str(out / "video"), str(backup))
         print(f"[reel] cleared existing clips → backed up to {backup}/")
 
-    manifest = _render_scene_frames(board, _load_json(out / "casting.json"), out, max_scenes=a.max_scenes)
+    manifest = _render_scene_frames(board, _load_json(out / "casting.json"), out,
+                                    max_scenes=a.max_scenes,
+                                    characters=_load_json(out / "characters.json"))
     print(f"[reel] rendered {manifest.get('clips', 0)} new clip(s) → {out}/video/")
     if manifest.get("movie"):
         print(f"[reel] movie → {out}/{manifest['movie']}")

@@ -122,9 +122,16 @@ def _frames(c: dict) -> int:
 
 # ── backends ─────────────────────────────────────────────────────────────────
 
-def _gen_gemini(images: list[Path], prompt: str, out_path: Path) -> bool:
+def _gen_gemini(images: list[Path], prompt: str, out_path: Path, *,
+                prev_clip: Path | None = None) -> bool:
     """Veo image-to-video via the Gemini API. Seeds from the last keyframe (the
     reference image produced by the image stage); text-to-video if none given.
+
+    prev_clip — the previous clip's mp4 (same scene), used when
+    `video.continuity_mode: extend` to request Veo's native video-to-video
+    scene extension instead of image seeding, which also carries ambient/music
+    audio forward across the cut. Best-effort: any extend failure falls back to
+    the image-seed path below.
 
     Pre-flight: runs the Veo prompt through the guide verifier before sending to
     the API.  Issues are logged as warnings (generation always proceeds — the
@@ -143,15 +150,31 @@ def _gen_gemini(images: list[Path], prompt: str, out_path: Path) -> bool:
             _log(f"   ℹ {w}")
 
     c = _cfg()
+    #model = c.get("model", "veo-3.1-fast-generate-preview")
+    model = c.get("model", "veo-3.1-lite-generate-preview")
+    aspect_ratio = c.get("aspect_ratio", "16:9")
+    poll_seconds = c.get("poll_seconds", 10)
+    timeout_seconds = c.get("timeout_seconds", 1200) or 1200
+
+    if c.get("continuity_mode", "seed") == "extend" and prev_clip and Path(prev_clip).exists():
+        try:
+            return gemini.extend_video(
+                Path(prev_clip), full_prompt, Path(out_path),
+                model=model, aspect_ratio=aspect_ratio,
+                poll_seconds=poll_seconds, timeout_seconds=timeout_seconds,
+            )
+        except Exception as e:
+            _log(f"      ⚠ Veo scene-extend failed ({type(e).__name__}: {e}) — "
+                 "falling back to image-seed continuity")
+
     return gemini.generate_video(
         full_prompt, Path(out_path),
         image_path=images[-1] if images else None,
-        #model=c.get("model", "veo-3.1-fast-generate-preview"),
-        model=c.get("model", "veo-3.1-lite-generate-preview"),
-        aspect_ratio=c.get("aspect_ratio", "16:9"),
+        model=model,
+        aspect_ratio=aspect_ratio,
         resolution=c.get("resolution", "720p"),
-        poll_seconds=c.get("poll_seconds", 10),
-        timeout_seconds=c.get("timeout_seconds", 1200) or 1200,
+        poll_seconds=poll_seconds,
+        timeout_seconds=timeout_seconds,
     )
 
 
@@ -220,10 +243,12 @@ def _gen_http(images: list[Path], prompt: str, out_path: Path) -> bool:
 
 # ── public API ───────────────────────────────────────────────────────────────
 
-def generate_clip(images, prompt: str, out_path: Path) -> bool:
+def generate_clip(images, prompt: str, out_path: Path, *, prev_clip: Path | None = None) -> bool:
     """Render a clip to `out_path` (mp4) conditioned on one or more keyframe
     `images` (a Path or list — last is the start frame; a leading second image is
     used as the prior/last-frame anchor for continuity when the model supports it).
+    `prev_clip` — the previous clip's mp4, used for Veo's native scene-extend
+    continuity mode (gemini/veo backend only; ignored otherwise).
     Returns success; never raises fatally."""
     imgs = [Path(p) for p in ([images] if isinstance(images, (str, Path)) else images) if p]
     imgs = [p for p in imgs if p.exists()]
@@ -234,7 +259,7 @@ def generate_clip(images, prompt: str, out_path: Path) -> bool:
         return False
     try:
         if b in ("gemini", "veo"):
-            return _gen_gemini(imgs, prompt, out_path)
+            return _gen_gemini(imgs, prompt, out_path, prev_clip=prev_clip)
         if b == "diffusers":
             return _gen_diffusers(imgs, prompt, out_path)
         if b in ("comfyui", "http"):
