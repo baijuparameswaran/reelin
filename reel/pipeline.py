@@ -92,6 +92,15 @@ def _summarize_scenes(r: dict) -> str:
     for s in r.get("scenes", []):
         rows.append(f"  {s.get('number','?'):>2}. {s.get('slugline','?')}")
         rows.append(f"      {s.get('summary','?')[:80]}")
+    dropped = r.get("dropped_scenes") or []
+    if dropped:
+        # Gaps in the numbering above (e.g. 2,3,5,6,7) usually mean the model
+        # generated a scene whose source_line couldn't be matched in the source
+        # text — surfaced here instead of silently vanishing from the list.
+        rows.append(f"  ⚠ {len(dropped)} scene(s) dropped — source_line not found in source text:")
+        for s in dropped:
+            rows.append(f"      {s.get('number','?')}. {s.get('slugline','?')}  "
+                        f"(source_line: \"{(s.get('source_line') or '')[:60]}\")")
     return "\n".join(rows) or "  (none)"
 
 
@@ -1115,7 +1124,9 @@ def run(
               lambda fb, p=None: cast_characters(structure, characters, p or profile_override, feedback=fb)),
     ])
     scenes, casting = g["scenes"], g["casting"]
-    _log(f"      {len(scenes.get('scenes', []))} scenes; cast {len(casting.get('casting', []))}")
+    n_dropped = len(scenes.get("dropped_scenes") or [])
+    _log(f"      {len(scenes.get('scenes', []))} scenes; cast {len(casting.get('casting', []))}"
+        + (f"  ({n_dropped} dropped — source_line not found)" if n_dropped else ""))
 
     # Render character portraits only for characters appearing in the scenes that
     # will actually be rendered (1..max_scenes).  Capping here avoids burning API

@@ -59,16 +59,19 @@ for what the source actually says):
 """
 
 
-def _validate(scenes: list[dict], source_text: str) -> list[dict]:
-    """Strip scenes whose source_line is not found in the source text."""
-    valid = []
+def _validate(scenes: list[dict], source_text: str) -> tuple[list[dict], list[dict]]:
+    """Split into (valid, dropped) by whether source_line is found in the source
+    text. Dropped scenes are returned (not silently discarded) so the caller can
+    surface them — a scene with a hallucinated source_line is still worth showing
+    the operator, e.g. to explain a gap in the scene numbering at the gate."""
+    valid, dropped = [], []
     for sc in scenes:
         sl = (sc.get("source_line") or "").strip()
-        if sl and len(sl) >= 5:
-            if sl[:8].lower() not in source_text.lower():
-                continue      # phrase not in source — likely hallucinated
+        if sl and len(sl) >= 5 and sl[:8].lower() not in source_text.lower():
+            dropped.append(dict(sc, drop_reason="source_line not found in source text"))
+            continue
         valid.append(sc)
-    return valid
+    return valid, dropped
 
 
 def _map_chunks(scenes: list[dict], source: dict) -> list[dict]:
@@ -121,7 +124,8 @@ def segment_scenes(
     raw = llm.generate(prompt, profile=profile, system=SYSTEM, as_json=True)
     result = llm.safe_json(raw)
     scenes = result.get("scenes") or []
-    scenes = _validate(scenes, source_text)
+    scenes, dropped = _validate(scenes, source_text)
     scenes = _map_chunks(scenes, source)
     result["scenes"] = scenes
+    result["dropped_scenes"] = dropped
     return result
