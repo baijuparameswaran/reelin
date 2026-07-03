@@ -234,7 +234,7 @@ def draft_screenplay(
     visuals: dict | None = None,
     cinematography: dict | None = None,
     casting: dict | None = None,
-    max_scenes: int = 3,
+    max_scenes: int | None = 3,
     profile: str | None = None,
     feedback: str | None = None,
 ) -> dict:

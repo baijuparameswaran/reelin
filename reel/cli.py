@@ -41,6 +41,15 @@ from . import llm
 from .pipeline import run, PipelineStopped
 
 
+def _max_scenes_arg(v: str) -> int | None:
+    """--max-scenes value: an integer count, or the literal 'all' (case-insensitive)
+    for every drafted scene, unbounded (None — downstream slicing `[:None]`
+    naturally means "no cap" throughout the pipeline)."""
+    if v.strip().lower() == "all":
+        return None
+    return int(v)
+
+
 def _list_models() -> int:
     cfg = llm.config()
     have = llm.installed_models()
@@ -76,7 +85,8 @@ def _run_stage(argv: list[str]) -> int:
     ap.add_argument("source", nargs="?", help="source file (for ingest / first run)")
     ap.add_argument("--out", default="output")
     ap.add_argument("--profile", choices=["fast", "quality"], default=None)
-    ap.add_argument("--max-scenes", type=int, default=1)
+    ap.add_argument("--max-scenes", type=_max_scenes_arg, default=1,
+                    help="scene count, or 'all' for every drafted scene")
     ap.add_argument("--feedback", default=None, help="revision note passed to the agent")
     a = ap.parse_args(argv)
     if a.name not in REGISTRY:
@@ -114,8 +124,8 @@ def _render_video(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="reel render",
                                  description="render scene videos from screenplay.fountain + cinematography.json")
     ap.add_argument("--out", default="output")
-    ap.add_argument("--max-scenes", type=int, default=None,
-                    help="optional cap on scenes (default: all drafted scenes)")
+    ap.add_argument("--max-scenes", type=_max_scenes_arg, default=None,
+                    help="optional cap on scenes, or 'all' (default: all drafted scenes)")
     ap.add_argument("--max-shots", type=int, default=None,
                     help="optional cap on shots per scene (default: every action beat)")
     ap.add_argument("--fresh", action="store_true",
@@ -339,8 +349,9 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="reel", description=__doc__)
     ap.add_argument("source", nargs="?", help="path to source text (book/story/script)")
     ap.add_argument("--out", default="output", help="output directory (default: output)")
-    ap.add_argument("--max-scenes", type=int, default=1,
-                    help="how many scenes to draft AND render (default: 1, prototype); "
+    ap.add_argument("--max-scenes", type=_max_scenes_arg, default=1,
+                    help="how many scenes to draft AND render (default: 1, prototype), "
+                         "or 'all' for every drafted scene; "
                          "every shot within each rendered scene is always rendered")
     ap.add_argument("--profile", choices=["fast", "quality"], default=None,
                     help="force a single quality tier for every agent")

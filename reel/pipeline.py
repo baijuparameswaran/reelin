@@ -62,6 +62,12 @@ def _log(msg: str) -> None:
     print(f"[reel] {msg}", flush=True)
 
 
+def _scenes_label(max_scenes: int | None) -> str:
+    """Display form of a max_scenes cap — 'all' when unbounded (None), matching
+    the `--max-scenes all` CLI value, instead of printing the literal 'None'."""
+    return "all" if max_scenes is None else str(max_scenes)
+
+
 # ── per-stage gate summarizers ────────────────────────────────────────────────
 
 def _summarize_structure(r: dict) -> str:
@@ -867,7 +873,7 @@ def _gated(
 def run(
     input_path: str,
     out_dir: str = "output",
-    max_scenes: int = 1,
+    max_scenes: int | None = 1,
     profile_override: str | None = None,
     resume: bool = False,
     genre: str | None = None,
@@ -1134,7 +1140,7 @@ def run(
             for nm in (sc.get("characters") or []):
                 active_chars.add(nm)
         _log(f"      rendering character portraits for {len(active_chars)} "
-             f"character(s) in scene(s) 1..{max_scenes} …")
+             f"character(s) in scene(s) 1..{_scenes_label(max_scenes)} …")
         if _render_casting_images(casting, out, active_names=active_chars or None):
             save("casting", casting)
             _log(f"      portraits → {out}/casting/")
@@ -1163,7 +1169,7 @@ def run(
             soundscape=soundscape, visuals=visuals, cinematography=cinematography,
             casting=casting, max_scenes=max_scenes, profile=p or profile_override, feedback=fb,
         )
-    g = run_group(f"8/10 screenplay (first {max_scenes} scenes)", "draft", [
+    g = run_group(f"8/10 screenplay (first {_scenes_label(max_scenes)} scenes)", "draft", [
         _spec("screenplay", lambda: _draft(), _summarize_screenplay, _draft),
     ])
     draft = g["screenplay"]

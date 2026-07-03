@@ -210,7 +210,7 @@ def _save_artifact(out: Path, name: str, data) -> None:
 
 def run_stage(name: str, out: str | Path = "output", *, input_path: str | None = None,
               profile: str | None = None, feedback: str | None = None,
-              max_scenes: int = 1, save: bool = True) -> dict:
+              max_scenes: int | None = 1, save: bool = True) -> dict:
     """Invoke a single stage independently. Loads each required input from its
     checkpoint in `out` (ingesting the source on demand), runs the stage, and
     writes its artifact. Returns the stage result."""
