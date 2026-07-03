@@ -217,7 +217,7 @@ def _gen_video_prompt(argv: list[str]) -> int:
 
     # Pull config defaults, allow per-call overrides.
     cfg = i2v._cfg()
-    model       = a.model        or cfg.get("model", "veo-3.1-fast-generate-preview")
+    model       = a.model        or cfg.get("model", "veo-3.1-generate-preview")
     aspect      = a.aspect_ratio or cfg.get("aspect_ratio", "16:9")
     resolution  = cfg.get("resolution", "720p")
     poll        = cfg.get("poll_seconds", 10)

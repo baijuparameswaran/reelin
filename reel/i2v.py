@@ -150,9 +150,9 @@ def _gen_gemini(images: list[Path], prompt: str, out_path: Path, *,
             _log(f"   ℹ {w}")
 
     c = _cfg()
-    #model = c.get("model", "veo-3.1-fast-generate-preview")
-    model = c.get("model", "veo-3.1-lite-generate-preview")
+    model = c.get("model", "veo-3.1-generate-preview")
     aspect_ratio = c.get("aspect_ratio", "16:9")
+    resolution = c.get("resolution", "720p")
     poll_seconds = c.get("poll_seconds", 10)
     timeout_seconds = c.get("timeout_seconds", 1200) or 1200
 
@@ -160,7 +160,7 @@ def _gen_gemini(images: list[Path], prompt: str, out_path: Path, *,
         try:
             return gemini.extend_video(
                 Path(prev_clip), full_prompt, Path(out_path),
-                model=model, aspect_ratio=aspect_ratio,
+                model=model, aspect_ratio=aspect_ratio, resolution=resolution,
                 poll_seconds=poll_seconds, timeout_seconds=timeout_seconds,
             )
         except Exception as e:
@@ -172,7 +172,7 @@ def _gen_gemini(images: list[Path], prompt: str, out_path: Path, *,
         image_path=images[-1] if images else None,
         model=model,
         aspect_ratio=aspect_ratio,
-        resolution=c.get("resolution", "720p"),
+        resolution=resolution,
         poll_seconds=poll_seconds,
         timeout_seconds=timeout_seconds,
     )

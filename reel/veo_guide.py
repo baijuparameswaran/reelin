@@ -371,6 +371,100 @@ def verify_prompt(prompt: str) -> dict:
     }
 
 
+# ── prompt construction helpers ─────────────────────────────────────────────
+# verify_prompt() above only checks a prompt already built elsewhere. These
+# functions instead CONSTRUCT the audio portion of a prompt, so that Veo-guide
+# knowledge lives in one module rather than being hand-rolled inline wherever
+# a prompt gets assembled (previously `pipeline._panel_video_prompt`).
+#
+# What the live guide actually confirms (verified via ai.google.dev + the
+# Google Cloud "Ultimate prompting guide for Veo 3.1" post — see module
+# docstring for the sync mechanism): three audio categories in natural
+# language — Dialogue (quoted speech), SFX, Ambient Noise — with `SFX:` and
+# `Ambient noise:` demonstrated as usable inline labels in the Cloud guide's
+# own examples. Confirmed NOT to exist anywhere: a schematic keyword for
+# voice-over, off-screen dialogue, or suppressing background music/score —
+# there is no reserved V.O./O.S./"no music" tag Veo recognizes. Those three
+# cases are filled with deliberately unambiguous natural-language sentences
+# instead of an invented tag, since Veo has no memory across separate clip
+# generations and will otherwise happily lip-sync a should-be-off-camera line
+# to a face in frame, or hallucinate a score that wasn't there a shot ago.
+#
+# A future non-Veo video backend can supply an equivalent module with the
+# same call shape (dialogue_cue / music_directive / no_subtitles_directive /
+# ambient_cue / sfx_cue) instead of these Veo-specific conventions being
+# baked into the pipeline's prompt-assembly code.
+
+def _tone_phrase(tone: str) -> str:
+    tone = (tone or "steady, natural").strip()
+    return tone if any(w in tone.lower() for w in ("tone", "voice")) else f"a {tone} tone"
+
+
+def dialogue_cue(speaker: str, line: str, *, voice: str = "", tone: str = "",
+                 vo: bool = False, off_screen: bool = False) -> str:
+    """One spoken line as a guide-aligned cue — quoted speech (the guide's one
+    confirmed dialogue convention), attributed to a speaker + vocal-quality
+    description (`voice`, from characters.voice) so the same character sounds
+    the same across separately-generated clips (Veo has no cross-generation
+    voice cloning).
+
+    vo / off_screen get a full explicit sentence rather than a bare tag: a
+    bare "(voice over)" parenthetical after quoted speech is exactly the shape
+    Veo otherwise reads as on-screen dialogue, risking a lip-synced mouth for
+    a line that should never be shown speaking.
+    """
+    line = line.strip()
+    if not line:
+        return ""
+    speaker = speaker.strip()
+    tone_phrase = _tone_phrase(tone)
+    speaker_desc = f"{speaker} ({voice})" if (speaker and voice) else speaker
+
+    if vo:
+        who = f"a voice-over narrator ({speaker_desc})" if speaker_desc else "a voice-over narrator"
+        return (f'{who} says, "{line}," in {tone_phrase}, heard as off-camera voice-over '
+                f'narration — no character on screen mouths these words.')
+    if off_screen:
+        who = speaker_desc or "a voice"
+        return (f'{who} speaks from off-screen, outside the visible frame, saying "{line}," '
+                f'in {tone_phrase} — not visible in this shot.')
+    if speaker_desc:
+        return f'{speaker_desc} says, "{line}," in {tone_phrase}.'
+    return f'"{line}."'
+
+
+def ambient_cue(text: str) -> str:
+    """Environment soundscape, labeled per the Cloud guide's own example usage."""
+    text = text.strip()
+    if not text:
+        return ""
+    return f"Ambient noise: {text}" + ("." if not text.endswith(".") else "")
+
+
+def sfx_cue(text: str) -> str:
+    """Explicit sound effect(s), labeled per the Cloud guide's own example usage."""
+    text = text.strip()
+    if not text:
+        return ""
+    return f"SFX: {text}" + ("." if not text.endswith(".") else "")
+
+
+def music_directive(score_cue: str = "", *, no_background_music: bool = True) -> str:
+    """One explicit sentence steering the score/music half of a clip's audio.
+    No official label exists for this ("Audio:"/"Music:" appear nowhere in the
+    guide) — an unambiguous imperative sentence is the only lever available."""
+    score_cue = score_cue.strip()
+    if score_cue:
+        return score_cue + ("." if not score_cue.endswith(".") else "")
+    if no_background_music:
+        return "No background music or score."
+    return ""
+
+
+def no_subtitles_directive() -> str:
+    return "No subtitles or on-screen caption text."
+
+
 def status() -> str:
     """One-line status string for display."""
     cache = load()

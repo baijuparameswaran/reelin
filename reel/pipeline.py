@@ -55,6 +55,7 @@ from .gate import Gate
 from . import llm
 from . import imagegen
 from . import i2v
+from . import veo_guide
 
 
 def _log(msg: str) -> None:
@@ -386,15 +387,24 @@ def _panel_video_prompt(panel: dict, audio_overview: dict | None = None, *,
       Subject → Action → Style → Camera & Composition → Focus & Ambiance
     — unlabeled, natural language, per the guide.
 
-    Audio half is a single trailing "Audio:" block (ambient → SFX → music/no-music
-    → dialogue). Veo generates audio per clip independently, with no memory of
-    prior clips, so leaving any of these implicit invites drift across a scene's
-    clips: a hallucinated score that wasn't there before, room tone that
-    suddenly gains an echo, or burned-in subtitle text. Spelling each one out
-    explicitly — even the negative "no background music" / "no subtitles" cases —
-    is what keeps the audio track consistent shot to shot (Veo prompting best
-    practice; native audio generation itself cannot be disabled or added after
-    the fact, so this only steers *what* it generates, not *whether* it does).
+    Audio half is built entirely via `veo_guide`'s construction helpers
+    (`ambient_cue`/`sfx_cue`/`music_directive`/`dialogue_cue`/
+    `no_subtitles_directive`) — that module owns the guide-vocabulary
+    knowledge (which labels the guide actually confirms vs. which cases have
+    no official keyword and need an unambiguous sentence instead), so this
+    function only gathers the panel/scene data and hands it off. A future
+    non-Veo backend can supply an equivalent module with the same call shape
+    without touching this assembly logic.
+
+    Veo generates audio per clip independently, with no memory of prior
+    clips, so leaving any of these implicit invites drift across a scene:
+    voice-over dialogue that gets lip-synced to an on-screen face, a
+    hallucinated score that wasn't there before, room tone that suddenly
+    gains an echo, or burned-in subtitle text. Spelling each one out
+    explicitly — even the negative "no background music" / "no subtitles"
+    cases — is what keeps the audio track consistent shot to shot (native
+    audio generation itself cannot be disabled or added after the fact, so
+    this only steers *what* it generates, not *whether* it does).
 
     voice_index — character name → vocal-quality description (from characters.voice),
     so the same character sounds the same across separately-generated clips (Veo
@@ -441,30 +451,22 @@ def _panel_video_prompt(panel: dict, audio_overview: dict | None = None, *,
 
     score = (ao.get("score_cue") or "").strip()
 
-    # Dialogue — Veo guide: use quotation marks for specific speech.
-    # Format: Speaker (voice) says, "line" in a <tone> tone.  /  "line" (voice over).  /  "line" (off screen).
     dialogue_cues: list[str] = []
     for d in (panel.get("dialogue") or []):
-        speaker = (d.get("speaker") or "").strip()
         line = (d.get("line") or "").strip()
         if not line:
             continue
-        parenthetical = (d.get("parenthetical") or "").strip().strip("()")
         modifier = (d.get("modifier") or "").strip().upper()
-        tone = parenthetical or "steady, natural"
-        tone_phrase = tone if any(w in tone.lower() for w in ("tone", "voice")) else f"a {tone} tone"
-        voice = voice_index.get(speaker, "")
-        speaker_desc = f"{speaker} ({voice})" if (speaker and voice) else speaker
-        if d.get("vo"):
-            tag = f"voice over{', ' + speaker_desc if speaker_desc else ''}"
-            dialogue_cues.append(f'"{line}" ({tag})')
-        elif "O.S." in modifier:
-            tag = f"{speaker_desc + ', ' if speaker_desc else ''}off screen"
-            dialogue_cues.append(f'"{line}" ({tag})')
-        elif speaker_desc:
-            dialogue_cues.append(f'{speaker_desc} says, "{line}" in {tone_phrase}')
-        else:
-            dialogue_cues.append(f'"{line}"')
+        speaker = (d.get("speaker") or "").strip()
+        cue = veo_guide.dialogue_cue(
+            speaker, line,
+            voice=voice_index.get(speaker, ""),
+            tone=(d.get("parenthetical") or "").strip().strip("()"),
+            vo=bool(d.get("vo")),
+            off_screen="O.S." in modifier,
+        )
+        if cue:
+            dialogue_cues.append(cue)
 
     # Visual half: base (subject+action+style+camera+ambiance) → focus hint.
     visual_parts: list[str] = [base]
@@ -474,20 +476,15 @@ def _panel_video_prompt(panel: dict, audio_overview: dict | None = None, *,
 
     # Audio half: ambient → SFX → music/no-music → dialogue (+ no-subtitles).
     audio_bits: list[str] = []
-    if ambient:
-        audio_bits.append(ambient + ("." if not ambient.endswith(".") else ""))
-    if sfx:
-        audio_bits.append(sfx + ("." if not sfx.endswith(".") else ""))
-    if score:
-        audio_bits.append(score + ("." if not score.endswith(".") else ""))
-    elif no_bg_music:
-        audio_bits.append("No background music or score.")
-    audio_bits.extend(f"{c}." if not c.endswith(".") else c for c in dialogue_cues)
+    for cue in (veo_guide.ambient_cue(ambient), veo_guide.sfx_cue(sfx),
+               veo_guide.music_directive(score, no_background_music=no_bg_music)):
+        if cue:
+            audio_bits.append(cue)
+    audio_bits.extend(dialogue_cues)
     if dialogue_cues and no_subtitles:
-        audio_bits.append("No subtitles or on-screen caption text.")
+        audio_bits.append(veo_guide.no_subtitles_directive())
 
-    audio = ("Audio: " + " ".join(audio_bits)) if audio_bits else ""
-    return (visual + (" " + audio if audio else "")).strip()
+    return (visual + (" " + " ".join(audio_bits) if audio_bits else "")).strip()
 
 
 def _panel_dialogue_lines(panel: dict) -> list[str]:

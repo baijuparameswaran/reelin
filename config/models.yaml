@@ -68,7 +68,12 @@ video:
   enabled: true
   backend: auto                   # auto = Gemini Veo if GEMINIAPIKEY set, else open_backend
   open_backend: diffusers         # the OPEN fallback when no Gemini key (diffusers|comfyui|none)
-  model: veo-3.1-fast-generate-preview   # veo-3.1-generate-preview / -lite-generate-preview
+  model: veo-3.1-fast-generate-preview   # fast tier (confirmed live via ListModels: -generate-preview
+                                     # / -fast-generate-preview / -lite-generate-preview available,
+                                     # no non-preview GA tier exposed yet). -generate-preview (standard)
+                                     # is higher quality but ~2.2x slower/more quota per clip; both
+                                     # fast and standard are reported to support `continuity_mode:
+                                     # extend` below, -lite- does not.
   aspect_ratio: "16:9"
   resolution: "720p"              # keep at 720p on preview models — 1080p export/upscale passes
                                    # on some Veo front ends are known to drop the audio track;

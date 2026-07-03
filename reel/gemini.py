@@ -230,7 +230,7 @@ _VEO_TRANSIENT = {8, 13, 14}
 
 def generate_video(prompt: str, out_path: Path, *,
                    image_path: Path | None = None,
-                   model: str = "veo-3.0-generate-preview",
+                   model: str = "veo-3.1-generate-preview",
                    aspect_ratio: str = "16:9",
                    resolution: str = "720p",
                    duration_seconds: int = 8,
@@ -248,6 +248,7 @@ def generate_video(prompt: str, out_path: Path, *,
         try:
             return _generate_video_sdk(prompt, out_path, image_path=image_path,
                                         model=model, aspect_ratio=aspect_ratio,
+                                        resolution=resolution,
                                         duration_seconds=duration_seconds,
                                         poll_seconds=poll_seconds,
                                         timeout_seconds=timeout_seconds)
@@ -267,6 +268,7 @@ def _generate_video_sdk(prompt: str, out_path: Path, *,
                          image_path: Path | None,
                          model: str,
                          aspect_ratio: str,
+                         resolution: str,
                          duration_seconds: int,
                          poll_seconds: float,
                          timeout_seconds: float) -> bool:
@@ -274,37 +276,49 @@ def _generate_video_sdk(prompt: str, out_path: Path, *,
     genai, types = _sdk()
     client = genai.Client(api_key=api_key())
 
-    cfg = types.GenerateVideoConfig(
-        aspect_ratio=aspect_ratio,
-        number_of_videos=1,
-        duration_seconds=duration_seconds,
-        person_generation="allow_adult",
-        enhance_prompt=False,   # use the prompt exactly as written
-    )
+    # enhance_prompt is omitted outright — confirmed absent from the official
+    # Veo API parameter table entirely (not a documented field for any Veo 3.1
+    # variant), which is why it 400'd rather than just being ignored.
+    #
+    # person_generation's allowed value is fixed by generation MODE, not by
+    # tier/model (same official table): text-to-video only accepts "allow_all";
+    # image-to-video only accepts "allow_adult". Sending the wrong one for the
+    # mode is what actually 400'd earlier ("allow_adult ... not supported" was
+    # tested against text-to-video, the wrong mode for that value).
+    has_image = bool(image_path and Path(image_path).exists())
+    person_generation = "allow_adult" if has_image else "allow_all"
 
-    if image_path and Path(image_path).exists():
+    if has_image:
         mime = "image/png" if str(image_path).lower().endswith(".png") else "image/jpeg"
         image = types.Image(
             image_bytes=Path(image_path).read_bytes(),
             mime_type=mime,
         )
-        operation = client.models.generate_video(
+        # prompt is a top-level generate_videos() kwarg, not a GenerateVideosConfig
+        # field (config rejects it with a pydantic "extra_forbidden" error).
+        operation = client.models.generate_videos(
             model=model,
             image=image,
-            config=types.GenerateVideoConfig(
-                prompt=prompt,
-                aspect_ratio=cfg.aspect_ratio,
-                number_of_videos=cfg.number_of_videos,
-                duration_seconds=cfg.duration_seconds,
-                person_generation=cfg.person_generation,
-                enhance_prompt=cfg.enhance_prompt,
+            prompt=prompt,
+            config=types.GenerateVideosConfig(
+                aspect_ratio=aspect_ratio,
+                resolution=resolution,
+                number_of_videos=1,
+                duration_seconds=duration_seconds,
+                person_generation=person_generation,
             ),
         )
     else:
-        operation = client.models.generate_video(
+        operation = client.models.generate_videos(
             model=model,
             prompt=prompt,
-            config=cfg,
+            config=types.GenerateVideosConfig(
+                aspect_ratio=aspect_ratio,
+                resolution=resolution,
+                number_of_videos=1,
+                duration_seconds=duration_seconds,
+                person_generation=person_generation,
+            ),
         )
 
     deadline = time.time() + timeout_seconds
@@ -315,7 +329,7 @@ def _generate_video_sdk(prompt: str, out_path: Path, *,
         operation = client.operations.get(operation)
 
     for gen_video in (operation.result.generated_videos or []):
-        video_bytes = client.files.download(gen_video.video)
+        video_bytes = client.files.download(file=gen_video.video)
         video_data = bytes(video_bytes) if not isinstance(video_bytes, (bytes, bytearray)) else video_bytes
         Path(out_path).write_bytes(video_data)
         return True
@@ -325,6 +339,7 @@ def _generate_video_sdk(prompt: str, out_path: Path, *,
 def extend_video(prev_video_path: Path, prompt: str, out_path: Path, *,
                  model: str = "veo-3.1-generate-preview",
                  aspect_ratio: str = "16:9",
+                 resolution: str = "720p",
                  poll_seconds: float = 10,
                  timeout_seconds: float = 1200) -> bool:
     """Extend a previously Veo-generated clip via native video-to-video scene
@@ -337,25 +352,29 @@ def extend_video(prev_video_path: Path, prompt: str, out_path: Path, *,
     cut — the fix for audio that resets or drifts between clips of one scene.
 
     Requires: `prev_video_path` must itself be Veo-generated output (a Veo 3.1
-    API constraint), and a non-"fast" veo-3.1-*-preview `model`. Best-effort —
-    raises on any failure; the caller (`i2v._gen_gemini`) catches this and falls
-    back to the proven image-seed path.
+    API constraint). Both `veo-3.1-generate-preview` and `-fast-` are reported
+    to support extend; `-lite-` does not. Best-effort — raises on any failure;
+    the caller (`i2v._gen_gemini`) catches this and falls back to the proven
+    image-seed path.
     """
     genai, types = _sdk() or (None, None)
     if genai is None:
         raise ImportError("google-genai not installed — run: pip install google-genai")
     client = genai.Client(api_key=api_key())
 
-    prev_video = types.Video.from_file(str(prev_video_path))
-    operation = client.models.generate_video(
+    # Per the official parameter table, "Extension" is grouped with
+    # text-to-video for person_generation: "allow_all" only (not "allow_adult",
+    # which is for image-to-video/interpolation/reference-images instead).
+    prev_video = types.Video.from_file(location=str(prev_video_path))
+    operation = client.models.generate_videos(
         model=model,
         video=prev_video,
         prompt=prompt,
-        config=types.GenerateVideoConfig(
+        config=types.GenerateVideosConfig(
             aspect_ratio=aspect_ratio,
+            resolution=resolution,
             number_of_videos=1,
-            person_generation="allow_adult",
-            enhance_prompt=False,
+            person_generation="allow_all",
         ),
     )
     deadline = time.time() + timeout_seconds
@@ -366,7 +385,7 @@ def extend_video(prev_video_path: Path, prompt: str, out_path: Path, *,
         operation = client.operations.get(operation)
 
     for gen_video in (operation.result.generated_videos or []):
-        video_bytes = client.files.download(gen_video.video)
+        video_bytes = client.files.download(file=gen_video.video)
         video_data = bytes(video_bytes) if not isinstance(video_bytes, (bytes, bytearray)) else video_bytes
         Path(out_path).write_bytes(video_data)
         return True
