@@ -169,6 +169,11 @@ camera grammar, motion, and audio must ALL be in the prompt
 as a tonal and composition anchor when writing `image_prompt`s for that scene's panels
 - emotional_note and transition are required on every panel
 - Keep character names consistent with the cast
+- Avoid unnecessary repetition across panels: each panel's `image_prompt` and
+  `emotional_note` must read as visually/dramatically distinct from every other
+  panel in this scene — vary the framing, focal detail, or moment described —
+  never restate the same composition or description twice just because the
+  shots cover the same characters/setting
 
 SCENE DESIGN BUNDLES:
 {bundles}

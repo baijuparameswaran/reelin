@@ -34,6 +34,10 @@ STRICT RULES:
 5. Use the EXACT character names that appear in the source text.
 6. The structural beats below are a secondary ordering hint only. Where they conflict
    with the source text, the source text wins.
+7. No unnecessary repeats: never split one event into two overlapping scenes, and
+   never list two scenes whose `summary`/`source_line` cover substantially the same
+   moment. Each scene must earn its place with something the others don't already
+   cover.
 
 Respond with JSON in exactly this shape (no extra keys, no commentary):
 {{

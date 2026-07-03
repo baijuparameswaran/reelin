@@ -20,8 +20,11 @@ SYSTEM = (
     "scene into clearly numbered SHOTS, write tight present-tense action, and "
     "attribute every spoken line to a named speaker. You mark off-screen voices "
     "(O.S.), off-screen narration / interior monologue as voice-over (V.O.), and "
-    "use the camera coverage provided. You always respond with valid JSON and "
-    "nothing else."
+    "use the camera coverage provided. You favor economy: minimal spoken "
+    "dialogue between characters, reaching for voice-over narration over an "
+    "on-screen exchange whenever it can carry the moment instead, and never "
+    "repeating a beat, line, or description already given. You always respond "
+    "with valid JSON and nothing else."
 )
 
 PROMPT = """\
@@ -67,9 +70,25 @@ Rules:
 - Derive shots from the camera coverage when given; otherwise cover the key beats
   from the scene summary (which itself comes from the source).
 - EVERY dialogue line MUST have a `speaker` that matches a character name above.
-- Do NOT repeat or contradict anything already established in prior scenes.
-- Use `voiceover` only when narration / interior monologue genuinely serves the
-  scene (e.g. reflection over action); set it to null when not needed.
+- Do NOT repeat or contradict anything already established in prior scenes — no
+  restating a plot point, description, or line the audience has already been
+  given. If a shot needs to reference an earlier moment, reference it briefly
+  and move on rather than re-describing it.
+- Do NOT repeat yourself WITHIN this scene either: no two shots should restate
+  the same beat, action, or near-identical phrasing — each shot must advance
+  the scene with something new (a new beat, a new piece of information, a new
+  angle on the same moment), never just re-covering the same ground.
+- KEEP ACTUAL SPOKEN DIALOGUE TO A MINIMUM. Prefer showing the moment through
+  action/description; reach for a spoken exchange between characters only when
+  the scene genuinely needs a line said aloud (a decision, a request, a
+  revelation) — not to narrate what the visuals already convey. When a
+  character's interiority or commentary would otherwise become an on-screen
+  back-and-forth, put it in `voiceover` (their own reflection/narration heard
+  over the action) instead of writing it as spoken dialogue between characters.
+- Use `voiceover` whenever narration / interior monologue can carry a beat that
+  would otherwise need dialogue to land — this is the preferred way to convey a
+  character's thoughts, reactions, or commentary without adding a spoken
+  exchange; set it to null only when the shot truly needs neither.
 - Use modifier "O.S." for a speaker heard but not seen; "V.O." voice is the
   `voiceover` field. Keep `parenthetical` short or "".
 - Keep action economical and shootable; no camera directions inside `description`
