@@ -24,8 +24,9 @@ writes its own artifact — re-run a single stage without the whole pipeline. (S
 runs are direct, with no HITL gate; use `--feedback` to pass a revision note.)
 
 The pipeline pauses for human review after each stage (approve with Enter, type
-feedback to re-run that stage, or 'stop' to pause). Toggle this in
-`config/models.yaml` under `hitl` (set `enabled: false` for unattended runs;
+'view' to read the full output in $EDITOR/$VISUAL — default vim — before
+deciding, type feedback to re-run that stage, or 'stop' to pause). Toggle this
+in `config/models.yaml` under `hitl` (set `enabled: false` for unattended runs;
 tune `timeout_seconds` for the auto-approve fallback).
 
 Each approved stage is checkpointed to `output/<stage>.json`. After a pause

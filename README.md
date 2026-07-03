@@ -189,9 +189,12 @@ After each LLM stage the pipeline pauses at a **review gate**: it prints a
 summary — including that stage's **story-fidelity score** (see
 [Story fidelity](#story-fidelity-consistency-scoring)) so you can judge whether
 the output still matches the source — and waits for you to either approve (press
-Enter) or type feedback. Type feedback and the stage re-runs with your notes
-appended to its prompt — iterate until you approve. Parallel branches are gated
-one after another once they finish.
+Enter), type feedback, or type **`view`** to open the stage's full output (not
+just the summary, which can be truncated) in `$EDITOR`/`$VISUAL` — default
+`vim` — before deciding; the gate reprompts once you close the editor (any
+edits made there aren't read back, it's for reading only). Type feedback and
+the stage re-runs with your notes appended to its prompt — iterate until you
+approve. Parallel branches are gated one after another once they finish.
 
 The gate is controlled in `config/models.yaml` under `hitl`:
 
