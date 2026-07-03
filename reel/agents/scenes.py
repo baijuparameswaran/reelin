@@ -6,6 +6,7 @@ event in the source. Structural beats are a secondary ordering scaffold only.
 from __future__ import annotations
 
 import json
+import re
 
 from .. import llm
 from ..llm import MAX_CHARS
@@ -63,11 +64,19 @@ def _validate(scenes: list[dict], source_text: str) -> tuple[list[dict], list[di
     """Split into (valid, dropped) by whether source_line is found in the source
     text. Dropped scenes are returned (not silently discarded) so the caller can
     surface them — a scene with a hallucinated source_line is still worth showing
-    the operator, e.g. to explain a gap in the scene numbering at the gate."""
+    the operator, e.g. to explain a gap in the scene numbering at the gate.
+
+    Whitespace is collapsed before matching: the ingested source text keeps its
+    original hard line-wraps (e.g. "Marcel\\nhad watched"), but a model-written
+    source_line naturally uses normal spacing ("Marcel had watched") — an
+    unnormalized check flags a real, verbatim quote as hallucinated whenever its
+    prefix happens to straddle a line break."""
+    norm_source = re.sub(r"\s+", " ", source_text).lower()
     valid, dropped = [], []
     for sc in scenes:
         sl = (sc.get("source_line") or "").strip()
-        if sl and len(sl) >= 5 and sl[:8].lower() not in source_text.lower():
+        norm_sl = re.sub(r"\s+", " ", sl)
+        if norm_sl and len(norm_sl) >= 5 and norm_sl[:8].lower() not in norm_source:
             dropped.append(dict(sc, drop_reason="source_line not found in source text"))
             continue
         valid.append(sc)
