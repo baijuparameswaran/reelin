@@ -4,9 +4,19 @@ After each pipeline stage the gate shows a summary of the output and waits
 for the operator to approve or supply feedback. If feedback is given the
 calling stage re-runs with it appended to its prompt. Parallel stages present
 for approval sequentially (one terminal, one interactive prompt at a time).
+
 Typing 'view' opens the stage's FULL output (not just the summary) in
-$EDITOR/$VISUAL (default vim) to read before deciding — the gate reprompts
-once you close the editor.
+$EDITOR/$VISUAL (default vim) to read before deciding — read-only, the gate
+reprompts with the same result once you close the editor. Typing 'edit' opens
+the same file for actual editing: save + quit applies your changes as the new
+candidate result, which the caller (`pipeline._gated`) re-checks against
+fidelity/genre before showing this same gate again (approve / feedback /
+'view' / 'edit' again / 'stop') — an edit is never auto-approved on its own.
+
+The auto-approve timeout only ever counts down while waiting for your first
+keystroke at the prompt; it is not running at all while you're inside the
+editor for 'view' or 'edit' (see `_read`), and restarts fresh once the gate
+redisplays afterward.
 
 Config knobs in config/models.yaml under `hitl`:
   enabled         — false skips all gates (fully automated)
@@ -34,14 +44,23 @@ class Decision:
     approved: bool
     feedback: str = field(default="")
     stop: bool = False
+    edited: dict | None = None
+    # ^ set when the operator made a real, valid edit in-editor. The caller
+    # (pipeline._gated) should replace its working result with this and loop
+    # back through fidelity/genre re-checking + the gate again — an edit is
+    # a new candidate, not an approval.
 
 
 # Typing any of these at a gate pauses the pipeline (completed stages stay saved).
 STOP_WORDS = {"stop", "pause", "quit", "q", "exit"}
 
-# Typing any of these opens the full stage output in an editor to read (not just
-# the (possibly truncated) summary), then reprompts the same gate.
-VIEW_WORDS = {"view", "v", "edit", "vim"}
+# Typing any of these opens the full stage output in $EDITOR to just read (not
+# just the possibly-truncated summary) — read-only, reprompts the same gate.
+VIEW_WORDS = {"view", "v"}
+
+# Typing any of these opens the full stage output in $EDITOR for actual editing;
+# a saved change becomes a new candidate result (see Decision.edited above).
+EDIT_WORDS = {"edit", "vim"}
 
 
 class Gate:
@@ -77,8 +96,8 @@ class Gate:
             )
             print(
                 f"\n{timeout_hint}press Enter to approve, type feedback, "
-                "'view' to read the full output in an editor, "
-                "or 'stop' to pause:\n",
+                "'view' to read the full output in an editor, 'edit' to modify "
+                "it directly, or 'stop' to pause:\n",
                 flush=True,
             )
 
@@ -99,6 +118,13 @@ class Gate:
             if first.lower() in VIEW_WORDS:
                 self._view_in_editor(stage, result)
                 continue  # redisplay the gate and reprompt
+
+            if first.lower() in EDIT_WORDS:
+                edited = self._edit_in_editor(stage, result)
+                if edited is None:
+                    continue  # no change / parse failed / editor failed — reprompt as-is
+                print(f"[gate] {stage} — edit applied, re-checking alignment …\n", flush=True)
+                return Decision(approved=False, edited=edited)
 
             # Collect multi-line feedback: keep reading until blank line
             lines = [first]
@@ -145,6 +171,61 @@ class Gate:
             Path(path).unlink(missing_ok=True)
         except OSError:
             pass
+
+    def _edit_in_editor(self, stage: str, result: dict) -> dict | None:
+        """Open the stage's full output in $EDITOR/$VISUAL for actual editing.
+
+        Returns the parsed edited dict when the operator saved a real, valid
+        change; None in every other case (no change made, editor failed to
+        launch, or the saved content isn't valid JSON) — in all of those the
+        original `result` is left completely untouched and an explanatory
+        message is printed instead of raising, so the gate can simply reprompt."""
+        editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "vim"
+        try:
+            original_text = json.dumps(result, ensure_ascii=False, indent=2)
+        except Exception as exc:
+            print(f"  ⚠ could not serialize output for editing: {exc}", flush=True)
+            return None
+
+        fd, path = tempfile.mkstemp(prefix=f"reel_gate_{stage}_", suffix=".json")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(original_text)
+
+        try:
+            print(f"  opening {stage} output in {editor} for editing "
+                 "(save + quit to apply; quit without saving to cancel) …",
+                 flush=True)
+            subprocess.call([editor, path])
+        except OSError as exc:
+            print(f"  ⚠ could not open editor {editor!r}: {exc} "
+                 f"— set $EDITOR/$VISUAL, or edit it yourself: {path}", flush=True)
+            return None
+
+        try:
+            edited_text = Path(path).read_text(encoding="utf-8")
+        finally:
+            try:
+                Path(path).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+        if edited_text.strip() == original_text.strip():
+            print("  no changes made — output unchanged\n", flush=True)
+            return None
+
+        try:
+            edited = json.loads(edited_text)
+        except Exception as exc:
+            print(f"  ⚠ edited content is not valid JSON ({exc}) — "
+                 "change discarded, original output kept\n", flush=True)
+            return None
+
+        if not isinstance(edited, dict):
+            print("  ⚠ edited content must be a JSON object — "
+                 "change discarded, original output kept\n", flush=True)
+            return None
+
+        return edited
 
     def _read(self, prompt: str) -> str | None:
         """Read one line with optional SIGALRM timeout. Returns None on timeout."""

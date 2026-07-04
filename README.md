@@ -188,20 +188,31 @@ per-stage genre/fidelity reports under `output/genre/` and `output/fidelity/`
 After each LLM stage the pipeline pauses at a **review gate**: it prints a
 summary — including that stage's **story-fidelity score** (see
 [Story fidelity](#story-fidelity-consistency-scoring)) so you can judge whether
-the output still matches the source — and waits for you to either approve (press
-Enter), type feedback, or type **`view`** to open the stage's full output (not
-just the summary, which can be truncated) in `$EDITOR`/`$VISUAL` — default
-`vim` — before deciding; the gate reprompts once you close the editor (any
-edits made there aren't read back, it's for reading only). Type feedback and
-the stage re-runs with your notes appended to its prompt — iterate until you
-approve. Parallel branches are gated one after another once they finish.
+the output still matches the source — and waits for you to either approve
+(press Enter), type feedback, or open the full output (not just the summary,
+which can be truncated) in `$EDITOR`/`$VISUAL` (default `vim`):
+
+- **`view`** — read-only; the gate reprompts with the same result once you
+  close the editor. Any edits made there are discarded.
+- **`edit`** — the same file, but for real changes: save + quit applies your
+  edit as a new candidate result, which is **re-checked against fidelity/genre**
+  before the same gate comes back up (approve / feedback / view / edit again /
+  stop) — an edit is never auto-approved on its own. An unchanged save, or
+  content that isn't valid JSON, is discarded with a message and the original
+  output is left untouched.
+
+The auto-approve timeout only counts down while waiting at the prompt — it
+isn't running at all while you're inside the editor for `view` or `edit`, and
+restarts fresh once the gate reprompts. Type feedback and the stage re-runs
+with your notes appended to its prompt — iterate until you approve. Parallel
+branches are gated one after another once they finish.
 
 The gate is controlled in `config/models.yaml` under `hitl`:
 
 ```yaml
 hitl:
   enabled: true          # false → fully automated, no prompts
-  timeout_seconds: 120   # auto-approve after N idle seconds (0 = wait forever)
+  timeout_seconds: 900   # auto-approve after N idle seconds (0 = wait forever)
 ```
 
 Set `enabled: false` for unattended / batch runs.

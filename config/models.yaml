@@ -15,10 +15,12 @@ ollama_host: http://localhost:11434
 
 # Human-in-the-loop gate (applied after every LLM stage).
 # Set enabled: false for fully automated / batch runs.
-# timeout_seconds: auto-approve after N seconds idle (0 = wait forever).
+# timeout_seconds: auto-approve after N seconds idle (0 = wait forever). Kept
+# generous so there's real time to read the summary, optionally 'view' the
+# full output in an editor, and compose feedback before it auto-approves.
 hitl:
   enabled: true
-  timeout_seconds: 120
+  timeout_seconds: 900
 
 # Character image generation — ONE image per character (the character
 # representation), saved to output/casting/<name>.png and used as the identity

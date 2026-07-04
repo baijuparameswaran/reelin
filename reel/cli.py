@@ -23,11 +23,14 @@ from prior `output/<input>.json` checkpoints (ingesting SOURCE on demand) and
 writes its own artifact — re-run a single stage without the whole pipeline. (Stage
 runs are direct, with no HITL gate; use `--feedback` to pass a revision note.)
 
-The pipeline pauses for human review after each stage (approve with Enter, type
-'view' to read the full output in $EDITOR/$VISUAL — default vim — before
-deciding, type feedback to re-run that stage, or 'stop' to pause). Toggle this
-in `config/models.yaml` under `hitl` (set `enabled: false` for unattended runs;
-tune `timeout_seconds` for the auto-approve fallback).
+The pipeline pauses for human review after each stage (approve with Enter,
+type feedback to re-run that stage, 'view' to read the full output in
+$EDITOR/$VISUAL — default vim — read-only, or 'edit' to open the same file
+for actual editing — a saved change is re-checked against fidelity/genre and
+brings the same gate back up rather than being auto-approved; 'stop' pauses).
+The auto-approve timeout isn't running while you're inside the editor. Toggle
+this in `config/models.yaml` under `hitl` (set `enabled: false` for unattended
+runs; tune `timeout_seconds` for the auto-approve fallback).
 
 Each approved stage is checkpointed to `output/<stage>.json`. After a pause
 (typing 'stop', Ctrl-C) or a failure, re-run with `--resume` to reload the

@@ -820,6 +820,16 @@ def _gated(
         if decision.stop:
             raise PipelineStopped(name)
 
+        if decision.edited is not None:
+            # A manual edit is a new candidate, not an approval: adopt it and loop
+            # back to the top — fidelity_fn/genre_fn re-score it fresh and the same
+            # gate (approve / feedback / view / edit again / stop) reappears. Skips
+            # rerun_fn/escalation below entirely; no model call, no profile change.
+            _log(f"      [{name}] manual edit applied — re-checking fidelity/genre …")
+            result = decision.edited
+            iteration += 1
+            continue
+
         # Extract numeric scores (None when a checker wasn't run / returned no score).
         fid_score = report.get("fidelity_score") if report else None
         gen_score = grep.get("genre_score") if grep else None
