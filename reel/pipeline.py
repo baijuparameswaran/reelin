@@ -823,7 +823,7 @@ def _gated(
         if decision.edited is not None:
             # A manual edit is a new candidate, not an approval: adopt it and loop
             # back to the top — fidelity_fn/genre_fn re-score it fresh and the same
-            # gate (approve / feedback / view / edit again / stop) reappears. Skips
+            # gate (approve / feedback / view again / stop) reappears. Skips
             # rerun_fn/escalation below entirely; no model call, no profile change.
             _log(f"      [{name}] manual edit applied — re-checking fidelity/genre …")
             result = decision.edited

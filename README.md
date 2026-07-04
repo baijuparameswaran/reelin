@@ -189,23 +189,23 @@ After each LLM stage the pipeline pauses at a **review gate**: it prints a
 summary — including that stage's **story-fidelity score** (see
 [Story fidelity](#story-fidelity-consistency-scoring)) so you can judge whether
 the output still matches the source — and waits for you to either approve
-(press Enter), type feedback, or open the full output (not just the summary,
-which can be truncated) in `$EDITOR`/`$VISUAL` (default `vim`):
+(press Enter), type feedback, type **`view`** to open the full output (not
+just the summary, which can be truncated) in `$EDITOR`/`$VISUAL` (default
+`vim`), or `stop` to pause.
 
-- **`view`** — read-only; the gate reprompts with the same result once you
-  close the editor. Any edits made there are discarded.
-- **`edit`** — the same file, but for real changes: save + quit applies your
-  edit as a new candidate result, which is **re-checked against fidelity/genre**
-  before the same gate comes back up (approve / feedback / view / edit again /
-  stop) — an edit is never auto-approved on its own. An unchanged save, or
-  content that isn't valid JSON, is discarded with a message and the original
-  output is left untouched.
+`view` is both read and edit in one: close the editor without saving and the
+gate just reprompts with the same result unchanged. Save a real, valid change
+and it's applied as a new candidate result, **re-checked against
+fidelity/genre** before the same gate comes back up (approve / feedback /
+`view` again / `stop`) — an edit is never auto-approved on its own. A save
+with no actual change, or content that isn't valid JSON, is discarded with a
+message and the original output is left untouched.
 
 The auto-approve timeout only counts down while waiting at the prompt — it
-isn't running at all while you're inside the editor for `view` or `edit`, and
-restarts fresh once the gate reprompts. Type feedback and the stage re-runs
-with your notes appended to its prompt — iterate until you approve. Parallel
-branches are gated one after another once they finish.
+isn't running at all while you're inside the editor, and restarts fresh once
+the gate reprompts. Type feedback and the stage re-runs with your notes
+appended to its prompt — iterate until you approve. Parallel branches are
+gated one after another once they finish.
 
 The gate is controlled in `config/models.yaml` under `hitl`:
 

@@ -24,11 +24,12 @@ writes its own artifact — re-run a single stage without the whole pipeline. (S
 runs are direct, with no HITL gate; use `--feedback` to pass a revision note.)
 
 The pipeline pauses for human review after each stage (approve with Enter,
-type feedback to re-run that stage, 'view' to read the full output in
-$EDITOR/$VISUAL — default vim — read-only, or 'edit' to open the same file
-for actual editing — a saved change is re-checked against fidelity/genre and
-brings the same gate back up rather than being auto-approved; 'stop' pauses).
-The auto-approve timeout isn't running while you're inside the editor. Toggle
+type feedback to re-run that stage, 'view' to open the full output in
+$EDITOR/$VISUAL — default vim — to either just read it or edit and save it,
+or 'stop' to pause). Saving a real change there is re-checked against
+fidelity/genre and brings the same gate back up rather than being
+auto-approved outright; closing without saving just reprompts. The
+auto-approve timeout isn't running while you're inside the editor. Toggle
 this in `config/models.yaml` under `hitl` (set `enabled: false` for unattended
 runs; tune `timeout_seconds` for the auto-approve fallback).
 

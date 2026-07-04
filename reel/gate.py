@@ -6,17 +6,16 @@ calling stage re-runs with it appended to its prompt. Parallel stages present
 for approval sequentially (one terminal, one interactive prompt at a time).
 
 Typing 'view' opens the stage's FULL output (not just the summary) in
-$EDITOR/$VISUAL (default vim) to read before deciding — read-only, the gate
-reprompts with the same result once you close the editor. Typing 'edit' opens
-the same file for actual editing: save + quit applies your changes as the new
-candidate result, which the caller (`pipeline._gated`) re-checks against
-fidelity/genre before showing this same gate again (approve / feedback /
-'view' / 'edit' again / 'stop') — an edit is never auto-approved on its own.
+$EDITOR/$VISUAL (default vim) — read it, or edit it and save. Closing the
+editor unchanged just reprompts the same gate with the same result. Saving a
+real, valid change applies it as a new candidate, which the caller
+(`pipeline._gated`) re-checks against fidelity/genre before showing this same
+gate again (approve / feedback / 'view' again / 'stop') — an edit is never
+auto-approved on its own.
 
 The auto-approve timeout only ever counts down while waiting for your first
 keystroke at the prompt; it is not running at all while you're inside the
-editor for 'view' or 'edit' (see `_read`), and restarts fresh once the gate
-redisplays afterward.
+editor (see `_read`), and restarts fresh once the gate redisplays afterward.
 
 Config knobs in config/models.yaml under `hitl`:
   enabled         — false skips all gates (fully automated)
@@ -54,13 +53,10 @@ class Decision:
 # Typing any of these at a gate pauses the pipeline (completed stages stay saved).
 STOP_WORDS = {"stop", "pause", "quit", "q", "exit"}
 
-# Typing any of these opens the full stage output in $EDITOR to just read (not
-# just the possibly-truncated summary) — read-only, reprompts the same gate.
-VIEW_WORDS = {"view", "v"}
-
-# Typing any of these opens the full stage output in $EDITOR for actual editing;
-# a saved change becomes a new candidate result (see Decision.edited above).
-EDIT_WORDS = {"edit", "vim"}
+# Typing any of these opens the full stage output in $EDITOR — read it, or edit
+# and save it. Unchanged/invalid content just reprompts the same gate; a real,
+# valid edit becomes a new candidate result (see Decision.edited above).
+VIEW_WORDS = {"view", "v", "edit", "vim"}
 
 
 class Gate:
@@ -96,8 +92,8 @@ class Gate:
             )
             print(
                 f"\n{timeout_hint}press Enter to approve, type feedback, "
-                "'view' to read the full output in an editor, 'edit' to modify "
-                "it directly, or 'stop' to pause:\n",
+                "'view' to open the full output in an editor (read it, or edit "
+                "and save to submit a new candidate), or 'stop' to pause:\n",
                 flush=True,
             )
 
@@ -116,13 +112,9 @@ class Gate:
                 return Decision(approved=False, stop=True)
 
             if first.lower() in VIEW_WORDS:
-                self._view_in_editor(stage, result)
-                continue  # redisplay the gate and reprompt
-
-            if first.lower() in EDIT_WORDS:
                 edited = self._edit_in_editor(stage, result)
                 if edited is None:
-                    continue  # no change / parse failed / editor failed — reprompt as-is
+                    continue  # unchanged / parse failed / editor failed — reprompt as-is
                 print(f"[gate] {stage} — edit applied, re-checking alignment …\n", flush=True)
                 return Decision(approved=False, edited=edited)
 
@@ -139,47 +131,16 @@ class Gate:
             print(f"[gate] {stage} — re-running with feedback …\n", flush=True)
             return Decision(approved=False, feedback=feedback)
 
-    def _view_in_editor(self, stage: str, result: dict) -> None:
-        """Write the stage's full output to a temp file and open it in
-        $EDITOR/$VISUAL (default vim) — read-only in spirit: any edits made are
-        NOT read back or applied, this is purely for reading past what the
-        (possibly truncated) gate summary shows. Never raises; a missing/broken
-        editor just prints a hint and returns to the gate prompt."""
-        editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "vim"
-        try:
-            text = json.dumps(result, ensure_ascii=False, indent=2)
-        except Exception as exc:
-            print(f"  ⚠ could not serialize output for viewing: {exc}", flush=True)
-            return
-
-        fd, path = tempfile.mkstemp(prefix=f"reel_gate_{stage}_", suffix=".json")
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(text)
-
-        try:
-            print(f"  opening {stage} output in {editor} (edits are not saved back) …",
-                 flush=True)
-            subprocess.call([editor, path])
-        except OSError as exc:
-            # Editor failed to launch (e.g. not on PATH) — leave the file in
-            # place so the hint below still points somewhere real.
-            print(f"  ⚠ could not open editor {editor!r}: {exc} "
-                 f"— set $EDITOR/$VISUAL, or read it yourself: {path}", flush=True)
-            return
-
-        try:
-            Path(path).unlink(missing_ok=True)
-        except OSError:
-            pass
-
     def _edit_in_editor(self, stage: str, result: dict) -> dict | None:
-        """Open the stage's full output in $EDITOR/$VISUAL for actual editing.
+        """Open the stage's full output in $EDITOR/$VISUAL — for reading, or
+        for real editing; the same file serves both.
 
         Returns the parsed edited dict when the operator saved a real, valid
-        change; None in every other case (no change made, editor failed to
-        launch, or the saved content isn't valid JSON) — in all of those the
-        original `result` is left completely untouched and an explanatory
-        message is printed instead of raising, so the gate can simply reprompt."""
+        change; None in every other case (no change made — including a pure
+        read with no save — editor failed to launch, or the saved content
+        isn't valid JSON) — in all of those the original `result` is left
+        completely untouched and an explanatory message is printed instead of
+        raising, so the gate can simply reprompt."""
         editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "vim"
         try:
             original_text = json.dumps(result, ensure_ascii=False, indent=2)
