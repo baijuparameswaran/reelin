@@ -66,6 +66,9 @@ Rules:
 - transition_to_next should be empty string for the final scene
 - genre should influence the sonic palette (thriller → tension drones; \
 drama → sparse naturalism; comedy → lighter textures, etc.)
+- Scenes sharing the same `location` share the same base ambient_bed (that \
+place has a fixed, rendered acoustic character) — only specific sound_events \
+should vary between them, not the room tone itself
 
 SCENE LIST:
 {scenes}
@@ -81,7 +84,7 @@ def design_soundscape(
     profile = profile or llm.agent_profile("soundscape")
     scene_list = json.dumps(
         [
-            {k: s[k] for k in ("number", "slugline", "summary", "purpose",
+            {k: s[k] for k in ("number", "slugline", "location", "summary", "purpose",
                                 "source_line", "chunk_indices")
              if k in s}
             for s in scenes.get("scenes", [])

@@ -2,6 +2,15 @@
 
 The source text is the ONLY authority — every scene must correspond to an actual
 event in the source. Structural beats are a secondary ordering scaffold only.
+
+Each scene also carries a `location` — the plain name of its physical setting,
+identical across every scene set in the same place (independent of the DAY/NIGHT
+slugline formatting). This locks the scene→location association explicitly
+rather than leaving it to be fuzzy-matched from slugline text later, and is the
+seed for the casting agent's location-casting step (see `reel/agents/casting.py`
+`_location_entries`) — a location need not recur across scenes to be worth
+naming precisely; even a one-scene setting benefits from a consistent reference
+across that scene's own panels.
 """
 from __future__ import annotations
 
@@ -38,6 +47,14 @@ STRICT RULES:
    never list two scenes whose `summary`/`source_line` cover substantially the same
    moment. Each scene must earn its place with something the others don't already
    cover.
+8. `location` is the plain NAME of the physical setting (e.g. "Rusty Anchor Bar",
+   "Lumen Field", "Antwerp café") — NOT the full slugline formatting (no "INT./EXT."
+   or "- DAY/NIGHT"). If two or more scenes are set in the same real place, they
+   MUST use the exact identical `location` string, even if their sluglines differ
+   (e.g. one is DAY and another is NIGHT at the same place) — this name is the
+   anchor a later stage uses to keep that location visually consistent, so
+   inconsistent naming of the same place defeats the purpose. A location need not
+   recur to deserve its own name; name it precisely either way.
 
 Respond with JSON in exactly this shape (no extra keys, no commentary):
 {{
@@ -45,6 +62,7 @@ Respond with JSON in exactly this shape (no extra keys, no commentary):
     {{
       "number": 1,
       "slugline": "INT./EXT. LOCATION - DAY/NIGHT",
+      "location": "plain name of the physical setting, identical across every scene set there",
       "source_line": "short verbatim phrase from the source text that this scene covers",
       "summary": "one or two sentences of what actually happens in the source",
       "characters": ["EXACT NAME as in source", "..."],

@@ -73,7 +73,8 @@ def _scenes(ctx, *, profile=None, feedback=None, **_):
     return segment_scenes(ctx["source"], ctx["structure"], profile=profile, feedback=feedback)
 
 def _casting(ctx, *, profile=None, feedback=None, **_):
-    return cast_characters(ctx["structure"], ctx["characters"], profile, feedback=feedback)
+    return cast_characters(ctx["structure"], ctx["characters"], profile, feedback=feedback,
+                           scenes=ctx.get("scenes"))
 
 def _soundscape(ctx, *, profile=None, feedback=None, **_):
     return design_soundscape(ctx["structure"], ctx["scenes"], profile, feedback=feedback)
@@ -114,10 +115,10 @@ def _moodboard_tiles(ctx, *, out, **_):
     P._render_moodboard_tiles(mb, Path(out))
     return mb
 
-def _scene_render(ctx, *, out, **_):
+def _scene_render(ctx, *, out, max_scenes=None, **_):
     from . import pipeline as P
     return P._render_scene_frames(ctx["storyboard"], ctx["casting"], Path(out),
-                                  characters=ctx.get("characters"))
+                                  max_scenes=max_scenes, characters=ctx.get("characters"))
 
 def _fidelity(ctx, *, profile=None, feedback=None, **_):
     source = ctx["source"]
@@ -135,7 +136,8 @@ STAGES: list[Stage] = [
           desc="film-wide visual-tone moodboard (steers downstream stages)"),
     Stage("characters", ["source"], _characters, desc="character breakdown"),
     Stage("scenes", ["source", "structure"], _scenes, desc="numbered scene list"),
-    Stage("casting", ["structure", "characters"], _casting, desc="actor/character casting"),
+    Stage("casting", ["structure", "characters"], _casting, optional=("scenes",),
+          desc="actor/character/location casting"),
     Stage("soundscape", ["structure", "scenes"], _soundscape, desc="score / sound design"),
     Stage("visuals", ["structure", "scenes"], _visuals, desc="art production / look"),
     Stage("cinematography", ["structure", "scenes"], _cinematography, desc="shot list"),
@@ -147,7 +149,7 @@ STAGES: list[Stage] = [
           optional=("characters", "screenplay", "source", "moodboard"),
           desc="production storyboard: scene header + visual/audio overview + panels with full camera grammar"),
     Stage("casting_images", ["casting"], _casting_images, produces="casting",
-          desc="render character representation images (image provider)"),
+          desc="render character + location representation images (image provider)"),
     Stage("moodboard_tiles", ["moodboard"], _moodboard_tiles, produces="moodboard",
           desc="render moodboard reference tiles to images (image provider)"),
     Stage("scene_render", ["storyboard", "casting"], _scene_render, produces="scene_render",

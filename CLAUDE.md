@@ -184,14 +184,20 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
   `run_group()` in `pipeline.py` is the checkpoint-aware stage runner (load → or
   compute concurrently → gate → save); stop raises `PipelineStopped`, caught in
   `cli.main`. A stage interrupted mid-flight is never half-saved — it re-runs.
-- **Casting data model:** each entry has an `actor` block (performer's own features)
-  and a `character` block (that actor aged/costumed into the role). **Image
-  generation renders the character only** — exactly one image per character
-  (`output/casting/<name>.png`) from `character.visual_prompt`, via the **Gemini
-  image API** (`imagegen` backend `gemini`, default model `gemini-2.5-flash-image`).
-  This character image is the **identity seed** for Veo. No actor render, no stock
-  photo lookup — the old Openverse → actor → character img2img chain and `stock.py`
-  have been removed. Best-effort: no API key → skip with a hint.
+- **Casting data model:** each character entry has an `actor` block (performer's
+  own features) and a `character` block (that actor aged/costumed into the role).
+  **Image generation renders the character only** — exactly one image per
+  character (`output/casting/<name>.png`) from `character.visual_prompt`, via the
+  **Gemini image API** (`imagegen` backend `gemini`, default model
+  `gemini-2.5-flash-image`). This character image is the **identity seed** for
+  Veo. No actor render, no stock photo lookup — the old Openverse → actor →
+  character img2img chain and `stock.py` have been removed. Best-effort: no API
+  key → skip with a hint. **Locations are cast the same way** (`kind: "location"`
+  entries, seeded from `scenes.py`'s per-scene `location` field, one cast entry
+  per distinct place regardless of scene count) but have no `actor` layer — just
+  a `character.visual_prompt` showing the space's own architecture/decor, the
+  inverse of a character portrait's people/scene isolation. `casting` therefore
+  now runs *after* `scenes` (needs its scene→location mapping), not concurrently.
 - **Scene rendering = image-to-video:** after storyboard + screenplay, the pipeline
   renders each storyboard panel as a **video clip** via `i2v`
   (`pipeline._render_scene_frames` → `output/video/`), default backend **Gemini
@@ -275,23 +281,122 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
   `pipeline.py`, so a future non-Veo backend can supply an equivalent module.
   Guide snapshot cached in `config/veo_guide_snapshot.json`; refresh manually
   with `python -m reel.cli veo-sync`.
+- **Locations are now cast alongside characters, incrementally (Increments 1–4
+  of 5 done; video wiring paused on purpose — see below).** `scenes.py` gives
+  each scene an explicit `location` field (the plain name of its physical
+  setting, identical across every scene set there, independent of DAY/NIGHT —
+  a location need not recur to get one). `casting.py` casts each distinct
+  location (`kind: "location"`, no `actor` layer — just a locked
+  `character.visual_prompt` showing the space's own architecture/decor with no
+  people/action/scene-mood baked in, the inverse of a character portrait's
+  isolation rule). Because casting now needs scenes' scene→location mapping,
+  **`casting` runs after `scenes`, not concurrently with it** (`pipeline.run`'s
+  stage 3/4 split). `_render_casting_images` renders one reference image per
+  location the same way it does per character (kind-agnostic, same hash
+  invalidation); the active-names cap that limits rendering to `--max-scenes`
+  now includes each capped scene's location too. `screenplay.py` and
+  `storyboard.py` both got a locked-location block fed into their prompts (so
+  action/`image_prompt`s stay consistent with the rendered reference) and a
+  fix for a real bug: their "no characters listed → fall back to every cast
+  entry" paths would have treated a location as a character (wrong fields,
+  possibly wrong identity seed). Same class of bug fixed in `fountain.py`'s
+  `_resolve_character` (a location's name commonly appears in its own scenes'
+  action text, which would otherwise win the character-identity match).
+  `visuals.py`/`soundscape.py`/`cinematography.py` all gained the `location`
+  field in their scene input plus a rule that scenes sharing a location share
+  its base color/lighting, ambient bed, and coverage layout. **Increment 5
+  (wiring location + multi-character references into Veo's `reference_images`
+  for a scene's opening frame) is intentionally not started** — paused per
+  explicit instruction while this alignment pass across screenplay/storyboard/
+  visuals/soundscape/cinematography/fountain was done first. Live-tested
+  through `casting`→`casting_images` (both location portraits rendered
+  correctly, isolated from character/scene content) and `soundscape`/`visuals`/
+  `cinematography`/`screenplay` (screenplay's action independently converged on
+  the same architectural details as the rendered location image — "mosaic tile
+  backsplash", "exposed brick walls" — without being told the exact wording,
+  confirming the locked-location block is doing its job); `storyboard` was
+  still running (synthesis profile, 5 scenes sequential) when this note was
+  written and not yet confirmed end-to-end.
 - **Open investigation (not yet implemented):** multi-character reference
   images for Veo (`reference_images`, up to 3 `ASSET` images, mutually
-  exclusive with continuity per-call) and for Gemini image gen (`refs`, up to
-  20 images, no such exclusivity but not wired through `imagegen.py` yet); Kling
-  3.0 as a possible alternate provider for cross-scene subject-locked
-  generation, not yet vetted against its real API. Full notes in memory
-  (`veo_character_consistency` — see auto-memory for this project).
+  exclusive with continuity per-call — this is Increment 5 above) and for
+  Gemini image gen (`refs`, up to 20 images, no such exclusivity but not wired
+  through `imagegen.py` yet); Kling 3.0 as a possible alternate provider for
+  cross-scene subject-locked generation, not yet vetted against its real API.
+  Full notes in memory (`veo_character_consistency` — see auto-memory for this
+  project).
 - **Recommended next action:** Enable GPU — replace the snap Ollama:
   `! curl -fsSL https://ollama.com/install.sh | sh`
   Then re-pull: `ollama pull qwen3:4b && ollama pull qwen3:8b`.
   Verify: `ollama ps` → "PROCESSOR" should show GPU or GPU+CPU.
-- **Next up:** live smoke-test the SDK video-call fixes on a real run; decide on
-  the multi-character-reference policy (see investigation above); moodboard
-  tile auto-render (opt-in); richer ingest (PDF/EPUB/.fdx); draft all scenes
-  (not just first N); edit / sound mix / final cut phase.
+- **Next up:** confirm the still-running `storyboard` live test (bundle
+  location/cast data, panel consistency with the rendered location image);
+  Increment 5 — wire location + character references into Veo's
+  `reference_images` for a scene's opening frame; live smoke-test the SDK
+  video-call fixes on a real run; moodboard tile auto-render (opt-in); richer
+  ingest (PDF/EPUB/.fdx); draft all scenes (not just first N); edit / sound mix
+  / final cut phase.
 
 ## Session log
+- 2026-07-04 — **Locations cast alongside characters (Increments 1–4 of a
+  5-step plan; video wiring deliberately paused).** Extended the "lock a
+  visual identity, render one reference image" treatment already used for
+  characters to scene *locations* (a bar, a stadium, a café), so the
+  environment stays visually consistent across every scene set there — the
+  same problem casting already solved for people. Built incrementally,
+  confirming each step live before the next: (1) `scenes.py` gained an
+  explicit `location` field per scene, the plain name of the physical
+  setting, identical across every scene sharing a real place (independent of
+  DAY/NIGHT slugline formatting) — a location need not recur to get one, since
+  even a single scene benefits from consistency across its own panels; (2)+(3)
+  `casting.py` collects the distinct `location` values from scenes.json (pure
+  dedup, no LLM call) and casts each one as a `kind: "location"` entry — no
+  `actor` layer, just a locked `character.visual_prompt` — inverting the
+  character-portrait isolation rule (a location reference *should* show its
+  architecture/decor, just with no people/action/scene-mood baked in, so it
+  stays a clean background plate); (4) `_render_casting_images` needed no
+  change (already kind-agnostic — just reads `character.visual_prompt`), but
+  the `--max-scenes`-capped active-names filter in `pipeline.run` was missing
+  locations entirely, so a rendered scene's location portrait would've been
+  silently skipped — fixed. Because casting now depends on scenes' scene→
+  location mapping, **`casting` runs after `scenes`, not concurrently** —
+  `pipeline.run`'s stage 3/10 (scenes) and 4/10 (casting) split, previously one
+  concurrent "3–4/10" group. Live-verified: `stage casting` correctly produced
+  both character entries (still isolated, gender-fixed from the prior session)
+  and location entries (architecture-only, e.g. "exposed brick walls...
+  empty of people... no specific time of day"); `stage casting_images`
+  rendered all four to `output/casting/*.png` with correct `image_path`s.
+  **User then asked whether screenplay/storyboard were aligned to the new
+  format — they weren't**, surfacing a real audit: `screenplay.py`'s and
+  `storyboard.py`'s "no characters listed → fall back to every cast entry"
+  paths would have treated a location as a character (wrong fields, possibly
+  wrong video identity seed); same bug in `fountain.py`'s `_resolve_character`
+  (a location's own name commonly appears in its own scenes' action text,
+  which would otherwise win the character-identity match ahead of the actual
+  character). All three fixed to exclude `kind: "location"` from
+  character-shaped fallbacks/matching. Added a genuine locked-location
+  reference into both prompts: `screenplay.py` gained `_scene_location_brief`
+  (a "Locked setting (NAME): <visual_prompt>" block per scene) and
+  `storyboard.py`'s `_scene_bundles` gained a `location` key (name +
+  visual_prompt + reference_image) with a prompt rule to keep every panel's
+  `image_prompt` consistent with it. `visuals.py`/`soundscape.py`/
+  `cinematography.py` all gained `location` in their scene input plus a rule
+  that scenes sharing a location share its base color/lighting, ambient bed,
+  and shot coverage layout (only mood/specific events should vary). Live-
+  verified `soundscape`/`visuals`/`cinematography`/`screenplay` end-to-end on
+  the current sample story — screenplay's action for the bar scene
+  independently converged on "mosaic tile backsplash" and "exposed brick
+  walls" (the location's own locked `visual_prompt`, not restated to it) and
+  correctly used mostly voice-over per the earlier session's economy rules;
+  `storyboard` was still running (synthesis profile, 5 scenes sequential — a
+  long real-world wait, confirmed genuinely working via climbing
+  `llama-server` CPU time/memory rather than hung) when this entry was
+  written, not yet confirmed. **Increment 5 — wiring location + character
+  references into Veo's `reference_images` for a scene's opening frame — was
+  explicitly NOT started**, per direct instruction to pause video rendering
+  and do this alignment pass first. A stray `casting.json`/`casting/` at the
+  repo root (dated well before this session's work) was noticed but left
+  alone, not part of this change.
 - 2026-07-03 — **google-genai SDK actually installed + real API bugs fixed;
   Veo audio-cue construction moved into veo_guide.py; scenes profile bumped;
   model tier explored.** Installed `google-genai` (was missing despite being in

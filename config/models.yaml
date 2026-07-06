@@ -277,7 +277,7 @@ profiles:
 agent_profiles:
   structure:       synthesis
   characters:      fast
-  casting:         fast
+  casting:         quality
   scenes:          quality
   soundscape:      fast
   visuals:         fast

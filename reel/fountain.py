@@ -138,10 +138,17 @@ def _sample(items: list, k: int) -> list:
 def _resolve_character(text: str, scene_dialogue: list, casting: dict, out) -> tuple[str | None, str | None]:
     """Best character + image for a beat: explicit name match in the beat text,
     then any character whose name appears in the surrounding dialogue, else the
-    first cast entry that has a rendered image."""
+    first cast entry that has a rendered image.
+
+    Excludes `kind: "location"` casting entries — a location's name (e.g. "Rusty
+    Anchor Bar") commonly appears right in a beat's action text, which would
+    otherwise win the exact-match check below and hand back a *place* as the
+    frame's character identity seed."""
     from pathlib import Path
     entries = []
     for c in casting.get("casting", []):
+        if c.get("kind") == "location":
+            continue
         img = (c.get("character") or {}).get("image_path") or c.get("image_path")
         entries.append((c.get("name", ""), img))
     blob = (text + " " + " ".join(w for _s, w in scene_dialogue)).lower()

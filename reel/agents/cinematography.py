@@ -88,6 +88,10 @@ Rules:
 low angles; romance → soft telephoto, slow dolly)
 - Motifs (a recurring angle, a recurring lens choice) should develop across scenes
 - transition_to_next should be empty string for the final scene
+- Scenes sharing the same `location` may reuse establishing/wide shots that read \
+the same fixed space (that place has a locked, rendered layout) — vary angle, \
+movement, and lens to keep coverage distinct, but don't imply a different \
+architecture or layout than an earlier scene at the same place
 
 SCENE LIST:
 {scenes}
@@ -103,7 +107,7 @@ def plan_cinematography(
     profile = profile or llm.agent_profile("cinematography")
     scene_list = json.dumps(
         [
-            {k: s[k] for k in ("number", "slugline", "summary", "purpose",
+            {k: s[k] for k in ("number", "slugline", "location", "summary", "purpose",
                                 "source_line", "chunk_indices")
              if k in s}
             for s in scenes.get("scenes", [])

@@ -129,14 +129,16 @@ The agent set converts raw text into screenplay material plus a full creative
 design (cast look, score, art, camera, and a per-moment storyboard).
 
 **The creative flow** — each box is an agent; same-column branches run
-concurrently where the host allows it (structure ‖ characters; scenes ‖ casting;
-soundscape ‖ visuals ‖ cinematography):
+concurrently where the host allows it (structure ‖ characters;
+soundscape ‖ visuals ‖ cinematography). `scenes` and `casting` run in sequence,
+not concurrently — casting also locks a visual reference per distinct scene
+*location*, so it needs scenes' output first:
 
 ```
-ingest ─┬─▶ structure ─▶ moodboard ─┬─▶ scenes ─┬─▶ soundscape ─────┐
-        └─▶ characters ──────────────┘           ├─▶ visuals ─────────┼─▶ storyboard ─┐
-                              casting ◀ characters└─▶ cinematography ──┘               ├─▶ render ─▶ assemble
-                                          screenplay ◀─ scenes + all designs ──────────┘
+ingest ─┬─▶ structure ─▶ moodboard ─┬─▶ scenes ─▶ casting ─┬─▶ soundscape ─────┐
+        └─▶ characters ──────────────┘                     ├─▶ visuals ─────────┼─▶ storyboard ─┐
+                                                             └─▶ cinematography ──┘               ├─▶ render ─▶ assemble
+                                          screenplay ◀─ scenes + all designs ──────────────────────┘
 ```
 
 **Cross-cutting agents** — set once, they shape and police *every* stage above
@@ -163,8 +165,8 @@ and [Story fidelity](#story-fidelity-consistency-scoring).
 | **structure** | story analyst | logline, genre, themes, tone, three-act beat sheet |
 | **moodboard** | production designer | film-wide visual-tone bible (color story, palette, lighting mood, textures, atmosphere, influences, render-ready tiles); **steers all downstream stages** |
 | **characters** | script analyst | every character — humans **and** animals/birds/creatures — each defined individually (kind, role, want, arc, appearance, voice, mannerisms); undetailed background masses collapse to one `group` |
-| **casting** | casting director | two layers per character — an **actor** (own role-independent look) and the **character** (that actor aged/costumed into the role); the **character** is rendered to an image via Gemini (see [Character image generation](#character-image-generation-gemini)) and used as the video identity reference |
-| **scenes** | screenwriter | numbered scene list (sluglines, summaries, purpose) |
+| **scenes** | screenwriter | numbered scene list (sluglines, summaries, purpose, and a `location` — the plain name of the physical setting, identical across every scene set in the same place) |
+| **casting** | casting director | two layers per character — an **actor** (own role-independent look) and the **character** (that actor aged/costumed into the role); also casts each distinct scene `location` (no actor layer — the space itself). Both are rendered to an image via Gemini (see [Character image generation](#character-image-generation-gemini)) and used as the video identity reference |
 | **soundscape** | sound / score | per-scene ambient bed, audio cues, silence, emotional function |
 | **visuals** | art production | per-scene color palette, lighting, filters, key props |
 | **cinematography** | director of photography | per-scene shot list (type, angle, movement, lens, framing) |
@@ -237,13 +239,19 @@ each completed `output/<stage>.json` and only recomputes the first stage that
 isn't done yet (and everything after it). A stage that was mid-flight when you
 stopped is never half-saved — it simply re-runs.
 
-## Character image generation (Gemini)
+## Character + location image generation (Gemini)
 
-The casting stage generates **one image per character — the character
-representation** — via the [Gemini image API](https://ai.google.dev/gemini-api/docs/image-generation)
-from each character's `visual_prompt`. This is the only image generation in the
-pipeline, and the resulting `output/casting/<name>.png` is the **identity
-reference** handed to the video stage.
+The casting stage generates **one image per casting entry** — per character
+(the character representation) **and** per distinct scene location — via the
+[Gemini image API](https://ai.google.dev/gemini-api/docs/image-generation),
+from each entry's `visual_prompt`. A character's portrait is isolated (plain
+neutral backdrop, no scene/props/location baked in — it's an identity reference
+reused across every scene); a location's reference is the inverse (it *should*
+show the place's own architecture/decor, just with no people or scene-specific
+mood baked in — it's a background plate reused across every scene set there).
+This is the only image generation in the pipeline, and the resulting
+`output/casting/<name>.png` files are the **identity/background references**
+handed to the video stage.
 
 ```yaml
 image:
@@ -335,7 +343,8 @@ Equivalently in Python:
 
 ```python
 from reel.stages import run_stage
-run_stage("casting", out="output")             # needs structure + characters checkpoints
+run_stage("casting", out="output")             # needs structure + characters; picks up
+                                                # scenes.json too if present (locations)
 run_stage("structure", input_path="story.txt") # ingests the source first
 ```
 

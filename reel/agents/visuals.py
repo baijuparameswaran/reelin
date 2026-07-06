@@ -77,6 +77,10 @@ set dressing
 - visual_moments should capture beats where the image itself carries meaning
 - visual_filter may be 'none' if the scene calls for flat naturalism
 - transition_to_next should be empty string for the final scene
+- Scenes sharing the same `location` share the same base color_palette and \
+lighting (that place has a fixed, rendered look) — only the mood/visual_filter \
+should shift between them (e.g. day vs. night at the same place), not the \
+underlying architecture or light sources
 - genre should influence the visual approach (thriller → high contrast, \
 deep shadows; drama → naturalistic light; period → desaturated warmth, etc.)
 
@@ -94,7 +98,7 @@ def design_visuals(
     profile = profile or llm.agent_profile("visuals")
     scene_list = json.dumps(
         [
-            {k: s[k] for k in ("number", "slugline", "summary", "purpose",
+            {k: s[k] for k in ("number", "slugline", "location", "summary", "purpose",
                                 "source_line", "chunk_indices")
              if k in s}
             for s in scenes.get("scenes", [])

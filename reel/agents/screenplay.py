@@ -36,7 +36,7 @@ Tone: {tone}
 {story_block}
 Characters in this scene (use these EXACT names as speakers):
 {characters}
-{casting_block}{prior_scenes_block}
+{casting_block}{location_block}{prior_scenes_block}
 Scene to write:
 - Slugline: {slugline}
 - What happens: {summary}
@@ -173,13 +173,18 @@ def _casting_lookup(casting: dict) -> dict[str, dict]:
 
 def _scene_casting_brief(names: list[str], lookup: dict[str, dict]) -> str:
     """The LOCKED on-screen look per character (casting), so action descriptions
-    stay true to what's actually rendered for video."""
+    stay true to what's actually rendered for video.
+
+    Excludes `kind: "location"` entries even in the no-names fallback — a
+    location has no `actor`/on-screen-look fields, so treating one as a
+    character here would just print its name with no usable detail."""
     if not lookup:
         return ""
+    fallback = [n for n, c in lookup.items() if c.get("kind") != "location"]
     rows = ["Locked on-screen look (keep action true to this):"]
-    for name in names or lookup.keys():
+    for name in names or fallback:
         c = lookup.get(name)
-        if not c:
+        if not c or c.get("kind") == "location":
             continue
         ch = c.get("character", c)
         bits = [ch.get("physical_form", ""), ch.get("age", ""), ch.get("costume", ch.get("wardrobe", "")),
@@ -187,6 +192,19 @@ def _scene_casting_brief(names: list[str], lookup: dict[str, dict]) -> str:
         detail = "; ".join(b for b in bits if b)
         rows.append(f"- {name}: {detail}" if detail else f"- {name}")
     return ("\n".join(rows) + "\n") if len(rows) > 1 else ""
+
+
+def _scene_location_brief(location: str, lookup: dict[str, dict]) -> str:
+    """The LOCKED physical setting (casting kind: "location"), so a scene's
+    action stays consistent with the rendered environment reference."""
+    loc = (location or "").strip()
+    if not loc:
+        return ""
+    c = lookup.get(loc)
+    if not c or c.get("kind") != "location":
+        return ""
+    vp = c.get("character", c).get("visual_prompt", "")
+    return f"Locked setting ({loc}): {vp}\n" if vp else ""
 
 
 def _char_lookup(characters: dict) -> dict[str, dict]:
@@ -287,6 +305,7 @@ def draft_screenplay(
             story_block=story_blk,
             characters=_scene_char_brief(scene_chars, char_lookup),
             casting_block=_scene_casting_brief(scene_chars, casting_lookup),
+            location_block=_scene_location_brief(scene.get("location", ""), casting_lookup),
             prior_scenes_block=_prior_scenes_block(drafted),
             slugline=slugline,
             scene_number=scene_num if scene_num is not None else 0,

@@ -3,16 +3,20 @@
 Phase graph:
 
     ingest ─┬─▶ structure ──┐
-            └─▶ characters ──┴─▶ scenes ─┬─▶ soundscape ─────┐
-                            └─▶ casting   ├─▶ visuals ─────────┼─▶ storyboard ─┐
-                                          └─▶ cinematography ──┘               ├─▶ assemble
-                                                              screenplay ──────┘
-   (structure & characters concurrent; scenes & casting concurrent)
+            └─▶ characters ──┴─▶ scenes ─▶ casting ─┬─▶ soundscape ─────┐
+                                                      ├─▶ visuals ─────────┼─▶ storyboard ─┐
+                                                      └─▶ cinematography ──┘               ├─▶ assemble
+                                                                          screenplay ──────┘
+   (structure & characters concurrent; scenes then casting run sequentially — casting
+   also casts each scene's `location` (scenes.py's scene→location field), so it needs
+   scenes' output and can no longer run concurrently with it)
    (soundscape, visuals, cinematography concurrent)
 
 Creative crew roles:
-  casting        — locks each character's visual form; renders one character image
-                   per character via Gemini (`output/casting/<name>.png`)
+  casting        — locks each character's visual form (and each distinct scene
+                   location's, kind: "location", no actor layer); renders one
+                   reference image per character/location via Gemini
+                   (`output/casting/<name>.png`)
   soundscape     — background score / sound design
   visuals        — art production (color, props, production design)
   cinematography — Director of Photography (shot types, angles, movement, lens)
@@ -114,8 +118,14 @@ def _summarize_scenes(r: dict) -> str:
 def _summarize_casting(r: dict) -> str:
     rows = []
     for c in r.get("casting", []):
-        actor = c.get("actor", c)
         character = c.get("character", c)
+        if c.get("kind") == "location":
+            rows.append(f"  · {c.get('name','?')}  [location]")
+            vp = character.get("visual_prompt", "")
+            if vp:
+                rows.append(f"      {vp[:80]}")
+            continue
+        actor = c.get("actor", c)
         brief = actor.get("casting_brief", "?")
         rows.append(f"  · {c.get('name','?')}: {brief[:70]}")
         pf = character.get("physical_form", "")
@@ -262,15 +272,17 @@ def _stale(asset: Path, hash_path: Path, current_hash: str) -> bool:
 
 def _render_casting_images(casting: dict, out: Path,
                            active_names: set[str] | None = None) -> int:
-    """Render ONE image per character — the character representation — via the
-    image backend. Capped to `active_names` when provided (characters that appear
-    in the scenes being rendered). Idempotent by prompt hash: skips a character
-    whose rendered image still matches its current `visual_prompt`, but
-    re-renders when feedback has revised that prompt since (--resume or a
-    standalone `stage casting --feedback` rerun).
+    """Render ONE image per casting entry — character OR location representation —
+    via the image backend. Kind-agnostic: a `kind: location` entry has no `actor`
+    block, so the prompt lookup falls through to `character.visual_prompt`
+    directly, same as any other entry. Capped to `active_names` when provided
+    (character/location names that appear in the scenes being rendered).
+    Idempotent by prompt hash: skips an entry whose rendered image still matches
+    its current `visual_prompt`, but re-renders when feedback has revised that
+    prompt since (--resume or a standalone `stage casting --feedback` rerun).
     """
     if not imagegen.available():
-        _log(f"      character renders skipped — {imagegen.unavailable_hint()}")
+        _log(f"      casting renders skipped — {imagegen.unavailable_hint()}")
         return 0
     cast_dir = out / "casting"
     cast_dir.mkdir(exist_ok=True)
@@ -1125,33 +1137,43 @@ def run(
             _log(f"      moodboard: {n_tiles} tile(s) kept as text cues for storyboard")
         apply_direction()   # fold the moodboard into the steering for every stage below
 
-    # ── 3–4/10  scenes + casting (scenes←structure, casting←characters) ───────
-    g = run_group("3/10", "scenes ‖ casting", [
+    # ── 3/10  scenes (scenes←structure) ────────────────────────────────────────
+    g = run_group("3/10", "scenes", [
         _spec("scenes",
               lambda: segment_scenes(source, structure, profile=profile_override),
               _summarize_scenes,
               lambda fb, p=None: segment_scenes(source, structure, profile=p or profile_override, feedback=fb)),
-        _spec("casting",
-              lambda: cast_characters(structure, characters, profile_override),
-              _summarize_casting,
-              lambda fb, p=None: cast_characters(structure, characters, p or profile_override, feedback=fb)),
     ])
-    scenes, casting = g["scenes"], g["casting"]
+    scenes = g["scenes"]
     n_dropped = len(scenes.get("dropped_scenes") or [])
-    _log(f"      {len(scenes.get('scenes', []))} scenes; cast {len(casting.get('casting', []))}"
+    _log(f"      {len(scenes.get('scenes', []))} scenes"
         + (f"  ({n_dropped} dropped — source_line not found)" if n_dropped else ""))
 
-    # Render character portraits only for characters appearing in the scenes that
-    # will actually be rendered (1..max_scenes).  Capping here avoids burning API
-    # quota on characters the video stage will never reference.
+    # ── 4/10  casting (casting←characters, scenes — locations need scenes' scene→
+    # location mapping, so casting now runs after scenes rather than concurrently) ─
+    g = run_group("4/10", "casting", [
+        _spec("casting",
+              lambda: cast_characters(structure, characters, profile_override, scenes=scenes),
+              _summarize_casting,
+              lambda fb, p=None: cast_characters(structure, characters, p or profile_override,
+                                                 feedback=fb, scenes=scenes)),
+    ])
+    casting = g["casting"]
+    _log(f"      cast {len(casting.get('casting', []))}")
+
+    # Render character + location portraits only for names appearing in the scenes
+    # that will actually be rendered (1..max_scenes). Capping here avoids burning
+    # API quota on characters/locations the video stage will never reference.
     if imagegen.enabled():
-        active_chars: set[str] = set()
+        active_names: set[str] = set()
         for sc in scenes.get("scenes", [])[:max_scenes]:
             for nm in (sc.get("characters") or []):
-                active_chars.add(nm)
-        _log(f"      rendering character portraits for {len(active_chars)} "
-             f"character(s) in scene(s) 1..{_scenes_label(max_scenes)} …")
-        if _render_casting_images(casting, out, active_names=active_chars or None):
+                active_names.add(nm)
+            if sc.get("location"):
+                active_names.add(sc["location"])
+        _log(f"      rendering character/location portraits for {len(active_names)} "
+             f"name(s) in scene(s) 1..{_scenes_label(max_scenes)} …")
+        if _render_casting_images(casting, out, active_names=active_names or None):
             save("casting", casting)
             _log(f"      portraits → {out}/casting/")
 

@@ -5,9 +5,11 @@ storyboard that a director, DP, and VFX team — or a video generation model —
 can work from directly:
 
   structure      → logline, genre, tone
-  scenes         → slugline, summary, narrative purpose, characters per scene
+  scenes         → slugline, summary, narrative purpose, characters + location per scene
   casting        → locked on-screen look per character (physical_form, wardrobe,
-                   defining_feature, mannerism) + reference image
+                   defining_feature, mannerism) + reference image; also locked
+                   locations (kind: "location", no actor layer) + reference image,
+                   keyed by scenes' `location` field
   characters     → voice, mannerisms
   visuals        → color palette, lighting, key props, visual filter per scene
   soundscape     → score cue, ambient bed, sound events per scene
@@ -113,7 +115,8 @@ JSON schema (respond with this shape and nothing else):
       "header": {{
         "slugline": "EXT. LOCATION NAME - TIME OF DAY",
         "int_ext": "EXT",
-        "location": "Location name from the scene",
+        "location": "Location name from the scene bundle's `location.name` field \
+if present (use it verbatim — do not rephrase), otherwise from the slugline",
         "time_of_day": "DAY",
         "purpose": "One sentence narrative purpose of this scene",
         "characters": ["CHARACTER_A"],
@@ -165,8 +168,25 @@ into the matching panel's `dialogue` list. Never paraphrase, merge, or add lines
 - Align each panel with its screenplay shot; bake in the verbatim attributed dialogue
 - image_prompt is self-contained and render-ready — the character look, setting, \
 camera grammar, motion, and audio must ALL be in the prompt
+- CHARACTER LOOK IN image_prompt: build it from `cast[].physical_form`, `wardrobe`, \
+`defining_feature`, and `mannerism` — the STRUCTURED fields. Do NOT copy \
+`cast[].visual_prompt` into a panel's image_prompt: that field is a portrait \
+prompt for an isolated identity-reference render (it ends with its OWN fixed \
+backdrop clause — "plain seamless studio backdrop, solid neutral grey, no scene, \
+no props, no location" — written for a blank-background photo, not this scene). \
+Echoing any part of that clause into a panel's image_prompt would tell Veo to \
+render the character against a blank studio backdrop instead of in the actual \
+scene, contradicting every other part of the prompt.
 - If the scene bundle includes a `moodboard_tile`, use its `visual_reference` text \
 as a tonal and composition anchor when writing `image_prompt`s for that scene's panels
+- If the scene bundle includes a `location` block, its `visual_prompt` IS meant to be \
+used directly (unlike `cast[].visual_prompt` above) — it describes the actual \
+physical space with no isolation clause to strip, and is the LOCKED render \
+reference for this scene's setting (an actual rendered image backs it). Describe \
+the environment in every panel's `image_prompt` consistently with it. Do not \
+contradict it (a different layout, different fixed decor) and do not re-describe \
+it fully in every panel — establish it in the first panel's composition, then \
+reference it briefly in later panels of the same scene.
 - emotional_note and transition are required on every panel
 - Keep character names consistent with the cast
 - Avoid unnecessary repetition across panels: each panel's `image_prompt` and
@@ -227,12 +247,18 @@ def _scene_bundles(
     # at this stage; the storyboard uses the label + image_prompt as a reference brief.
     mood_tiles = list((moodboard or {}).get("tiles") or [])
 
+    # Locations are cast alongside characters (kind: "location") but have no
+    # actor layer and must never be treated as a character — excluded from the
+    # "no characters listed" fallback below so a location doesn't get described
+    # with person-shaped fields (wardrobe, mannerism, ...) it doesn't have.
+    person_names = [n for n, c in cast_by_name.items() if c.get("kind") != "location"]
+
     bundles = []
     for i, scene in enumerate(scenes.get("scenes", [])):
         num = scene.get("number")
         slugline = scene.get("slugline", "")
         slugline_parsed = _parse_slugline(slugline)
-        char_names = scene.get("characters", []) or list(cast_by_name)
+        char_names = scene.get("characters", []) or person_names
 
         cast = []
         for name in char_names:
@@ -252,6 +278,17 @@ def _scene_bundles(
                 "reference_image": ch.get("image_path", ""),
             })
 
+        # Locked location reference (kind: "location" casting entry, keyed by
+        # scenes.py's `location` field — same name across every scene set there).
+        loc_name = (scene.get("location") or "").strip()
+        loc_entry = cast_by_name.get(loc_name, {}) if loc_name else {}
+        loc_ch = loc_entry.get("character", loc_entry)
+        location = ({
+            "name": loc_name,
+            "visual_prompt": loc_ch.get("visual_prompt", ""),
+            "reference_image": loc_ch.get("image_path", ""),
+        } if loc_name else None)
+
         vis = vis_by_scene.get(num, {})
         snd = sound_by_scene.get(num, {})
         cin = cin_by_scene.get(num, {})
@@ -266,6 +303,7 @@ def _scene_bundles(
             "purpose": scene.get("purpose", ""),
             "characters_in_scene": char_names,
             "cast": cast,
+            "location": location,
             "art": {
                 "color_palette": vis.get("color_palette", ""),
                 "lighting": vis.get("lighting", ""),
