@@ -245,18 +245,27 @@ def generate_video(prompt: str, out_path: Path, *,
     """
     sdk = _sdk()
     if sdk:
-        try:
-            return _generate_video_sdk(prompt, out_path, image_path=image_path,
-                                        model=model, aspect_ratio=aspect_ratio,
-                                        resolution=resolution,
-                                        duration_seconds=duration_seconds,
-                                        poll_seconds=poll_seconds,
-                                        timeout_seconds=timeout_seconds)
-        except ImportError:
-            pass  # SDK available but API call failed for non-transient reason → fall through
-        except Exception as e:
-            print(f"[reel] SDK video failed ({type(e).__name__}: {e}) — falling back to urllib",
-                  flush=True)
+        for attempt in range(op_retries + 1):
+            try:
+                return _generate_video_sdk(prompt, out_path, image_path=image_path,
+                                            model=model, aspect_ratio=aspect_ratio,
+                                            resolution=resolution,
+                                            duration_seconds=duration_seconds,
+                                            poll_seconds=poll_seconds,
+                                            timeout_seconds=timeout_seconds)
+            except ImportError:
+                break  # SDK available but API call failed for non-transient reason → fall through
+            except Exception as e:
+                code = getattr(e, "veo_code", None)
+                if code in _VEO_TRANSIENT and attempt < op_retries:
+                    wait = min(15.0 * (2 ** attempt), 90.0)
+                    print(f"[reel] Veo transient error (code {code}) — resubmitting in "
+                          f"{wait:.0f}s (attempt {attempt + 1}/{op_retries})", flush=True)
+                    time.sleep(wait)
+                    continue
+                print(f"[reel] SDK video failed ({type(e).__name__}: {e}) — falling back to urllib",
+                      flush=True)
+                break
     return _generate_video_urllib(prompt, out_path, image_path=image_path,
                                    model=model, aspect_ratio=aspect_ratio,
                                    resolution=resolution, poll_seconds=poll_seconds,
@@ -333,6 +342,17 @@ def _generate_video_sdk(prompt: str, out_path: Path, *,
         video_data = bytes(video_bytes) if not isinstance(video_bytes, (bytes, bytearray)) else video_bytes
         Path(out_path).write_bytes(video_data)
         return True
+
+    # Operation completed with no video — same shape the urllib path already
+    # parses (`operation.error` mirrors the raw REST `status["error"]`). Surface
+    # the real code via `.veo_code` so the retry loop above can tell a transient
+    # failure (8/13/14) from a hard one instead of always falling through to
+    # urllib on a generic "no video" message.
+    if operation.error:
+        err = RuntimeError(f"Veo failed: {operation.error}")
+        err.veo_code = (operation.error.get("code")
+                        if isinstance(operation.error, dict) else None)
+        raise err
     raise RuntimeError("Veo SDK returned no video")
 
 

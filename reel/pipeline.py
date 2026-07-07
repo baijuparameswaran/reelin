@@ -518,6 +518,31 @@ def _panel_dialogue_lines(panel: dict) -> list[str]:
     return lines
 
 
+def _write_scene_prompt_log(out: Path, snum, model: str, seed_note: str,
+                            frame_logs: list[dict]) -> None:
+    """Plain-text log of the exact Veo prompt behind each clip in a scene —
+    always reflects the CURRENT set of frames that make up the scene's video
+    (re-rendered or skipped-as-unchanged alike), so it stays a truthful record
+    even when most frames were cached from an earlier run."""
+    logs_dir = out / "logs"
+    logs_dir.mkdir(exist_ok=True)
+    tag = f"{int(snum):02d}" if isinstance(snum, int) else str(snum)
+    lines = [
+        f"Scene {snum} — Veo render log",
+        f"Model: {model}",
+        f"Seed method: {seed_note}",
+        "",
+    ]
+    for fl in frame_logs:
+        lines.append("=" * 80)
+        lines.append(f"FRAME {fl['tag']}  ->  {fl['clip'] or '(not rendered)'}")
+        lines.append("-" * 80)
+        lines.append(fl["prompt"])
+        lines.append("")
+    lines.append("=" * 80)
+    (logs_dir / f"scene_{tag}_veo_prompts.txt").write_text("\n".join(lines), encoding="utf-8")
+
+
 def _frame_char_anchor(frame: dict, cast_index: dict, out: Path) -> Path | None:
     """The casting image of the first in-frame character — Veo identity seed."""
     for name in frame.get("characters_in_frame", []):
@@ -586,6 +611,7 @@ def _render_scene_frames(storyboard: dict, casting: dict, out: Path,
         prev_tail = None                        # reset each scene → hard cut between scenes
         prev_clip_path = None                   # previous clip mp4 — for continuity_mode: extend
         frames_out = []
+        prompt_log: list[dict] = []
         # scene-level audio overview for panels that have no explicit sound field
         audio_overview = scene.get("audio_overview") or {}
         # `panels` is the new schema; fall back to `frames` for old checkpoints
@@ -650,6 +676,18 @@ def _render_scene_frames(storyboard: dict, casting: dict, out: Path,
                 "seed": str(Path(seed).relative_to(out)) if seed and Path(seed).exists() else None,
                 "clip": str(clip.relative_to(out)) if clip.exists() else None,
             })
+            prompt_log.append({
+                "tag": tag,
+                "prompt": prompt,
+                "clip": str(clip.relative_to(out)) if clip.exists() else None,
+            })
+
+        _write_scene_prompt_log(
+            out, snum, vcfg.get("model", "unknown"),
+            "tail-frame continuity (previous clip's last frame)" if continuity
+            else "character/location identity anchor per frame (no continuity)",
+            prompt_log,
+        )
 
         # Stitch this scene's frame clips into a scene-level video.
         scene_vid = vdir / (f"scene_{snum:02d}.mp4" if isinstance(snum, int) else f"scene_{snum}.mp4")

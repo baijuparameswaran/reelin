@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -292,6 +293,37 @@ _VEO_FOCUS_KWS = frozenset([
     "wide-angle lens", "portrait", "telephoto lens",
 ])
 
+# Broad set of common cinematic action-verb roots (not guide-derived — the
+# guide gives no closed vocabulary for Action). Matched with a trailing `\w*`
+# so regular -s/-es/-ed inflections are covered from the root alone (e.g.
+# "wipe" -> "wipes"/"wiped"); a few common -ing forms that drop a silent "e"
+# are listed explicitly since "wipe\w*" doesn't reach "wiping".
+_ACTION_VERB_ROOTS = (
+    "walk", "run", "stand", "move", "turn", "look", "gaze", "stare", "glance",
+    "enter", "exit", "drive", "fly", "fall", "rise", "sit", "reach", "grip",
+    "grasp", "hold", "clutch", "carry", "speak", "say", "whisper", "murmur",
+    "shout", "yell", "gesture", "step", "approach", "cross", "climb", "ascend",
+    "descend", "float", "swim", "wipe", "brush", "touch", "stroke", "caress",
+    "stack", "place", "lean", "lift", "raise", "lower", "push", "pull",
+    "throw", "catch", "grab", "release", "drop", "spin", "rotate", "twist",
+    "bend", "kneel", "crouch", "jump", "leap", "dance", "sway", "shake",
+    "tremble", "nod", "shrug", "smile", "laugh", "cry", "weep", "sigh",
+    "breathe", "pace", "wander", "stroll", "march", "sprint", "chase",
+    "follow", "flee", "hide", "emerge", "appear", "vanish", "watch", "observe",
+    "examine", "inspect", "point", "wave", "embrace", "hug", "kiss", "pour",
+    "drink", "sip", "listen", "flinch", "recoil", "stumble", "trip", "slip",
+    "interact", "perform", "show", "connect", "prepare", "adjust", "scan",
+)
+_ACTION_VERB_ING = (
+    "wiping", "gazing", "staring", "raising", "placing", "releasing",
+    "smiling", "waving", "embracing", "examining", "hiding", "coming",
+    "stroking", "preparing",
+)
+_ACTION_VERB_RE = re.compile(
+    r"\b(?:" + "|".join(_ACTION_VERB_ROOTS) + r")\w*\b"
+    r"|\b(?:" + "|".join(_ACTION_VERB_ING) + r")\b"
+)
+
 
 def verify_prompt(prompt: str) -> dict:
     """Check a Veo video prompt against the prompting guide.
@@ -315,12 +347,14 @@ def verify_prompt(prompt: str) -> dict:
     if len(prompt.split()) < 5:
         issues.append("Subject: prompt is too short to contain a meaningful subject description")
 
-    # 2. Action — look for a verb indicating motion or activity.
-    action_verbs = ("walk", "run", "stand", "move", "turn", "look", "enter", "exit",
-                    "drive", "fly", "fall", "rise", "sit", "open", "close", "reach",
-                    "hold", "carry", "speak", "say", "whisper", "shout", "gesture",
-                    "step", "approach", "cross", "climb", "descend", "float", "swim")
-    if not any(v in norm for v in action_verbs):
+    # 2. Action — look for a verb indicating motion or activity. The guide
+    #    defines Action as open-ended ("what the subject does"), unlike Style/
+    #    Camera/Focus below which the guide gives a closed, sync-checked
+    #    vocabulary for — so this can only ever be a best-effort heuristic, not
+    #    a real vocabulary match. Matched as regex prefixes (`\w*` covers -s/
+    #    -ed/-es inflections) with word boundaries, so e.g. "close" doesn't
+    #    false-match inside the unrelated shot-type term "close-up".
+    if not _ACTION_VERB_RE.search(norm):
         warnings.append("Action: no clear action verb detected — add what the subject does")
 
     # 3. Style — at least one Veo style keyword required.
