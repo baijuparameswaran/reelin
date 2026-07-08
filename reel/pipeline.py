@@ -20,12 +20,19 @@ Creative crew roles:
   soundscape     — background score / sound design
   visuals        — art production (color, props, production design)
   cinematography — Director of Photography (shot types, angles, movement, lens)
-  storyboard     — fuses casting + art + camera + score into a Veo prompt per panel
+  storyboard     — fuses casting + art + camera + score into an image_prompt per
+                   panel (a fallback format only — see _five_part_veo_prompt below)
 
 After storyboard + screenplay, an optional scene-render phase
 (`_render_scene_frames` → `output/video/`) renders each storyboard panel into a
 video clip via Gemini Veo (`reel.i2v`), seeded by the character's casting image
-for identity continuity. Best-effort: no API key → skips with a hint.
+for identity continuity. Best-effort: no API key → skips with a hint. The
+prompt actually sent to Veo is NOT the storyboard's free-text image_prompt —
+it's reconstructed from structured data (casting.json, the scene's
+visual_overview, the panel's own camera fields) into a fixed five-part
+formula, always in this order: [Cinematography] + [Subject] + [Action] +
+[Context] + [Style & Ambiance] (Google's Veo 3.1 prompting guide; see
+_five_part_veo_prompt / _panel_video_prompt).
 
 Each LLM stage passes through a human-in-the-loop gate: the operator can
 approve the result, supply revision feedback, or let it auto-approve on
@@ -60,6 +67,7 @@ from . import llm
 from . import imagegen
 from . import i2v
 from . import veo_guide
+from . import gemini
 
 
 def _log(msg: str) -> None:
@@ -365,45 +373,67 @@ def _render_moodboard_tiles(moodboard: dict, out: Path) -> int:
     return n
 
 
-# Veo prompting guide — focus/lens terms by shot type.
-# "portrait" enhances facial detail on close-ups; "deep focus" suits wide
-# Veo focus/lens hint keyed by shot type — abbreviations (storyboard schema)
-# and natural language variants (storyboard agent prose output).
+# Veo prompting guide — lens/framing terms by shot type. "portrait" enhances
+# facial detail on close-ups; "macro lens" suits inserts. Keyed by both
+# abbreviations (storyboard schema) and natural language variants
+# (cinematography agent / storyboard agent prose output).
 _VEO_FOCUS: dict[str, str] = {
     # standard abbreviations
-    "ECU": "portrait, extreme close-up, shallow focus",
-    "CU": "portrait, shallow focus",
-    "MCU": "shallow focus",
+    "ECU": "portrait",
+    "CU": "portrait",
     "INSERT": "macro lens",
-    "WS": "deep focus",
-    "ELS": "deep focus",
-    # natural language (model may output these)
-    "EXTREME CLOSE-UP": "portrait, extreme close-up, shallow focus",
-    "EXTREME CLOSE UP": "portrait, extreme close-up, shallow focus",
-    "CLOSE-UP": "portrait, shallow focus",
-    "CLOSE UP": "portrait, shallow focus",
-    "WIDE SHOT": "deep focus",
-    "WIDE": "deep focus",
-    "ESTABLISHING SHOT": "deep focus",
-    "ESTABLISHING": "deep focus",
-    "POV SHOT": "shallow focus",
-    "POV": "shallow focus",
-    "OTS": "shallow focus",
-    "OVER-THE-SHOULDER": "shallow focus",
-    "TWO-SHOT": "shallow focus",
+    # natural language (model may output these) — covers both the
+    # cinematography agent's spelled-out shot types and the storyboard
+    # agent's own abbreviation schema, matching fountain.py's
+    # _VEO_FOCUS_FOUNTAIN (the pair of dicts veo_guide.py tracks together).
+    # Values carry ONLY the framing hint, not shot-type wording (e.g. not
+    # "extreme close-up") — the shot-type label itself (_VEO_SHOT_LABEL in
+    # pipeline.py / raw_type in fountain.py's _camera()) already supplies
+    # that, so repeating it here would duplicate it in the final prompt.
+    "EXTREME-CLOSE-UP": "portrait",
+    "EXTREME CLOSE-UP": "portrait",
+    "EXTREME CLOSE UP": "portrait",
+    "CLOSE-UP": "portrait",
+    "CLOSE UP": "portrait",
+}
+
+# Shot-type abbreviation -> natural-language label, for [Cinematography] in
+# _panel_cinematography. Values already spelled out in full (e.g. "wide shot")
+# pass through unchanged.
+_VEO_SHOT_LABEL: dict[str, str] = {
+    "ECU": "extreme close-up",
+    "CU": "close-up",
+    "MCU": "medium close-up",
+    "MS": "medium shot",
+    "FS": "full shot",
+    "WS": "wide shot",
+    "ELS": "extreme long shot",
+    "2S": "two-shot",
+    "OTS": "over-the-shoulder shot",
+    "POV": "POV shot",
+    "INSERT": "insert shot",
 }
 
 
 def _panel_video_prompt(panel: dict, audio_overview: dict | None = None, *,
+                        casting_lookup: dict[str, dict] | None = None,
+                        location_desc: str = "",
+                        visual_overview: dict | None = None,
                         voice_index: dict[str, str] | None = None,
                         no_bg_music: bool = True,
                         room_tone: bool = True,
                         no_subtitles: bool = True) -> str:
     """Assemble a Veo-aligned prompt from a storyboard panel.
 
-    Visual half follows the Veo prompting guide's five elements in order:
-      Subject → Action → Style → Camera & Composition → Focus & Ambiance
-    — unlabeled, natural language, per the guide.
+    Visual half ALWAYS follows this fixed five-part formula, in this order,
+    assembled from an explicit dict (see _five_part_veo_prompt):
+      [Cinematography] + [Subject] + [Action] + [Context] + [Style & Ambiance]
+    Requires `casting_lookup` (name -> casting.json entry) to build [Subject]
+    and [Context] from structured data; callers without it (e.g. a bare
+    prompt with no casting/scene context) fall back to the storyboard
+    agent's own free-text image_prompt as the visual half instead — that
+    text has no guaranteed section order, so the fixed formula above is only
+    guaranteed when casting_lookup is supplied.
 
     Audio half is built entirely via `veo_guide`'s construction helpers
     (`ambient_cue`/`sfx_cue`/`music_directive`/`dialogue_cue`/
@@ -428,21 +458,7 @@ def _panel_video_prompt(panel: dict, audio_overview: dict | None = None, *,
     so the same character sounds the same across separately-generated clips (Veo
     has no cross-generation voice cloning; this is the manual substitute).
     """
-    base = (panel.get("image_prompt") or panel.get("action") or panel.get("moment", "")).strip()
-    shot_type = (panel.get("shot_type") or "").upper()
-    base_lower = base.lower()
     voice_index = voice_index or {}
-
-    # Focus & Ambiance — add lens/focus hint when not already in the base prompt.
-    # Veo guide: "portrait" for CU/ECU, "deep focus" for wide shots, "macro lens" for inserts.
-    focus_hint = ""
-    hint_terms = _VEO_FOCUS.get(shot_type, "")
-    if hint_terms:
-        # Only inject if the key focus keyword isn't already present in the prompt.
-        key = hint_terms.split(",")[0].strip()
-        if key not in base_lower:
-            focus_hint = hint_terms
-
     ao = audio_overview or {}
 
     # Ambient (environment) and score/music are kept as two SEPARATE cues (not
@@ -486,11 +502,16 @@ def _panel_video_prompt(panel: dict, audio_overview: dict | None = None, *,
         if cue:
             dialogue_cues.append(cue)
 
-    # Visual half: base (subject+action+style+camera+ambiance) → focus hint.
-    visual_parts: list[str] = [base]
-    if focus_hint:
-        visual_parts.append(focus_hint + ".")
-    visual = " ".join(p.strip() for p in visual_parts if p.strip())
+    # Visual half — always the fixed five-part formula when casting_lookup is
+    # available (the real render path always supplies it); otherwise fall
+    # back to the storyboard agent's own free-text image_prompt.
+    if casting_lookup is not None:
+        visual = _five_part_veo_prompt(panel, casting_lookup=casting_lookup,
+                                       location_desc=location_desc,
+                                       visual_overview=visual_overview or {})
+    else:
+        visual = (panel.get("image_prompt") or panel.get("action")
+                 or panel.get("moment", "")).strip()
 
     # Audio half: ambient → SFX → music/no-music → dialogue (+ no-subtitles).
     audio_bits: list[str] = []
@@ -543,6 +564,102 @@ def _write_scene_prompt_log(out: Path, snum, model: str, seed_note: str,
     (logs_dir / f"scene_{tag}_veo_prompts.txt").write_text("\n".join(lines), encoding="utf-8")
 
 
+def _panel_cinematography(panel: dict) -> str:
+    """[Cinematography] — camera work and shot composition, built fresh from
+    the panel's own structured fields (shot_type/camera_angle/camera_movement/
+    lens), plus the shot-type-appropriate framing hint (_VEO_FOCUS: "portrait"
+    for close-ups, "macro lens" for inserts — depth-of-field is intentionally
+    not asserted here, see _VEO_FOCUS's own docstring)."""
+    shot = (panel.get("shot_type") or "").strip()
+    angle = (panel.get("camera_angle") or "").strip()
+    movement = (panel.get("camera_movement") or "").strip()
+    lens = (panel.get("lens") or "").strip()
+    bits: list[str] = []
+    if shot:
+        label = _VEO_SHOT_LABEL.get(shot.upper())
+        if not label:
+            base_label = shot.capitalize() if shot.isupper() else shot
+            label = base_label if base_label.lower().endswith(("shot", "up", "view")) else f"{base_label} shot"
+        bits.append(label)
+    if angle:
+        bits.append(angle.lower())
+    if movement:
+        bits.append("static camera" if movement.lower() == "static" else movement.lower())
+    if lens:
+        bits.append(lens if "lens" in lens.lower() else f"{lens} lens")
+
+    hint_terms = _VEO_FOCUS.get(shot.upper(), "")
+    if hint_terms:
+        joined_lower = ", ".join(bits).lower()
+        key = hint_terms.split(",")[0].strip()
+        if key not in joined_lower:
+            bits.append(hint_terms)
+
+    return ", ".join(b for b in bits if b)
+
+
+def _panel_subject(panel: dict, casting_lookup: dict[str, dict]) -> str:
+    """[Subject] — the locked on-screen look of every character in frame,
+    from casting.json's character.physical_form (falls back to the bare name
+    if casting has no matching entry, e.g. an uncast background figure)."""
+    names = panel.get("characters_in_frame") or []
+    subjects: list[str] = []
+    for name in names:
+        entry = casting_lookup.get(name)
+        if not entry:
+            subjects.append(name)
+            continue
+        ch = entry.get("character", entry)
+        form = (ch.get("physical_form") or "").strip()
+        subjects.append(f"{name} ({form})" if form else name)
+    return " and ".join(subjects)
+
+
+def _panel_context(panel: dict, location_desc: str) -> str:
+    """[Context] — environment and background elements: the scene's locked
+    location (from casting.json's location entry) plus this panel's own
+    composition note (who/what is where in frame, depth layers)."""
+    bits = []
+    if location_desc:
+        bits.append(location_desc.rstrip("."))
+    composition = (panel.get("composition") or "").strip()
+    if composition:
+        bits.append(composition.rstrip("."))
+    return "; ".join(bits)
+
+
+def _panel_style_ambiance(visual_overview: dict) -> str:
+    """[Style & Ambiance] — overall aesthetic, mood, and lighting: a fixed
+    Veo style keyword plus the scene's visual_overview (color_palette/
+    lighting_setup/mood)."""
+    vo = visual_overview or {}
+    bits = ["Cinematic, photorealistic"]
+    bits += [b.strip() for b in
+            (vo.get("color_palette", ""), vo.get("lighting_setup", ""), vo.get("mood", ""))
+            if b.strip()]
+    return ". ".join(b.rstrip(".") for b in bits if b) + "."
+
+
+def _five_part_veo_prompt(panel: dict, *, casting_lookup: dict[str, dict],
+                          location_desc: str, visual_overview: dict) -> str:
+    """Assemble the VISUAL half of a Veo prompt as an explicit, fixed-order
+    dict, per the five-part formula:
+      [Cinematography] + [Subject] + [Action] + [Context] + [Style & Ambiance]
+    Each section is built fresh from structured data (casting.json, the
+    scene's visual_overview, the panel's own fields) rather than the
+    storyboard agent's free-text image_prompt — the model's own prose has no
+    guaranteed internal ordering, so reordering an opaque blob after the fact
+    isn't reliable; reconstructing from structured fields is."""
+    parts: dict[str, str] = {
+        "cinematography": _panel_cinematography(panel),
+        "subject": _panel_subject(panel, casting_lookup),
+        "action": (panel.get("action") or panel.get("moment") or "").strip(),
+        "context": _panel_context(panel, location_desc),
+        "style_ambiance": _panel_style_ambiance(visual_overview),
+    }
+    return " ".join(f"{v.rstrip('.')}." for v in parts.values() if v.strip())
+
+
 def _frame_char_anchor(frame: dict, cast_index: dict, out: Path) -> Path | None:
     """The casting image of the first in-frame character — Veo identity seed."""
     for name in frame.get("characters_in_frame", []):
@@ -585,11 +702,13 @@ def _render_scene_frames(storyboard: dict, casting: dict, out: Path,
     no_subtitles = bool(audio_cfg.get("no_subtitles", True))
 
     cast_index = {}
+    casting_lookup: dict[str, dict] = {}
     for c in casting.get("casting", []):
         ch = c.get("character", c)
         rel = ch.get("image_path") or c.get("image_path")
         if rel:
             cast_index[c.get("name")] = rel
+        casting_lookup[c.get("name")] = c
 
     voice_index = {
         c.get("name"): c.get("voice", "")
@@ -617,9 +736,23 @@ def _render_scene_frames(storyboard: dict, casting: dict, out: Path,
         # `panels` is the new schema; fall back to `frames` for old checkpoints
         panels = scene.get("panels") or scene.get("frames", [])
 
+        # [Context] source: the scene's locked location, from casting.json's
+        # kind:"location" entry (its own visual_prompt) — falls back to the
+        # bare location name if this scene's location wasn't cast.
+        loc_name = (scene.get("header", {}).get("location") or "").strip()
+        loc_entry = casting_lookup.get(loc_name, {})
+        loc_ch = loc_entry.get("character", loc_entry)
+        location_desc = loc_ch.get("visual_prompt") or loc_name
+        # [Style & Ambiance] source: the scene's own color/lighting/mood.
+        visual_overview = scene.get("visual_overview") or {}
+
         for fr in panels:
             fnum = fr.get("panel") or fr.get("frame", len(frames_out) + 1)
-            prompt = _panel_video_prompt(fr, audio_overview, voice_index=voice_index,
+            prompt = _panel_video_prompt(fr, audio_overview,
+                                         casting_lookup=casting_lookup,
+                                         location_desc=location_desc,
+                                         visual_overview=visual_overview,
+                                         voice_index=voice_index,
                                          no_bg_music=no_bg_music, room_tone=room_tone,
                                          no_subtitles=no_subtitles)
             tag = f"{int(fnum):02d}" if isinstance(fnum, int) else str(fnum)
@@ -955,6 +1088,7 @@ def run(
     t0 = time.time()
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
+    gemini.set_log_dir(out)
 
     # Persist each stage as soon as it's approved, so a failure, timeout, or pause
     # in a later (slow) stage never discards completed work.

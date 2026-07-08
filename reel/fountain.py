@@ -69,34 +69,27 @@ def parse(text: str) -> list[dict]:
 
 # ── screenplay → storyboard (shots with A/V) ─────────────────────────────────
 
-# Veo prompting guide — focus/lens terms by shot type.
+# Veo prompting guide — lens/framing terms by shot type.
 # Covers both standard abbreviations (from storyboard schema) and the natural
-# language values emitted by the cinematography agent, so the focus hint fires
-# regardless of which path produced the shot_type label.
+# language values emitted by the cinematography agent, so the hint fires
+# regardless of which path produced the shot_type label. Kept in sync with
+# reel/pipeline.py's _VEO_FOCUS (see veo_guide.py's tracked code-location
+# pair). Depth-of-field terms (deep/shallow focus) are intentionally NOT
+# handled here — left to whatever the source content already says. Values
+# carry ONLY the framing hint, not shot-type wording (e.g. not "extreme
+# close-up") — _camera()'s raw_type already supplies that, so repeating it
+# here would duplicate it in the final prompt.
 _VEO_FOCUS_FOUNTAIN: dict[str, str] = {
     # abbreviations
-    "ECU": "portrait, extreme close-up, shallow focus",
-    "CU": "portrait, shallow focus",
-    "MCU": "shallow focus",
+    "ECU": "portrait",
+    "CU": "portrait",
     "INSERT": "macro lens",
-    "WS": "deep focus",
-    "ELS": "deep focus",
     # natural language (cinematography agent output)
-    "EXTREME-CLOSE-UP": "portrait, extreme close-up, shallow focus",
-    "EXTREME CLOSE-UP": "portrait, extreme close-up, shallow focus",
-    "EXTREME CLOSE UP": "portrait, extreme close-up, shallow focus",
-    "CLOSE-UP": "portrait, shallow focus",
-    "CLOSE UP": "portrait, shallow focus",
-    "WIDE": "deep focus",
-    "WIDE SHOT": "deep focus",
-    "ESTABLISHING": "deep focus",
-    "ESTABLISHING SHOT": "deep focus",
-    "TWO-SHOT": "shallow focus",
-    "TWO SHOT": "shallow focus",
-    "OVER-THE-SHOULDER": "shallow focus",
-    "OTS": "shallow focus",
-    "POV": "shallow focus",
-    "POV SHOT": "shallow focus",
+    "EXTREME-CLOSE-UP": "portrait",
+    "EXTREME CLOSE-UP": "portrait",
+    "EXTREME CLOSE UP": "portrait",
+    "CLOSE-UP": "portrait",
+    "CLOSE UP": "portrait",
 }
 
 # Cinematography agent angle → Veo guide vocabulary.

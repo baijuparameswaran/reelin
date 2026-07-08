@@ -23,6 +23,17 @@ Output schema mirrors a real production storyboard:
   panels         → one per camera shot, with shot_type / camera_angle /
                    camera_movement / lens / composition / duration / action /
                    dialogue / sound / emotional_note / transition / image_prompt
+
+NOTE on image_prompt: the model writes it in the guide's five-ELEMENT order
+(Subject/Action/Style/Camera/Focus), but that is no longer the order actually
+submitted to Veo for real renders. pipeline._render_scene_frames reconstructs
+the prompt from structured fields (this panel's own shot_type/camera_angle/
+camera_movement/lens, casting.json, the scene's visual_overview) into the
+newer five-PART formula — Cinematography+Subject+Action+Context+Style&Ambiance,
+per Google's Veo 3.1 prompting guide (see pipeline._five_part_veo_prompt) —
+whenever casting context is available. image_prompt is still generated and is
+used verbatim only as a fallback when that context is absent (e.g. a
+standalone gen-video prompt with no casting/scene data).
 """
 from __future__ import annotations
 
@@ -98,11 +109,15 @@ camera angle using Veo vocabulary ("eye-level", "low angle", "high angle", \
 movement ("static", "dolly in", "dolly out", "tracking", "handheld", "aerial view", \
 "panning", "crane up", "zoom in"), \
 and lens (e.g. "24mm wide-angle lens", "85mm portrait lens", "135mm telephoto lens"); \
-(5) Focus & Ambiance: focus term + color and lighting mood — use "portrait, shallow \
-focus" for CU/ECU shots (Veo guide: enhances facial detail), "deep focus" for WS/ELS \
-(environmental clarity), "macro lens" for INSERT shots; describe lighting and color \
-as mood ("warm golden hour glow", "cold blue-grey shadows", "neon eerie glow", \
-"harsh midday sun", "soft diffused overcast light"). Do NOT include dialogue or sound effects in image_prompt — \
+(5) Focus & Ambiance: focus term + color and lighting mood — MUST MATCH THIS \
+PANEL'S OWN shot_type, not a default: "portrait, shallow focus" for CU/ECU shots \
+(Veo guide: enhances facial detail), "deep focus" for WS/ELS (environmental \
+clarity), "macro lens" for INSERT shots. Every panel in a scene re-decides this \
+independently from its own shot_type — do not copy the focus term from a \
+different panel's example or from the previous panel; a close-up next to a wide \
+shot should NOT share the same focus term. Describe lighting and color as mood \
+("warm golden hour glow", "cold blue-grey shadows", "neon eerie glow", "harsh \
+midday sun", "soft diffused overcast light"). Do NOT include dialogue or sound effects in image_prompt — \
 those live in the panel's dialogue and sound fields and are added to the Veo prompt \
 separately
 
@@ -151,6 +166,25 @@ if present (use it verbatim — do not rephrase), otherwise from the slugline",
           "image_prompt": "CHARACTER_A (physical description: age, build, hair, wardrobe, \
 defining feature) performs the action in the location. Cinematic, photorealistic. \
 Wide shot, eye-level, static camera, 24mm wide-angle lens. Deep focus. \
+Describe lighting and color palette as mood."
+        }},
+        {{
+          "panel": 2,
+          "shot_type": "CU",
+          "camera_angle": "EYE LEVEL",
+          "camera_movement": "STATIC",
+          "lens": "50mm normal",
+          "composition": "describe framing tighter on the subject's face/reaction",
+          "duration": "4s",
+          "characters_in_frame": ["CHARACTER_A"],
+          "action": "Describe the closer, more intimate beat this shot covers.",
+          "dialogue": [],
+          "sound": "describe ambient bed and any specific sound events audible here",
+          "emotional_note": "the emotion this panel must evoke in the audience",
+          "transition": "CUT TO",
+          "image_prompt": "CHARACTER_A (physical description: age, build, hair, wardrobe, \
+defining feature) performs the action in the location. Cinematic, photorealistic. \
+Close-up, eye-level, static camera, 50mm normal lens. Portrait, shallow focus. \
 Describe lighting and color palette as mood."
         }}
       ]
