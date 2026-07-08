@@ -291,6 +291,19 @@ how many **scenes** are drafted and rendered — but **every shot within each
 rendered scene is always rendered** (the storyboard emits one frame per camera
 shot; the renderer never caps shots).
 
+**Every prompt actually sent to Veo follows a fixed five-part formula, always
+in this order** (per Google's official Veo 3.1 prompting guide —
+[cloud.google.com/blog/.../ultimate-prompting-guide-for-veo-3-1](https://cloud.google.com/blog/products/ai-machine-learning/ultimate-prompting-guide-for-veo-3-1)):
+`[Cinematography] + [Subject] + [Action] + [Context] + [Style & Ambiance]`.
+Each section is assembled from an explicit dict built from **structured
+data** — casting.json's locked character/location descriptions, the scene's
+`visual_overview`, the panel's own camera fields — not the storyboard agent's
+free-text `image_prompt` (which has no guaranteed internal order; that field
+still exists and is used as a fallback when no casting context is available,
+e.g. a standalone `gen-video` prompt). Depth-of-field terms ("deep focus"/
+"shallow focus") are intentionally not asserted anywhere in this assembly —
+left to whatever the source content says. See `pipeline._five_part_veo_prompt`.
+
 Output lands in `output/video/scene_NN/frame_MM.mp4` plus a `manifest.json`. After
 the clips are rendered they are **stitched into a single movie** —
 `output/video/movie.mp4` — concatenated in scene-then-frame order with ffmpeg

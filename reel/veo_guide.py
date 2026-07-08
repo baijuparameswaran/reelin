@@ -73,9 +73,16 @@ _EXPECTED_TERMS: dict[str, list[str]] = {
 
 # Code locations that implement the guide — shown in the change notice.
 _CODE_LOCATIONS = [
-    ("reel/pipeline.py",           "_VEO_FOCUS dict — focus/lens terms by shot type"),
+    ("reel/pipeline.py",           "_VEO_FOCUS dict (focus/lens terms by shot type) and "
+                                    "_five_part_veo_prompt/_panel_* (the actual Cinematography+"
+                                    "Subject+Action+Context+Style&Ambiance formula submitted to "
+                                    "Veo — per a DIFFERENT guide, cloud.google.com's Veo 3.1 "
+                                    "prompting guide, not the ai.google.dev vocabulary this "
+                                    "module syncs)"),
     ("reel/fountain.py",           "_VEO_FOCUS_FOUNTAIN dict — same for standalone render"),
-    ("reel/agents/storyboard.py",  "image_prompt instructions — 5-element structure + focus hints"),
+    ("reel/agents/storyboard.py",  "image_prompt instructions — 5-ELEMENT structure + focus "
+                                    "hints (fallback format only; see pipeline.py above for the "
+                                    "order actually submitted to Veo)"),
     ("config/models.yaml",         "video.style_suffix — Veo style keyword fallback"),
 ]
 
