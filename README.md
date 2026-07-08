@@ -286,10 +286,14 @@ For each storyboard frame it generates a short **clip** (image-to-video):
 - **later frames** are seeded from the **previous frame's last image**, so motion
   is continuous within the scene. A scene boundary resets the chain (a cut).
 
-`--max-scenes` (default 1, prototype; pass `all` for every drafted scene) limits
-how many **scenes** are drafted and rendered — but **every shot within each
-rendered scene is always rendered** (the storyboard emits one frame per camera
-shot; the renderer never caps shots).
+`--max-scenes` (default 1, prototype; pass `all` for every scene) limits how
+many scenes get **rendered** — casting-image generation and this video render
+step. It does NOT limit drafting: screenplay, storyboard, soundscape, visuals,
+and cinematography always process every scene in the story, since those are
+design/planning stages, not media generation — only the actual rendering
+stages (image/video API calls) restrict themselves to `max_scenes`. Within a
+rendered scene, **every shot is always rendered** (the storyboard emits one
+frame per camera shot; the renderer never caps shots).
 
 **Every prompt actually sent to Veo follows a fixed five-part formula, always
 in this order** (per Google's official Veo 3.1 prompting guide —

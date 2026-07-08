@@ -228,6 +228,24 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
 - Version control: git, branch `main`.
 
 ## Current state
+- **`--max-scenes` now ONLY restricts actual media-rendering stages** —
+  casting-image generation and `scene_render`'s video generation. Every
+  design/planning stage (screenplay, storyboard, soundscape, visuals,
+  cinematography) always processes every scene in the story by default,
+  regardless of `--max-scenes`. This was already true for soundscape/visuals/
+  cinematography/storyboard (verified by inspection — none of the four take a
+  `max_scenes` parameter at all); `screenplay` was the one inconsistency
+  (`draft_screenplay`'s `max_scenes` defaulted to `3`, capping drafting to
+  match the video-render cap) — fixed by changing its default to `None` (all
+  scenes) and having `pipeline.run()` stop passing its render-scoped
+  `max_scenes` into the screenplay call. Moodboard's `tiles` field remains
+  intentionally capped to `max_scenes` — that's correctly scoped, since tiles
+  get rendered to actual images (a real media-generation step), unlike the
+  moodboard's film-wide aesthetic fields which are never scene-scoped at all.
+  Standalone `stage screenplay --max-scenes N` (via `stages.py`'s `run_stage`,
+  shared CLI default of 1 across all stage types) was deliberately left
+  capped-by-default — a different use case (explicit single-stage testing)
+  from the full pipeline run this fix targeted.
 - **Status:** The pipeline runs **genre → structure/characters → moodboard →
   scenes/casting → soundscape/visuals/cinematography → screenplay → storyboard →
   render**, with a human-in-the-loop gate per stage plus per-stage **fidelity** and
@@ -373,6 +391,73 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
   / final cut phase.
 
 ## Session log
+- 2026-07-08 (later) — **Veo extend-mode made as robust as seed mode;
+  `--max-scenes` consistency fixed so it only restricts actual rendering.**
+  Two independent investigations, both triggered by direct questions rather
+  than a bug report. (1) User asked whether `continuity_mode: extend` (Veo's
+  native video-to-video scene extension, carries ambient/music audio across a
+  cut, added a prior session but never enabled by default) was safe to use —
+  traced it fully wired end-to-end (`gemini.extend_video` → `i2v._gen_gemini`
+  → `pipeline._render_scene_frames`'s `prev_clip_path` threading, confirmed
+  correct even across the resume-skip branch) but found real robustness gaps
+  versus `generate_video()`: no retry on transient Veo errors (8/13/14) — a
+  one-shot attempt meant any routine transient hiccup permanently downgraded
+  that frame to seed continuity instead of retrying the extend call itself —
+  and no `.error` field inspection at all, so even a caller wanting to retry
+  couldn't tell a transient failure from a hard one. Also live-verified via
+  WebFetch against the current official ai.google.dev Veo guide that
+  `config/models.yaml`'s comment was stale: it claimed only non-"fast"
+  veo-3.1-*-preview models supported extend, but both `-generate-preview` and
+  `-fast-generate-preview` do (only `-lite-` doesn't) — `gemini.py`'s own
+  extend_video docstring already had this right, only the config comment had
+  lagged. Fixed: refactored extend_video's one-shot call into
+  `_extend_video_once`, wrapped with the same retry-with-backoff +
+  `.veo_code` extraction + per-attempt API-log line `generate_video()` has.
+  First implemented the 720p constraint (extend is fixed at 720p regardless
+  of the general video config) as a silent clamp inside extend_video() —
+  **corrected per explicit direction**: coercing the configured OUTPUT
+  RESOLUTION for a clip is worse than choosing a different CONTINUITY
+  MECHANISM for it. Moved the check to `i2v._gen_gemini()`, which now skips
+  attempting extend entirely (zero wasted API calls) and goes straight to
+  seed continuity when resolution isn't 720p, rather than clamping or trying
+  a call guaranteed to fail/misbehave for it. Verified via stubbed offline
+  tests: skip-vs-attempt branching by resolution, transient-retry-then-
+  success, non-transient failure raising without wasted retries, `.error`
+  parsing against a realistic SDK operation object. *(Committed as 7f7a13b,
+  pushed.)*
+
+  (2) User asked whether `--max-scenes N` caps every stage through N —
+  traced it stage by stage and found it genuinely doesn't, but the actual
+  shape of the inconsistency mattered: `soundscape`/`visuals`/
+  `cinematography`/`storyboard` correctly ignore it already (none of the four
+  even accept a `max_scenes` parameter — confirmed by reading each function
+  signature directly) and always process the full scene list, while
+  `casting`-image rendering and `scene_render` correctly restrict themselves
+  to it. **User clarified the intended principle**: only actual RENDERING
+  stages (media generation — image/video API calls) should restrict
+  themselves to `max_scenes`; every design/planning stage should stay aligned
+  with the full scene list and generate for all scenes by default — meaning
+  soundscape/visuals/cinematography/storyboard's existing behavior was
+  already correct, and the one stage actually violating this principle was
+  `screenplay` (`draft_screenplay`'s `max_scenes` defaulted to `3`, and
+  `pipeline.run()` fed it the same render-scoped cap used for casting-images/
+  video). Fixed: `draft_screenplay`'s default changed `3` -> `None` (all
+  scenes when called without an explicit cap — the parameter itself is kept,
+  so `stage screenplay --max-scenes N` can still explicitly request a smaller
+  draft for quick standalone testing); `pipeline.run()`'s screenplay call
+  site no longer passes its `max_scenes` through at all, so a full pipeline
+  run always drafts every scene's screenplay regardless of how many scenes
+  get rendered to video. Confirmed moodboard's existing `tiles` cap is a
+  different, correctly-scoped mechanism (not a violation of the same
+  principle) — tiles get rendered to actual images, unlike the moodboard's
+  film-wide aesthetic fields, which were never scene-scoped to begin with.
+  Deliberately left standalone `stage screenplay`'s CLI default (`max_scenes:
+  1`, shared across all stage types via `stages.run_stage`) untouched — a
+  different use case (explicit single-stage testing) from the full-pipeline
+  behavior this fix targeted. Verified via a stubbed offline test (5 fake
+  scenes, no `max_scenes` arg -> all 5 drafted). `README.md`'s Scene
+  rendering section and the main CLI's `--max-scenes` help text both had the
+  same stale "drafts AND renders" claim — corrected in both places.
 - 2026-07-08 — **Veo prompt assembly rebuilt around the official five-part
   formula; depth-of-field handling removed; focus-hint dicts reconciled and
   de-duplicated; per-frame prompt logging added.** Several related fixes,

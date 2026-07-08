@@ -1366,14 +1366,18 @@ def run(
     ])
     soundscape, visuals, cinematography = g["soundscape"], g["visuals"], g["cinematography"]
 
-    # ── 8/10  screenplay draft ────────────────────────────────────────────────
+    # ── 8/10  screenplay draft — NOT capped by max_scenes: like soundscape/
+    # visuals/cinematography/storyboard, screenplay drafting is a design stage,
+    # not a rendering stage, so it stays aligned with the full scene list and
+    # drafts every scene by default. Only casting-image rendering and
+    # scene_render (actual media generation) restrict themselves to max_scenes.
     def _draft(fb=None, p=None):
         return draft_screenplay(
             source, structure, characters, scenes,
             soundscape=soundscape, visuals=visuals, cinematography=cinematography,
-            casting=casting, max_scenes=max_scenes, profile=p or profile_override, feedback=fb,
+            casting=casting, profile=p or profile_override, feedback=fb,
         )
-    g = run_group(f"8/10 screenplay (first {_scenes_label(max_scenes)} scenes)", "draft", [
+    g = run_group("8/10 screenplay (all scenes)", "draft", [
         _spec("screenplay", lambda: _draft(), _summarize_screenplay, _draft),
     ])
     draft = g["screenplay"]

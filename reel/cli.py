@@ -357,9 +357,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("source", nargs="?", help="path to source text (book/story/script)")
     ap.add_argument("--out", default="output", help="output directory (default: output)")
     ap.add_argument("--max-scenes", type=_max_scenes_arg, default=1,
-                    help="how many scenes to draft AND render (default: 1, prototype), "
-                         "or 'all' for every drafted scene; "
-                         "every shot within each rendered scene is always rendered")
+                    help="how many scenes to RENDER — casting images and video "
+                         "(default: 1, prototype), or 'all' for every scene; "
+                         "every shot within each rendered scene is always rendered. "
+                         "Design/planning stages (screenplay, storyboard, soundscape, "
+                         "visuals, cinematography) always process every scene, "
+                         "regardless of this flag")
     ap.add_argument("--profile", choices=["fast", "quality"], default=None,
                     help="force a single quality tier for every agent")
     ap.add_argument("--genre", default=None,

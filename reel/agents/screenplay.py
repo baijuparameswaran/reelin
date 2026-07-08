@@ -3,9 +3,13 @@
 Fountain (https://fountain.io) is plain-text screenplay markup, so the output is
 human-readable, diff-able, and importable into most screenwriting tools.
 
-On CPU-only hardware, drafting every scene is slow, so by default we draft the
-first `max_scenes` scenes fully — enough to prove the end-to-end slice. Raise it
-(or run the quality profile on a faster box) to draft the whole script.
+Drafts every scene by default, like soundscape/visuals/cinematography/
+storyboard — only the actual RENDERING stages (casting image generation,
+scene_render's video generation) restrict themselves to `max_scenes`; every
+design/planning stage stays aligned with the full scene list and generates
+for all scenes, since that's cheap relative to media generation. Pass an
+explicit `max_scenes` to cap drafting anyway (e.g. quick standalone testing
+on slow hardware via `stage screenplay --max-scenes N`).
 """
 from __future__ import annotations
 
@@ -271,7 +275,7 @@ def draft_screenplay(
     visuals: dict | None = None,
     cinematography: dict | None = None,
     casting: dict | None = None,
-    max_scenes: int | None = 3,
+    max_scenes: int | None = None,
     profile: str | None = None,
     feedback: str | None = None,
 ) -> dict:
@@ -289,8 +293,9 @@ def draft_screenplay(
     )
 
     scene_list = scenes.get("scenes", [])
+    chosen = scene_list[:max_scenes] if max_scenes else scene_list
     drafted = []
-    for scene in scene_list[:max_scenes]:
+    for scene in chosen:
         # Per-scene source context: use the chunk(s) mapped to this scene so the
         # model sees only the relevant passage rather than a truncated global head.
         scene_ctx = scene_source_context(source, scene.get("chunk_indices"))
