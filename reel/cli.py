@@ -123,7 +123,7 @@ def _render_video(argv: list[str]) -> int:
     import shutil
     from pathlib import Path
 
-    from . import fountain, i2v
+    from . import fountain, i2v, gemini
     from .pipeline import _render_scene_frames
 
     ap = argparse.ArgumentParser(prog="reel render",
@@ -138,6 +138,7 @@ def _render_video(argv: list[str]) -> int:
                          "old clips are backed up to output/video_prev)")
     a = ap.parse_args(argv)
     out = Path(a.out)
+    gemini.set_log_dir(out)
 
     fpath = out / "screenplay.fountain"
     if not fpath.exists():
@@ -229,6 +230,7 @@ def _gen_video_prompt(argv: list[str]) -> int:
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         out_path = Path("output") / f"gen_video_{ts}.mp4"
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    gemini.set_log_dir(out_path.parent if a.out else Path("output"))
 
     # Pull config defaults, allow per-call overrides.
     cfg = i2v._cfg()

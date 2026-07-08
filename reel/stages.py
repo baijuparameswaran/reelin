@@ -37,6 +37,7 @@ from .agents.soundscape import design_soundscape
 from .agents.storyboard import plan_storyboard
 from .agents.structure import analyze_structure
 from .agents.visuals import design_visuals
+from . import gemini
 
 
 @dataclass
@@ -220,6 +221,7 @@ def run_stage(name: str, out: str | Path = "output", *, input_path: str | None =
         raise KeyError(f"unknown stage '{name}'. Known: {', '.join(names())}")
     stage = REGISTRY[name]
     outp = Path(out)
+    gemini.set_log_dir(outp)
     ctx: dict = {}
     for dep in stage.inputs:
         ctx[dep] = _resolve_input(dep, outp, input_path)

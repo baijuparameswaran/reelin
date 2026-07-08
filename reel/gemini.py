@@ -18,9 +18,44 @@ import json
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 BASE = "https://generativelanguage.googleapis.com"
+
+# ── API invocation log ─────────────────────────────────────────────────────
+# Set once per run (pipeline.run / stages.run_stage / the standalone `render`
+# and `gen-video` CLI commands) so every actual Gemini/Veo call — not just the
+# prompt text — gets a persistent audit line: timestamp, call kind, model,
+# which transport served it (sdk vs. urllib fallback), and the outcome.
+_LOG_DIR: Path | None = None
+
+
+def set_log_dir(out: Path | str) -> None:
+    """Point subsequent API-invocation log lines at `<out>/logs/gemini_api.log`."""
+    global _LOG_DIR
+    _LOG_DIR = Path(out)
+
+
+def _log_call(kind: str, *, model: str = "", backend: str = "", outcome: str = "",
+              path: Path | str | None = None, note: str = "") -> None:
+    """Append one line to <out>/logs/gemini_api.log. No-ops if set_log_dir was
+    never called (e.g. ad-hoc/unit-test use of this module) rather than raising."""
+    if _LOG_DIR is None:
+        return
+    logs_dir = _LOG_DIR / "logs"
+    try:
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        bits = [ts, kind, f"model={model}", f"backend={backend}", f"outcome={outcome}"]
+        if path is not None:
+            bits.append(f"path={path}")
+        if note:
+            bits.append(note)
+        with open(logs_dir / "gemini_api.log", "a", encoding="utf-8") as f:
+            f.write("  ".join(bits) + "\n")
+    except Exception:
+        pass  # logging must never break an actual API call
 
 # File-based key store: ~/.config/reel/gemini_key  (chmod 600, owner-only)
 _KEY_FILE = Path.home() / ".config" / "reel" / "gemini_key"
@@ -155,9 +190,18 @@ def generate_image(prompt: str, out_path: Path, *,
     """
     full_prompt = _image_prompt(prompt, aspect_ratio=aspect_ratio, image_size=image_size)
     sdk = _sdk()
-    if sdk:
-        return _generate_image_sdk(full_prompt, out_path, model=model, refs=refs, timeout=timeout)
-    return _generate_image_urllib(full_prompt, out_path, model=model, refs=refs, timeout=timeout)
+    backend = "sdk" if sdk else "urllib"
+    try:
+        ok = (_generate_image_sdk(full_prompt, out_path, model=model, refs=refs, timeout=timeout)
+              if sdk else
+              _generate_image_urllib(full_prompt, out_path, model=model, refs=refs, timeout=timeout))
+        _log_call("IMAGE", model=model, backend=backend,
+                  outcome="success" if ok else "failed", path=out_path)
+        return ok
+    except Exception as e:
+        _log_call("IMAGE", model=model, backend=backend,
+                  outcome=f"error({type(e).__name__})", path=out_path)
+        raise
 
 
 def _image_prompt(prompt: str, *, aspect_ratio: str | None, image_size: str | None) -> str:
@@ -247,12 +291,14 @@ def generate_video(prompt: str, out_path: Path, *,
     if sdk:
         for attempt in range(op_retries + 1):
             try:
-                return _generate_video_sdk(prompt, out_path, image_path=image_path,
-                                            model=model, aspect_ratio=aspect_ratio,
-                                            resolution=resolution,
-                                            duration_seconds=duration_seconds,
-                                            poll_seconds=poll_seconds,
-                                            timeout_seconds=timeout_seconds)
+                ok = _generate_video_sdk(prompt, out_path, image_path=image_path,
+                                          model=model, aspect_ratio=aspect_ratio,
+                                          resolution=resolution,
+                                          duration_seconds=duration_seconds,
+                                          poll_seconds=poll_seconds,
+                                          timeout_seconds=timeout_seconds)
+                _log_call("VIDEO", model=model, backend="sdk", outcome="success", path=out_path)
+                return ok
             except ImportError:
                 break  # SDK available but API call failed for non-transient reason → fall through
             except Exception as e:
@@ -261,16 +307,26 @@ def generate_video(prompt: str, out_path: Path, *,
                     wait = min(15.0 * (2 ** attempt), 90.0)
                     print(f"[reel] Veo transient error (code {code}) — resubmitting in "
                           f"{wait:.0f}s (attempt {attempt + 1}/{op_retries})", flush=True)
+                    _log_call("VIDEO", model=model, backend="sdk",
+                              outcome=f"retry(code={code})", path=out_path,
+                              note=f"attempt={attempt + 1}/{op_retries}")
                     time.sleep(wait)
                     continue
                 print(f"[reel] SDK video failed ({type(e).__name__}: {e}) — falling back to urllib",
                       flush=True)
+                _log_call("VIDEO", model=model, backend="sdk",
+                          outcome=f"error({type(e).__name__}, code={code})", path=out_path,
+                          note="falling back to urllib")
                 break
-    return _generate_video_urllib(prompt, out_path, image_path=image_path,
-                                   model=model, aspect_ratio=aspect_ratio,
-                                   resolution=resolution, poll_seconds=poll_seconds,
-                                   timeout_seconds=timeout_seconds,
-                                   op_retries=op_retries)
+    ok = _generate_video_urllib(prompt, out_path, image_path=image_path,
+                                model=model, aspect_ratio=aspect_ratio,
+                                resolution=resolution, poll_seconds=poll_seconds,
+                                timeout_seconds=timeout_seconds,
+                                op_retries=op_retries)
+    _log_call("VIDEO", model=model, backend="urllib",
+              outcome="success" if ok else "failed", path=out_path,
+              note="fallback from sdk" if sdk else "")
+    return ok
 
 
 def _generate_video_sdk(prompt: str, out_path: Path, *,
@@ -408,7 +464,9 @@ def extend_video(prev_video_path: Path, prompt: str, out_path: Path, *,
         video_bytes = client.files.download(file=gen_video.video)
         video_data = bytes(video_bytes) if not isinstance(video_bytes, (bytes, bytearray)) else video_bytes
         Path(out_path).write_bytes(video_data)
+        _log_call("VIDEO_EXTEND", model=model, backend="sdk", outcome="success", path=out_path)
         return True
+    _log_call("VIDEO_EXTEND", model=model, backend="sdk", outcome="failed(no video)", path=out_path)
     raise RuntimeError("Veo extend returned no video")
 
 
@@ -431,10 +489,14 @@ def _generate_video_urllib(prompt: str, out_path: Path, *,
         try:
             return _run_veo_op_urllib(model, body, out_path, poll_seconds, timeout_seconds)
         except RuntimeError as e:
-            if getattr(e, "veo_code", None) in _VEO_TRANSIENT and attempt < op_retries:
+            code = getattr(e, "veo_code", None)
+            if code in _VEO_TRANSIENT and attempt < op_retries:
                 wait = min(15.0 * (2 ** attempt), 90.0)
-                print(f"[reel] Veo transient error (code {e.veo_code}) — resubmitting in "
+                print(f"[reel] Veo transient error (code {code}) — resubmitting in "
                       f"{wait:.0f}s (attempt {attempt + 1}/{op_retries})", flush=True)
+                _log_call("VIDEO", model=model, backend="urllib",
+                          outcome=f"retry(code={code})", path=out_path,
+                          note=f"attempt={attempt + 1}/{op_retries}")
                 time.sleep(wait)
                 continue
             raise
