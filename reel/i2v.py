@@ -156,7 +156,17 @@ def _gen_gemini(images: list[Path], prompt: str, out_path: Path, *,
     poll_seconds = c.get("poll_seconds", 10)
     timeout_seconds = c.get("timeout_seconds", 1200) or 1200
 
-    if c.get("continuity_mode", "seed") == "extend" and prev_clip and Path(prev_clip).exists():
+    want_extend = c.get("continuity_mode", "seed") == "extend" and prev_clip and Path(prev_clip).exists()
+    if want_extend and resolution != "720p":
+        # Extend is fixed at 720p regardless of what the general video config
+        # requests (official Veo guide constraint) — attempting it anyway
+        # would either fail outright or silently produce a lower-resolution
+        # clip than the rest of the render. Go straight to seed continuity
+        # instead of even trying, rather than coercing the resolution.
+        _log(f"      Veo extend skipped — configured resolution ({resolution}) "
+             "isn't 720p (extend only supports 720p); using image-seed continuity")
+        want_extend = False
+    if want_extend:
         try:
             return gemini.extend_video(
                 Path(prev_clip), full_prompt, Path(out_path),

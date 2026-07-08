@@ -417,7 +417,8 @@ def extend_video(prev_video_path: Path, prompt: str, out_path: Path, *,
                  aspect_ratio: str = "16:9",
                  resolution: str = "720p",
                  poll_seconds: float = 10,
-                 timeout_seconds: float = 1200) -> bool:
+                 timeout_seconds: float = 1200,
+                 op_retries: int = 3) -> bool:
     """Extend a previously Veo-generated clip via native video-to-video scene
     extension (SDK only — the Gemini Developer API's extend feature isn't on the
     raw predictLongRunning REST surface `_generate_video_urllib` uses).
@@ -429,10 +430,47 @@ def extend_video(prev_video_path: Path, prompt: str, out_path: Path, *,
 
     Requires: `prev_video_path` must itself be Veo-generated output (a Veo 3.1
     API constraint). Both `veo-3.1-generate-preview` and `-fast-` are reported
-    to support extend; `-lite-` does not. Best-effort — raises on any failure;
-    the caller (`i2v._gen_gemini`) catches this and falls back to the proven
-    image-seed path.
+    to support extend; `-lite-` does not. The extend feature itself is fixed
+    at 720p regardless of what the general video config specifies — this
+    function trusts `resolution` as given rather than silently coercing it
+    (that would violate the caller's configured output resolution for the
+    clip); the caller (`i2v._gen_gemini`) is responsible for only invoking
+    extend when resolution == "720p" and choosing the seed-continuity path
+    otherwise. Retries transient Veo operation errors (8/13/14) with the same
+    exponential backoff as `generate_video`, since a one-shot attempt would
+    otherwise let a routine transient hiccup permanently downgrade this frame
+    to the seed-continuity fallback instead of just retrying the extend call
+    itself. Best-effort — raises on any non-transient failure; the caller
+    catches it and falls back to the proven image-seed path.
     """
+    for attempt in range(op_retries + 1):
+        try:
+            ok = _extend_video_once(prev_video_path, prompt, out_path, model=model,
+                                    aspect_ratio=aspect_ratio, resolution=resolution,
+                                    poll_seconds=poll_seconds, timeout_seconds=timeout_seconds)
+            _log_call("VIDEO_EXTEND", model=model, backend="sdk", outcome="success", path=out_path)
+            return ok
+        except Exception as e:
+            code = getattr(e, "veo_code", None)
+            if code in _VEO_TRANSIENT and attempt < op_retries:
+                wait = min(15.0 * (2 ** attempt), 90.0)
+                print(f"[reel] Veo extend: transient error (code {code}) — resubmitting in "
+                      f"{wait:.0f}s (attempt {attempt + 1}/{op_retries})", flush=True)
+                _log_call("VIDEO_EXTEND", model=model, backend="sdk",
+                          outcome=f"retry(code={code})", path=out_path,
+                          note=f"attempt={attempt + 1}/{op_retries}")
+                time.sleep(wait)
+                continue
+            _log_call("VIDEO_EXTEND", model=model, backend="sdk",
+                      outcome=f"error({type(e).__name__}, code={code})", path=out_path)
+            raise
+    return False
+
+
+def _extend_video_once(prev_video_path: Path, prompt: str, out_path: Path, *,
+                       model: str, aspect_ratio: str, resolution: str,
+                       poll_seconds: float, timeout_seconds: float) -> bool:
+    """Single extend attempt — no retry, no logging (extend_video wraps both)."""
     genai, types = _sdk() or (None, None)
     if genai is None:
         raise ImportError("google-genai not installed — run: pip install google-genai")
@@ -464,9 +502,17 @@ def extend_video(prev_video_path: Path, prompt: str, out_path: Path, *,
         video_bytes = client.files.download(file=gen_video.video)
         video_data = bytes(video_bytes) if not isinstance(video_bytes, (bytes, bytearray)) else video_bytes
         Path(out_path).write_bytes(video_data)
-        _log_call("VIDEO_EXTEND", model=model, backend="sdk", outcome="success", path=out_path)
         return True
-    _log_call("VIDEO_EXTEND", model=model, backend="sdk", outcome="failed(no video)", path=out_path)
+
+    # Operation completed with no video — same shape the urllib/SDK video path
+    # already parses (`operation.error` mirrors the raw REST `status["error"]`).
+    # Surface the real code via `.veo_code` so the retry loop above can tell a
+    # transient failure from a hard one instead of always falling through.
+    if operation.error:
+        err = RuntimeError(f"Veo extend failed: {operation.error}")
+        err.veo_code = (operation.error.get("code")
+                        if isinstance(operation.error, dict) else None)
+        raise err
     raise RuntimeError("Veo extend returned no video")
 
 
