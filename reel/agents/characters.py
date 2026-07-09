@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from .. import llm
 from ..llm import MAX_CHARS
+from ..revision_merge import merge_by_key
 
 SYSTEM = (
     "You are a casting-minded script analyst. You identify characters and their "
@@ -57,12 +58,24 @@ SOURCE MATERIAL (title: {title}):
 
 
 def extract_characters(
-    source: dict, profile: str | None = None, feedback: str | None = None
+    source: dict, profile: str | None = None, feedback: str | None = None,
+    existing: dict | None = None, revise_keys: set | None = None,
 ) -> dict:
+    """`existing` + `revise_keys` (a set of character `name`s) support a
+    scoped revision — same pattern as `reel.agents.casting.cast_characters`:
+    the model still sees the full source text, but the caller only trusts its
+    output for the targeted names, splicing everything else back in
+    byte-identical from `existing["characters"]`."""
     profile = profile or llm.agent_profile("characters")
     prompt = llm.with_feedback(
         PROMPT.format(title=source["title"], text=source["text"][:MAX_CHARS]),
         feedback,
     )
     raw = llm.generate(prompt, profile=profile, system=SYSTEM, as_json=True)
-    return llm.safe_json(raw)
+    result = llm.safe_json(raw)
+    if revise_keys is not None and existing:
+        result["characters"] = merge_by_key(
+            existing.get("characters", []), result.get("characters", []),
+            lambda c: c.get("name"), revise_keys,
+        )
+    return result

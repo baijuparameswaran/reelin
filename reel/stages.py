@@ -63,38 +63,44 @@ def _ingest(ctx, **_):
 def _structure(ctx, *, profile=None, feedback=None, **_):
     return analyze_structure(ctx["source"], profile, feedback=feedback)
 
-def _characters(ctx, *, profile=None, feedback=None, **_):
-    return extract_characters(ctx["source"], profile, feedback=feedback)
+def _characters(ctx, *, profile=None, feedback=None, existing=None, revise_keys=None, **_):
+    return extract_characters(ctx["source"], profile, feedback=feedback,
+                              existing=existing, revise_keys=revise_keys)
 
 def _moodboard(ctx, *, profile=None, feedback=None, max_scenes=1, **_):
     src = ctx.get("source") or {}
     return design_moodboard(ctx["structure"], src.get("text", ""), ctx.get("genre"),
                             max_scenes=max_scenes, profile=profile, feedback=feedback)
 
-def _scenes(ctx, *, profile=None, feedback=None, **_):
-    return segment_scenes(ctx["source"], ctx["structure"], profile=profile, feedback=feedback)
+def _scenes(ctx, *, profile=None, feedback=None, existing=None, revise_keys=None, **_):
+    return segment_scenes(ctx["source"], ctx["structure"], profile=profile, feedback=feedback,
+                          existing=existing, revise_keys=revise_keys)
 
-def _casting(ctx, *, profile=None, feedback=None, **_):
+def _casting(ctx, *, profile=None, feedback=None, existing=None, revise_keys=None, **_):
     return cast_characters(ctx["structure"], ctx["characters"], profile, feedback=feedback,
-                           scenes=ctx.get("scenes"))
+                           scenes=ctx.get("scenes"), existing=existing, revise_keys=revise_keys)
 
-def _soundscape(ctx, *, profile=None, feedback=None, **_):
-    return design_soundscape(ctx["structure"], ctx["scenes"], profile, feedback=feedback)
+def _soundscape(ctx, *, profile=None, feedback=None, existing=None, revise_keys=None, **_):
+    return design_soundscape(ctx["structure"], ctx["scenes"], profile, feedback=feedback,
+                             existing=existing, revise_keys=revise_keys)
 
-def _visuals(ctx, *, profile=None, feedback=None, **_):
-    return design_visuals(ctx["structure"], ctx["scenes"], profile, feedback=feedback)
+def _visuals(ctx, *, profile=None, feedback=None, existing=None, revise_keys=None, **_):
+    return design_visuals(ctx["structure"], ctx["scenes"], profile, feedback=feedback,
+                          existing=existing, revise_keys=revise_keys)
 
-def _cinematography(ctx, *, profile=None, feedback=None, **_):
-    return plan_cinematography(ctx["structure"], ctx["scenes"], profile, feedback=feedback)
+def _cinematography(ctx, *, profile=None, feedback=None, existing=None, revise_keys=None, **_):
+    return plan_cinematography(ctx["structure"], ctx["scenes"], profile, feedback=feedback,
+                               existing=existing, revise_keys=revise_keys)
 
-def _screenplay(ctx, *, profile=None, feedback=None, max_scenes=1, **_):
+def _screenplay(ctx, *, profile=None, feedback=None, max_scenes=1, existing=None, revise_keys=None, **_):
     return draft_screenplay(
         ctx["source"], ctx["structure"], ctx["characters"], ctx["scenes"],
         soundscape=ctx.get("soundscape"), visuals=ctx.get("visuals"),
         cinematography=ctx.get("cinematography"), casting=ctx.get("casting"),
-        max_scenes=max_scenes, profile=profile, feedback=feedback)
+        max_scenes=max_scenes, profile=profile, feedback=feedback,
+        existing=existing, revise_keys=revise_keys)
 
-def _storyboard(ctx, *, out, profile=None, feedback=None, **_):
+def _storyboard(ctx, *, out, profile=None, feedback=None, existing=None, revise_keys=None, **_):
     src = ctx.get("source") or {}
     return plan_storyboard(
         ctx["structure"], ctx["scenes"], ctx["casting"], ctx["soundscape"],
@@ -103,7 +109,8 @@ def _storyboard(ctx, *, out, profile=None, feedback=None, **_):
         source=src,
         source_text=src.get("text", ""),   # backward-compat fallback
         moodboard=ctx.get("moodboard"),
-        profile=profile, feedback=feedback, out=out)
+        profile=profile, feedback=feedback, out=out,
+        existing=existing, revise_keys=revise_keys)
 
 def _casting_images(ctx, *, out, **_):
     from . import pipeline as P                      # lazy: avoid import cycle
@@ -169,6 +176,39 @@ def names() -> list[str]:
     return [s.name for s in STAGES]
 
 
+def downstream_of(name: str) -> list[str]:
+    """Every stage (directly or transitively) downstream of `name`, in
+    STAGES declaration order — the set that needs re-running when `name`'s
+    artifact changes. Built from `inputs`/`optional`, the only place stage
+    dependencies exist as data rather than implicit in `pipeline.run()`'s
+    call order — this naturally includes render stages too (e.g.
+    `downstream_of("casting")` includes `casting_images`;
+    `downstream_of("storyboard")` includes `scene_render`), since those are
+    ordinary `STAGES` entries whose `inputs` name the artifacts they render
+    from. Raises KeyError for an unknown stage name."""
+    if name not in REGISTRY:
+        raise KeyError(f"unknown stage '{name}'. Known: {', '.join(names())}")
+    target_artifact = REGISTRY[name].artifact()
+
+    # artifact -> stage names that declare it as a required or optional input
+    consumers: dict[str, list[str]] = {}
+    for s in STAGES:
+        for dep in (*s.inputs, *s.optional):
+            consumers.setdefault(dep, []).append(s.name)
+
+    affected: set[str] = set()
+    frontier = [target_artifact]
+    while frontier:
+        artifact = frontier.pop()
+        for consumer_name in consumers.get(artifact, []):
+            if consumer_name in affected:
+                continue
+            affected.add(consumer_name)
+            frontier.append(REGISTRY[consumer_name].artifact())
+
+    return [s.name for s in STAGES if s.name in affected]
+
+
 # ── input resolution + independent invocation ────────────────────────────────
 
 def _load(out: Path, name: str) -> dict | None:
@@ -214,10 +254,22 @@ def _save_artifact(out: Path, name: str, data) -> None:
 
 def run_stage(name: str, out: str | Path = "output", *, input_path: str | None = None,
               profile: str | None = None, feedback: str | None = None,
-              max_scenes: int | None = 1, save: bool = True) -> dict:
+              max_scenes: int | None = 1, save: bool = True,
+              existing: dict | None = None, revise_keys: set | None = None) -> dict:
     """Invoke a single stage independently. Loads each required input from its
     checkpoint in `out` (ingesting the source on demand), runs the stage, and
-    writes its artifact. Returns the stage result."""
+    writes its artifact. Returns the stage result.
+
+    `existing` + `revise_keys` support a SCOPED revision (see `reel.cli`'s
+    `revise` command): for the stages whose agent accepts them (scenes,
+    casting, soundscape, visuals, cinematography, screenplay, storyboard,
+    characters — the per-scene/per-name-keyed ones), passing `existing` (that
+    stage's own prior artifact — NOT one of its upstream inputs) plus
+    `revise_keys` (a set of scene numbers or names) causes only those keys to
+    actually change; every other key comes back byte-identical. Both default
+    to `None`, fully backward compatible with every existing call site —
+    stages whose agent doesn't accept the two kwargs simply ignore them via
+    their `**_` catch-all."""
     if name not in REGISTRY:
         raise KeyError(f"unknown stage '{name}'. Known: {', '.join(names())}")
     stage = REGISTRY[name]
@@ -231,7 +283,8 @@ def run_stage(name: str, out: str | Path = "output", *, input_path: str | None =
         data = _load(outp, dep)
         if data is not None:
             ctx[dep] = data
-    result = stage.run(ctx, out=outp, profile=profile, feedback=feedback, max_scenes=max_scenes)
+    result = stage.run(ctx, out=outp, profile=profile, feedback=feedback, max_scenes=max_scenes,
+                       existing=existing, revise_keys=revise_keys)
     if save and isinstance(result, dict):
         _save_artifact(outp, stage.artifact(), result)
         if name == "screenplay":

@@ -19,6 +19,7 @@ import re
 
 from .. import llm
 from ..llm import MAX_CHARS
+from ..revision_merge import merge_by_key
 from .ingest import chunk_text, CHUNK_SIZE
 
 SYSTEM = (
@@ -139,7 +140,20 @@ def segment_scenes(
     target: str = "8-14 scenes",
     profile: str | None = None,
     feedback: str | None = None,
+    existing: dict | None = None,
+    revise_keys: set | None = None,
 ) -> dict:
+    """`existing` + `revise_keys` (a set of scene `number`s) support a scoped
+    revision: the model still sees the FULL source text and re-segments the
+    whole story (scene boundaries need full-story awareness to stay
+    consistent), but the caller only trusts its output for the numbers in
+    `revise_keys` — every other scene number is spliced back in
+    byte-identical from `existing["scenes"]`. Scene insertion/deletion/
+    reordering is out of scope for a scoped revision in v1 (see
+    `reel.artifact_diff`'s `allow_add=False, allow_remove=False` for
+    "scenes") — a revision that changes the scene COUNT should go through
+    `reel.artifact_diff.diff_artifact`'s drastic path (a full, non-scoped
+    regeneration) instead of `revise_keys`."""
     profile = profile or llm.agent_profile("scenes")
     beats = json.dumps(structure.get("three_act", {}), ensure_ascii=False, indent=2)
     source_text = source["text"][:MAX_CHARS]
@@ -157,6 +171,9 @@ def segment_scenes(
     scenes = result.get("scenes") or []
     scenes, dropped = _validate(scenes, source_text)
     scenes = _map_chunks(scenes, source)
+    if revise_keys is not None and existing:
+        scenes = merge_by_key(existing.get("scenes", []), scenes,
+                              lambda s: s.get("number"), revise_keys)
     result["scenes"] = scenes
     result["dropped_scenes"] = dropped
     return result

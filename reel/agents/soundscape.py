@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 
 from .. import llm
+from ..revision_merge import merge_by_key
 
 SYSTEM = (
     "You are a professional film sound designer and music supervisor. You craft "
@@ -80,7 +81,16 @@ def design_soundscape(
     scenes: dict,
     profile: str | None = None,
     feedback: str | None = None,
+    existing: dict | None = None,
+    revise_keys: set | None = None,
 ) -> dict:
+    """`existing` + `revise_keys` (a set of `scene_number`s) support a scoped
+    revision: the model still designs the soundscape for the WHOLE scene list
+    (cross-scene continuity — e.g. a shared-location ambient bed — needs full
+    context), but the caller only trusts the response for the targeted scene
+    numbers; every other scene's entry is spliced back in byte-identical from
+    `existing["soundscapes"]` (note: this artifact's list field is
+    `"soundscapes"`, not `"scenes"` like visuals/cinematography/screenplay)."""
     profile = profile or llm.agent_profile("soundscape")
     scene_list = json.dumps(
         [
@@ -103,4 +113,10 @@ def design_soundscape(
         feedback,
     )
     raw = llm.generate(prompt, profile=profile, system=SYSTEM, as_json=True)
-    return llm.safe_json(raw)
+    result = llm.safe_json(raw)
+    if revise_keys is not None and existing:
+        result["soundscapes"] = merge_by_key(
+            existing.get("soundscapes", []), result.get("soundscapes", []),
+            lambda s: s.get("scene_number"), revise_keys,
+        )
+    return result

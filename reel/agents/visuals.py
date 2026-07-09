@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 
 from .. import llm
+from ..revision_merge import merge_by_key
 
 SYSTEM = (
     "You are a professional film cinematographer and production designer. You "
@@ -94,7 +95,13 @@ def design_visuals(
     scenes: dict,
     profile: str | None = None,
     feedback: str | None = None,
+    existing: dict | None = None,
+    revise_keys: set | None = None,
 ) -> dict:
+    """`existing` + `revise_keys` (a set of `scene_number`s) support a scoped
+    revision — see `reel.agents.soundscape.design_soundscape`'s docstring for
+    the shared rationale. This artifact's list field is `"scenes"`, keyed by
+    `scene_number`."""
     profile = profile or llm.agent_profile("visuals")
     scene_list = json.dumps(
         [
@@ -117,4 +124,10 @@ def design_visuals(
         feedback,
     )
     raw = llm.generate(prompt, profile=profile, system=SYSTEM, as_json=True)
-    return llm.safe_json(raw)
+    result = llm.safe_json(raw)
+    if revise_keys is not None and existing:
+        result["scenes"] = merge_by_key(
+            existing.get("scenes", []), result.get("scenes", []),
+            lambda s: s.get("scene_number"), revise_keys,
+        )
+    return result

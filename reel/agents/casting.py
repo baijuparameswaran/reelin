@@ -46,6 +46,7 @@ from __future__ import annotations
 import json
 
 from .. import llm
+from ..revision_merge import merge_by_key
 
 SYSTEM = (
     "You are a film casting director working hand-in-hand with a costume "
@@ -213,7 +214,21 @@ def cast_characters(
     profile: str | None = None,
     feedback: str | None = None,
     scenes: dict | None = None,
+    existing: dict | None = None,
+    revise_keys: set | None = None,
 ) -> dict:
+    """`existing` + `revise_keys` (a set of casting `name`s) support a scoped
+    revision: the LLM still sees the FULL character/location breakdown (its
+    casting-consistency rules need whole-cast context — e.g. distinct actors
+    per role), but the caller only trusts the response for the names in
+    `revise_keys`; every other name is spliced back in byte-identical from
+    `existing["casting"]` via `revision_merge.merge_by_key`. This is what
+    keeps an untouched character/location's `visual_prompt` text — and thus
+    its `_content_hash` in `pipeline._render_casting_images` — stable, so its
+    already-rendered reference image is reused rather than regenerated from
+    incidental LLM rewording. A genuinely new name (not in `existing` at all)
+    doesn't need to be in `revise_keys` — it's picked up automatically by
+    `merge_by_key`'s "append new keys" behavior."""
     profile = profile or llm.agent_profile("casting")
     cast_input = json.dumps(
         [
@@ -241,4 +256,10 @@ def cast_characters(
         feedback,
     )
     raw = llm.generate(prompt, profile=profile, system=SYSTEM, as_json=True)
-    return llm.safe_json(raw)
+    result = llm.safe_json(raw)
+    if revise_keys is not None and existing:
+        result["casting"] = merge_by_key(
+            existing.get("casting", []), result.get("casting", []),
+            lambda c: c.get("name"), revise_keys,
+        )
+    return result

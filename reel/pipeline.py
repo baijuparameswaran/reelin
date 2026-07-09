@@ -69,6 +69,7 @@ from . import i2v
 from . import veo_guide
 from . import gemini
 from . import session
+from .revision_merge import merge_by_key
 
 
 def _log(msg: str) -> None:
@@ -671,8 +672,119 @@ def _frame_char_anchor(frame: dict, cast_index: dict, out: Path) -> Path | None:
     return None
 
 
+def _render_one_panel(fr: dict, snum, sdir: Path, seed: Path | None,
+                      prev_clip_path: Path | None, out: Path, *,
+                      casting_lookup: dict, location_desc: str, visual_overview: dict,
+                      voice_index: dict, audio_overview: dict,
+                      no_bg_music: bool, room_tone: bool, no_subtitles: bool,
+                      force: bool = False) -> dict:
+    """Render (or skip, if unchanged) exactly ONE storyboard panel's video
+    clip. Shared by `_render_scene_frames`'s per-scene loop and
+    `rerender_panels`'s targeted re-render, so the hash/render/overlay/tail-
+    extraction logic lives in exactly one place rather than drifting between
+    two call sites.
+
+    `force=True` bypasses the `_stale` staleness check entirely and always
+    (re-)renders — used by `rerender_panels` for its explicitly targeted
+    panel(s), since a caller re-rendering a specific panel on purpose wants
+    that panel rebuilt even in the rare case its prompt+seed happen to hash
+    identically to before.
+
+    Returns a dict: `frame_record` (the frames_out-shaped manifest entry —
+    including the `start_frame`/`end_frame` fields), `prompt` (the exact Veo
+    prompt used, for the per-scene prompt log), `tag`, `tail_path`/
+    `clip_path` (Path objects, for the caller to chain continuity forward),
+    `rendered` (True if a fresh clip was actually generated this call — as
+    opposed to skipped because it was already current), `failed` (True if
+    generation was attempted but did not produce a clip)."""
+    fnum = fr.get("panel") or fr.get("frame", 0)
+    prompt = _panel_video_prompt(fr, audio_overview,
+                                 casting_lookup=casting_lookup,
+                                 location_desc=location_desc,
+                                 visual_overview=visual_overview,
+                                 voice_index=voice_index,
+                                 no_bg_music=no_bg_music, room_tone=room_tone,
+                                 no_subtitles=no_subtitles)
+    tag = f"{int(fnum):02d}" if isinstance(fnum, int) else str(fnum)
+    clip = sdir / f"frame_{tag}.mp4"
+    tail_img = sdir / f"frame_{tag}_tail.png"
+    hash_path = sdir / f"frame_{tag}.hash"
+    # Hash covers both the prompt AND the seed image bytes: a feedback/
+    # revision to an earlier frame changes its tail frame, which changes
+    # this frame's seed, which — even with an unchanged prompt — must still
+    # invalidate this clip so continuity re-chains correctly.
+    current_hash = _content_hash(prompt, seed, prev_clip_path)
+    rendered = False
+    failed = False
+    if force or _stale(clip, hash_path, current_hash):
+        if clip.exists():
+            _log(f"      scene {snum} frame {tag} — prompt/seed revised, re-rendering …")
+        if i2v.generate_clip([seed] if seed else [], prompt, clip, prev_clip=prev_clip_path):
+            rendered = True
+            # Burn subtitle + shot-label overlays onto the clip (in-place)
+            # when the operator enables them in config video.overlays.
+            if i2v.overlays_enabled():
+                dlg = _panel_dialogue_lines(fr)
+                stype = fr.get("shot_type") or ""
+                shot_lbl = f"S{snum}·F{tag}" + (f"·{stype}" if stype else "")
+                i2v.add_overlays(clip, clip, dialogue_lines=dlg or None, shot_label=shot_lbl)
+            # Always extract the tail frame so every clip has one on disk.
+            # Continuity chains it forward as the next-clip seed; ffmpeg
+            # stitching benefits from having clean cut-points regardless.
+            i2v.last_frame(clip, tail_img)
+            hash_path.write_text(current_hash)
+        else:
+            failed = True
+            _log(f"      ⚠ scene {snum} frame {tag} — clip not produced")
+
+    frame_record = {
+        "panel": fnum,
+        "shot_type": fr.get("shot_type", ""),
+        "action": fr.get("action") or fr.get("moment", ""),
+        "seed": str(Path(seed).relative_to(out)) if seed and Path(seed).exists() else None,
+        # start_frame/end_frame: explicit record of this clip's first and last
+        # frame (start_frame duplicates "seed" — kept for back-compat with any
+        # existing reader of that field), so a specific panel can be
+        # re-rendered alone later and correctly re-seeded/re-stitched against
+        # its neighbors (see rerender_panels) without re-deriving these paths.
+        "start_frame": str(Path(seed).relative_to(out)) if seed and Path(seed).exists() else None,
+        "end_frame": str(tail_img.relative_to(out)) if tail_img.exists() else None,
+        "clip": str(clip.relative_to(out)) if clip.exists() else None,
+    }
+    return {
+        "frame_record": frame_record,
+        "prompt": prompt,
+        "tag": tag,
+        "tail_path": tail_img,
+        "clip_path": clip,
+        "rendered": rendered,
+        "failed": failed,
+    }
+
+
+def _stitch_scene(scene_vid: Path, frames_out: list, out: Path, snum) -> str | None:
+    """Unconditionally (re)build `scene_vid` from `frames_out`'s clips, in
+    order (ffmpeg's `-y` overwrites any existing file). Returns the relative
+    path string on success, None if there were no clips to stitch or the
+    stitch failed. Callers decide whether a re-stitch is actually needed —
+    `_render_scene_frames` skips calling this when `scene_vid` already exists
+    (the normal resume case, nothing changed); `rerender_panels` always calls
+    it, since it just changed at least one clip in this scene."""
+    scene_clips = [out / fr["clip"] for fr in frames_out
+                   if fr.get("clip") and (out / fr["clip"]).exists()]
+    if not scene_clips:
+        return None
+    if i2v.stitch(scene_clips, scene_vid):
+        _log(f"      scene {snum}: stitched {len(scene_clips)} clip(s) → {scene_vid.name}")
+        return str(scene_vid.relative_to(out))
+    _log(f"      ⚠ scene {snum}: per-scene stitch failed")
+    return None
+
+
 def _render_scene_frames(storyboard: dict, casting: dict, out: Path,
                          max_scenes: int | None = None,
+                         only_scenes: set | None = None,
+                         existing_manifest: dict | None = None,
                          characters: dict | None = None) -> dict:
     """Render each storyboard frame as a video clip (Veo image-to-video), then
     stitch each scene's clips into a per-scene video (output/video/scene_NN.mp4)
@@ -686,9 +798,22 @@ def _render_scene_frames(storyboard: dict, casting: dict, out: Path,
     character's vocal-quality description so dialogue cues stay consistent
     across separately-generated clips (see `_panel_video_prompt`).
 
-    max_scenes caps how many scenes are rendered; every shot within each rendered
-    scene is always included. Best-effort + idempotent (skips existing files;
-    re-renders when a feedback revision changed the prompt — see `_stale`).
+    max_scenes caps how many scenes are rendered (a LEADING SLICE — the first
+    N); every shot within each rendered scene is always included. `only_scenes`
+    (a set of `scene_number`s) instead targets a SPECIFIC subset — the two are
+    mutually exclusive; `only_scenes` wins if both are given. Used by the
+    `revise` CLI flow to re-render exactly the scene(s) a revision touched
+    without re-processing the whole story. Best-effort + idempotent (skips
+    existing files; re-renders when a feedback revision changed the prompt —
+    see `_stale`).
+
+    `existing_manifest`: when scoping to `only_scenes`, this function would
+    otherwise overwrite output/video/manifest.json with a manifest containing
+    ONLY the scoped scene(s) — silently discarding every other scene's
+    record. Pass the current manifest (e.g. loaded from
+    output/video/manifest.json) so untouched scenes' entries and running
+    clip/failed counts are preserved; only the processed scene(s)' entries are
+    replaced/appended.
     """
     if not i2v.enabled():
         _log(f"      scene render skipped — {i2v.unavailable_hint()}")
@@ -723,7 +848,9 @@ def _render_scene_frames(storyboard: dict, casting: dict, out: Path,
     manifest = {"continuity": continuity, "clips": 0, "failed": 0, "scenes": []}
 
     board = storyboard.get("storyboard", [])
-    if max_scenes:
+    if only_scenes is not None:
+        board = [s for s in board if s.get("scene_number") in only_scenes]
+    elif max_scenes:
         board = board[:max_scenes]              # limit scenes, never the shots within
     for scene in board:
         snum = scene.get("scene_number", "x")
@@ -749,72 +876,36 @@ def _render_scene_frames(storyboard: dict, casting: dict, out: Path,
         visual_overview = scene.get("visual_overview") or {}
 
         for fr in panels:
-            fnum = fr.get("panel") or fr.get("frame", len(frames_out) + 1)
-            prompt = _panel_video_prompt(fr, audio_overview,
-                                         casting_lookup=casting_lookup,
-                                         location_desc=location_desc,
-                                         visual_overview=visual_overview,
-                                         voice_index=voice_index,
-                                         no_bg_music=no_bg_music, room_tone=room_tone,
-                                         no_subtitles=no_subtitles)
-            tag = f"{int(fnum):02d}" if isinstance(fnum, int) else str(fnum)
-
             # Seed: continue from the previous frame's tail (carries the look
             # forward); the first frame of a scene seeds from the in-frame
             # character's representation image (identity reference).
             seed = prev_tail if (prev_tail and continuity) else _frame_char_anchor(fr, cast_index, out)
-            clip = sdir / f"frame_{tag}.mp4"
-            tail_img = sdir / f"frame_{tag}_tail.png"
-            hash_path = sdir / f"frame_{tag}.hash"
-            # Hash covers both the prompt AND the seed image bytes: a feedback
-            # revision to an earlier frame changes its tail frame, which changes
-            # this frame's seed, which — even with an unchanged prompt — must
-            # still invalidate this clip so continuity re-chains correctly.
-            current_hash = _content_hash(prompt, seed, prev_clip_path)
-            if _stale(clip, hash_path, current_hash):
-                if clip.exists():
-                    _log(f"      scene {snum} frame {tag} — prompt/seed revised, re-rendering …")
-                if i2v.generate_clip([seed] if seed else [], prompt, clip, prev_clip=prev_clip_path):
-                    manifest["clips"] += 1
-                    # Burn subtitle + shot-label overlays onto the clip (in-place)
-                    # when the operator enables them in config video.overlays.
-                    if i2v.overlays_enabled():
-                        dlg = _panel_dialogue_lines(fr)
-                        stype = fr.get("shot_type") or ""
-                        shot_lbl = f"S{snum}·F{tag}" + (f"·{stype}" if stype else "")
-                        i2v.add_overlays(clip, clip,
-                                         dialogue_lines=dlg or None,
-                                         shot_label=shot_lbl)
-                    # Always extract the tail frame so every clip has one on disk.
-                    # Continuity chains it forward as the next-clip seed;
-                    # ffmpeg stitching benefits from having clean cut-points regardless.
-                    tail = i2v.last_frame(clip, tail_img)
-                    hash_path.write_text(current_hash)
-                    if continuity:
-                        prev_tail = tail or seed
-                        prev_clip_path = clip
-                else:
-                    manifest["failed"] += 1
-                    _log(f"      ⚠ scene {snum} frame {tag} — clip not produced")
+            res = _render_one_panel(fr, snum, sdir, seed, prev_clip_path, out,
+                                    casting_lookup=casting_lookup, location_desc=location_desc,
+                                    visual_overview=visual_overview, voice_index=voice_index,
+                                    audio_overview=audio_overview,
+                                    no_bg_music=no_bg_music, room_tone=room_tone,
+                                    no_subtitles=no_subtitles)
+            if res["rendered"]:
+                manifest["clips"] += 1
+                if continuity:
+                    prev_tail = res["tail_path"] if res["tail_path"].exists() else seed
+                    prev_clip_path = res["clip_path"]
+            elif res["failed"]:
+                manifest["failed"] += 1
             elif continuity:
                 # Already up to date — still chain forward from its tail frame
                 # (previously this branch left prev_tail untouched, so a resumed
                 # run with some frames already rendered would reset newer frames
                 # to the character anchor instead of continuing the scene).
-                prev_tail = tail_img if tail_img.exists() else seed
-                prev_clip_path = clip
+                prev_tail = res["tail_path"] if res["tail_path"].exists() else seed
+                prev_clip_path = res["clip_path"]
 
-            frames_out.append({
-                "panel": fnum,
-                "shot_type": fr.get("shot_type", ""),
-                "action": fr.get("action") or fr.get("moment", ""),
-                "seed": str(Path(seed).relative_to(out)) if seed and Path(seed).exists() else None,
-                "clip": str(clip.relative_to(out)) if clip.exists() else None,
-            })
+            frames_out.append(res["frame_record"])
             prompt_log.append({
-                "tag": tag,
-                "prompt": prompt,
-                "clip": str(clip.relative_to(out)) if clip.exists() else None,
+                "tag": res["tag"],
+                "prompt": res["prompt"],
+                "clip": res["frame_record"]["clip"],
             })
 
         _write_scene_prompt_log(
@@ -826,18 +917,10 @@ def _render_scene_frames(storyboard: dict, casting: dict, out: Path,
 
         # Stitch this scene's frame clips into a scene-level video.
         scene_vid = vdir / (f"scene_{snum:02d}.mp4" if isinstance(snum, int) else f"scene_{snum}.mp4")
-        scene_vid_rel: str | None = None
         if scene_vid.exists():
             scene_vid_rel = str(scene_vid.relative_to(out))   # already done (resume)
         else:
-            scene_clips = [out / fr["clip"] for fr in frames_out
-                           if fr.get("clip") and (out / fr["clip"]).exists()]
-            if scene_clips:
-                if i2v.stitch(scene_clips, scene_vid):
-                    scene_vid_rel = str(scene_vid.relative_to(out))
-                    _log(f"      scene {snum}: stitched {len(scene_clips)} clip(s) → {scene_vid.name}")
-                else:
-                    _log(f"      ⚠ scene {snum}: per-scene stitch failed")
+            scene_vid_rel = _stitch_scene(scene_vid, frames_out, out, snum)
 
         manifest["scenes"].append({
             "scene_number": snum,
@@ -845,12 +928,220 @@ def _render_scene_frames(storyboard: dict, casting: dict, out: Path,
             "scene_video": scene_vid_rel,
         })
 
+    if existing_manifest is not None:
+        # Splice this call's processed scene(s) into the full prior manifest —
+        # otherwise a scoped (only_scenes) call would overwrite manifest.json
+        # with just the scene(s) it touched, discarding every other scene's
+        # record. Running counts add on top of the prior totals.
+        processed_numbers = {s.get("scene_number") for s in manifest["scenes"]}
+        manifest["scenes"] = merge_by_key(
+            existing_manifest.get("scenes", []), manifest["scenes"],
+            lambda s: s.get("scene_number"), processed_numbers,
+        )
+        manifest["clips"] = existing_manifest.get("clips", 0) + manifest["clips"]
+        manifest["failed"] = existing_manifest.get("failed", 0) + manifest["failed"]
+
     # Final assembly: stitch scene videos (preferred) or raw clips into movie.mp4.
     movie = _assemble_movie(manifest, out)
     if movie:
         manifest["movie"] = str(movie.relative_to(out))
 
     (vdir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2))
+    return manifest
+
+
+def rerender_panels(storyboard: dict, casting: dict, out: Path, *,
+                    scene_number, panel_numbers: list,
+                    characters: dict | None = None) -> dict:
+    """Re-render specific panel(s) of ONE scene, cascade exactly ONE panel
+    forward (the panel immediately after the last targeted one, reseeded from
+    its new end_frame, to keep that one seam visually smooth), then STOP —
+    deliberately bounded to avoid re-rendering (and re-paying Veo API cost
+    for) the rest of the scene. Re-stitches the scene and reassembles
+    movie.mp4 afterward.
+
+    Requires `output/video/manifest.json` to already have an entry for this
+    scene (i.e. it was rendered at least once by `_render_scene_frames`) — a
+    never-rendered scene has no prior end_frame to chain the first targeted
+    panel's start from; render it via
+    `_render_scene_frames(..., only_scenes={scene_number})` instead.
+
+    Returns the updated manifest (also written to output/video/manifest.json).
+    """
+    vdir = out / "video"
+    manifest_path = vdir / "manifest.json"
+    if not manifest_path.exists():
+        raise FileNotFoundError(
+            f"no {manifest_path} — this scene has never been rendered; use "
+            "_render_scene_frames(..., only_scenes={scene_number}) first")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    scene_entry = next((s for s in manifest.get("scenes", [])
+                        if s.get("scene_number") == scene_number), None)
+    if scene_entry is None:
+        raise FileNotFoundError(
+            f"no manifest entry for scene {scene_number} — it has never been "
+            "rendered; use _render_scene_frames(..., only_scenes={scene_number}) first")
+
+    board_scene = next((s for s in storyboard.get("storyboard", [])
+                        if s.get("scene_number") == scene_number), None)
+    if board_scene is None:
+        raise KeyError(f"scene {scene_number} not found in storyboard")
+
+    vcfg = i2v._cfg()
+    audio_cfg = vcfg.get("audio", {})
+    no_bg_music = bool(audio_cfg.get("no_background_music", True))
+    room_tone = bool(audio_cfg.get("room_tone", True))
+    no_subtitles = bool(audio_cfg.get("no_subtitles", True))
+
+    cast_index = {}
+    casting_lookup: dict[str, dict] = {}
+    for c in casting.get("casting", []):
+        ch = c.get("character", c)
+        rel = ch.get("image_path") or c.get("image_path")
+        if rel:
+            cast_index[c.get("name")] = rel
+        casting_lookup[c.get("name")] = c
+    voice_index = {
+        c.get("name"): c.get("voice", "")
+        for c in (characters or {}).get("characters", [])
+        if c.get("name") and c.get("voice")
+    }
+    audio_overview = board_scene.get("audio_overview") or {}
+    loc_name = (board_scene.get("header", {}).get("location") or "").strip()
+    loc_entry = casting_lookup.get(loc_name, {})
+    loc_ch = loc_entry.get("character", loc_entry)
+    location_desc = loc_ch.get("visual_prompt") or loc_name
+    visual_overview = board_scene.get("visual_overview") or {}
+    panels = board_scene.get("panels") or board_scene.get("frames", [])
+    panels_by_num = {(p.get("panel") or p.get("frame")): p for p in panels}
+
+    snum = scene_number
+    sdir = vdir / (f"scene_{snum:02d}" if isinstance(snum, int) else f"scene_{snum}")
+    sdir.mkdir(exist_ok=True)
+
+    frames_by_num = {f.get("panel"): f for f in scene_entry.get("frames", [])}
+    first_panel_num = min(panels_by_num) if panels_by_num else None
+
+    def _resolve_start_frame(pnum):
+        """Start frame for panel `pnum`: the casting reference image if it's
+        the scene's first panel, else the immediately-preceding panel's
+        recorded end_frame — falling back to re-deriving the tail PNG from
+        disk (it's always written on a fresh render regardless of whether an
+        older manifest predates the end_frame field) if that record is
+        missing."""
+        if pnum == first_panel_num:
+            return _frame_char_anchor(panels_by_num[pnum], cast_index, out)
+        prev_num = pnum - 1 if isinstance(pnum, int) else None
+        prev_record = frames_by_num.get(prev_num) if prev_num is not None else None
+        if prev_record and prev_record.get("end_frame"):
+            p = out / prev_record["end_frame"]
+            if p.exists():
+                return p
+        if prev_num is not None:
+            prev_tag = f"{int(prev_num):02d}" if isinstance(prev_num, int) else str(prev_num)
+            p = sdir / f"frame_{prev_tag}_tail.png"
+            if p.exists():
+                return p
+        return _frame_char_anchor(panels_by_num[pnum], cast_index, out)
+
+    def _resolve_prev_clip_path(pnum):
+        """The immediately-preceding panel's CURRENT clip path — mirrors what
+        `_render_scene_frames`'s normal top-to-bottom walk always threads as
+        `prev_clip_path`, regardless of whether that preceding panel was
+        touched this call or is untouched from before. Getting this wrong
+        would make this panel's `_content_hash` differ from what a later full
+        `_render_scene_frames` pass computes for the same panel, spuriously
+        marking it stale again (the exact bug this mirroring avoids)."""
+        if pnum == first_panel_num:
+            return None
+        prev_num = pnum - 1 if isinstance(pnum, int) else None
+        prev_record = frames_by_num.get(prev_num) if prev_num is not None else None
+        if prev_record and prev_record.get("clip"):
+            p = out / prev_record["clip"]
+            if p.exists():
+                return p
+        return None
+
+    def _render(pnum):
+        fr = panels_by_num[pnum]
+        seed = _resolve_start_frame(pnum)
+        prev_clip_path = _resolve_prev_clip_path(pnum)
+        res = _render_one_panel(fr, snum, sdir, seed, prev_clip_path, out,
+                                casting_lookup=casting_lookup, location_desc=location_desc,
+                                visual_overview=visual_overview, voice_index=voice_index,
+                                audio_overview=audio_overview,
+                                no_bg_music=no_bg_music, room_tone=room_tone,
+                                no_subtitles=no_subtitles, force=True)
+        frames_by_num[pnum] = res["frame_record"]
+        if res["rendered"]:
+            manifest["clips"] = manifest.get("clips", 0) + 1
+        elif res["failed"]:
+            manifest["failed"] = manifest.get("failed", 0) + 1
+        return res
+
+    target_sorted = sorted(p for p in panel_numbers if p in panels_by_num)
+    missing = [p for p in panel_numbers if p not in panels_by_num]
+    for p in missing:
+        _log(f"      ⚠ rerender_panels: panel {p} not found in scene {snum} storyboard — skipped")
+
+    for pnum in target_sorted:
+        _render(pnum)
+
+    # One-hop cascade: the panel immediately after the LAST targeted panel.
+    next_panel_num = None
+    if target_sorted:
+        after = sorted(n for n in panels_by_num if isinstance(n, int) and n > target_sorted[-1])
+        next_panel_num = after[0] if after else None
+
+    if next_panel_num is not None:
+        next_result = _render(next_panel_num)
+
+        # Cascade-stop bookkeeping: the panel AFTER next_panel_num must not be
+        # spuriously judged stale on some future run just because
+        # next_panel_num's tail bytes genuinely changed underneath it. We do
+        # NOT touch that later panel's actual clip/end_frame — the accepted
+        # one-hop-only visual discontinuity beyond this point is real and
+        # should stay real, not be hidden. Instead we recompute and rewrite
+        # ONLY its .hash sidecar to the value it WOULD have if fully
+        # re-chained, so a future _render_scene_frames/rerender_panels call
+        # doesn't redundantly re-trigger a render for it.
+        after2 = sorted(n for n in panels_by_num if isinstance(n, int) and n > next_panel_num)
+        after_num = after2[0] if after2 else None
+        if after_num is not None:
+            after_fr = panels_by_num[after_num]
+            after_tag = f"{int(after_num):02d}" if isinstance(after_num, int) else str(after_num)
+            after_clip = sdir / f"frame_{after_tag}.mp4"
+            after_hash_path = sdir / f"frame_{after_tag}.hash"
+            if after_clip.exists():
+                new_end = next_result["frame_record"].get("end_frame")
+                new_end_path = (out / new_end) if new_end else None
+                new_clip = next_result["frame_record"].get("clip")
+                new_clip_path = (out / new_clip) if new_clip else None
+                after_prompt = _panel_video_prompt(after_fr, audio_overview,
+                                                   casting_lookup=casting_lookup,
+                                                   location_desc=location_desc,
+                                                   visual_overview=visual_overview,
+                                                   voice_index=voice_index,
+                                                   no_bg_music=no_bg_music, room_tone=room_tone,
+                                                   no_subtitles=no_subtitles)
+                accepted_hash = _content_hash(after_prompt, new_end_path, new_clip_path)
+                after_hash_path.write_text(accepted_hash)
+
+    # Re-stitch this scene's clips (some changed) and reassemble the movie.
+    updated_frames_out = [frames_by_num[n] for n in sorted(
+        frames_by_num, key=lambda x: x if isinstance(x, int) else 1e9)]
+    scene_vid = vdir / (f"scene_{snum:02d}.mp4" if isinstance(snum, int) else f"scene_{snum}.mp4")
+    scene_vid_rel = _stitch_scene(scene_vid, updated_frames_out, out, snum)
+
+    scene_entry["frames"] = updated_frames_out
+    scene_entry["scene_video"] = scene_vid_rel
+
+    movie = _assemble_movie(manifest, out)
+    if movie:
+        manifest["movie"] = str(movie.relative_to(out))
+
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     return manifest
 
 

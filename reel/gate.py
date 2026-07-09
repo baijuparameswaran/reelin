@@ -38,6 +38,70 @@ from pathlib import Path
 _BAR = "─" * 64
 
 
+def edit_in_editor(label: str, data: dict) -> dict | None:
+    """Open `data` (any stage's full JSON output, or e.g. a raw source-text
+    wrapper) in $EDITOR/$VISUAL — for reading, or for real editing; the same
+    file serves both. `label` is used only for the temp-file prefix and log
+    messages (e.g. a stage name, or "source").
+
+    Returns the parsed edited dict when the operator saved a real, valid
+    change; None in every other case (no change made — including a pure read
+    with no save — editor failed to launch, or the saved content isn't valid
+    JSON) — in all of those the original `data` is left completely untouched
+    and an explanatory message is printed instead of raising, so the caller
+    (the live gate, or the standalone `revise` CLI loop) can simply reprompt.
+
+    Module-level (not a `Gate` method) since it needs nothing from a live
+    gate's state — both `Gate._edit_in_editor` (the per-run HITL loop) and
+    the standalone `revise` command call this directly."""
+    editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "vim"
+    try:
+        original_text = json.dumps(data, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        print(f"  ⚠ could not serialize output for editing: {exc}", flush=True)
+        return None
+
+    fd, path = tempfile.mkstemp(prefix=f"reel_gate_{label}_", suffix=".json")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(original_text)
+
+    try:
+        print(f"  opening {label} output in {editor} for editing "
+             "(save + quit to apply; quit without saving to cancel) …",
+             flush=True)
+        subprocess.call([editor, path])
+    except OSError as exc:
+        print(f"  ⚠ could not open editor {editor!r}: {exc} "
+             f"— set $EDITOR/$VISUAL, or edit it yourself: {path}", flush=True)
+        return None
+
+    try:
+        edited_text = Path(path).read_text(encoding="utf-8")
+    finally:
+        try:
+            Path(path).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    if edited_text.strip() == original_text.strip():
+        print("  no changes made — output unchanged\n", flush=True)
+        return None
+
+    try:
+        edited = json.loads(edited_text)
+    except Exception as exc:
+        print(f"  ⚠ edited content is not valid JSON ({exc}) — "
+             "change discarded, original output kept\n", flush=True)
+        return None
+
+    if not isinstance(edited, dict):
+        print("  ⚠ edited content must be a JSON object — "
+             "change discarded, original output kept\n", flush=True)
+        return None
+
+    return edited
+
+
 @dataclass
 class Decision:
     approved: bool
@@ -132,61 +196,7 @@ class Gate:
             return Decision(approved=False, feedback=feedback)
 
     def _edit_in_editor(self, stage: str, result: dict) -> dict | None:
-        """Open the stage's full output in $EDITOR/$VISUAL — for reading, or
-        for real editing; the same file serves both.
-
-        Returns the parsed edited dict when the operator saved a real, valid
-        change; None in every other case (no change made — including a pure
-        read with no save — editor failed to launch, or the saved content
-        isn't valid JSON) — in all of those the original `result` is left
-        completely untouched and an explanatory message is printed instead of
-        raising, so the gate can simply reprompt."""
-        editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "vim"
-        try:
-            original_text = json.dumps(result, ensure_ascii=False, indent=2)
-        except Exception as exc:
-            print(f"  ⚠ could not serialize output for editing: {exc}", flush=True)
-            return None
-
-        fd, path = tempfile.mkstemp(prefix=f"reel_gate_{stage}_", suffix=".json")
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(original_text)
-
-        try:
-            print(f"  opening {stage} output in {editor} for editing "
-                 "(save + quit to apply; quit without saving to cancel) …",
-                 flush=True)
-            subprocess.call([editor, path])
-        except OSError as exc:
-            print(f"  ⚠ could not open editor {editor!r}: {exc} "
-                 f"— set $EDITOR/$VISUAL, or edit it yourself: {path}", flush=True)
-            return None
-
-        try:
-            edited_text = Path(path).read_text(encoding="utf-8")
-        finally:
-            try:
-                Path(path).unlink(missing_ok=True)
-            except OSError:
-                pass
-
-        if edited_text.strip() == original_text.strip():
-            print("  no changes made — output unchanged\n", flush=True)
-            return None
-
-        try:
-            edited = json.loads(edited_text)
-        except Exception as exc:
-            print(f"  ⚠ edited content is not valid JSON ({exc}) — "
-                 "change discarded, original output kept\n", flush=True)
-            return None
-
-        if not isinstance(edited, dict):
-            print("  ⚠ edited content must be a JSON object — "
-                 "change discarded, original output kept\n", flush=True)
-            return None
-
-        return edited
+        return edit_in_editor(stage, result)
 
     def _read(self, prompt: str) -> str | None:
         """Read one line with optional SIGALRM timeout. Returns None on timeout."""

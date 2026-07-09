@@ -162,6 +162,20 @@ moodboard:
   enabled: true     # set false to skip the moodboard stage entirely
   steer: true       # fold the moodboard into the creative-direction steering
 
+# Revision agent (`python -m reel.cli revise`). After a run has finished (or
+# paused), lets an operator hand-edit any stage's JSON (or the raw ingested
+# story text) and selectively re-run only what's actually affected downstream.
+# `suggest_ripple_scenes` (LLM, open model, never Gemini) is advisory only —
+# suggestions are shown for accept/reject, never auto-applied.
+# `identity_drift_threshold` gates the deterministic (no LLM) check that flags
+# when an edited character/location description has drifted enough from what
+# its locked casting entry was rendered from that the old reference image
+# might no longer match — below this similarity ratio, the revise CLI warns
+# and preserves the existing casting entry/image by default rather than
+# silently re-casting. Unvalidated starting value — tune from real use.
+revision:
+  identity_drift_threshold: 0.55
+
 # Runtime behavior.
 runtime:
   # How many agents may call models concurrently. On CPU-only / low-RAM hosts a
@@ -289,3 +303,4 @@ agent_profiles:
   fidelity:        quality
   genre:           quality
   moodboard:       quality
+  revision:        quality

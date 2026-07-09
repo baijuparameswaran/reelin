@@ -42,6 +42,7 @@ import re
 from pathlib import Path
 
 from .. import llm
+from ..revision_merge import merge_by_key
 from .ingest import scene_source_context
 
 SYSTEM = (
@@ -444,13 +445,29 @@ def plan_storyboard(
     profile: str | None = None,
     feedback: str | None = None,
     out: str | Path | None = None,
+    existing: dict | None = None,
+    revise_keys: set | None = None,
 ) -> dict:
     """Build the storyboard scene by scene.
 
     Each scene is sent in its own LLM call. The source context injected is the
     specific chunk(s) mapped to that scene (from scenes[*].chunk_indices), so
     the model sees the relevant passage rather than a generic head truncation.
-    """
+
+    `existing` + `revise_keys` (a set of `scene_number`s) support a scoped
+    revision: since this agent already calls the LLM once per scene, a scoped
+    revision simply restricts WHICH scenes' bundles enter the loop at all
+    (skip calling the LLM for untouched scenes, rather than calling-then-
+    discarding, since each scene's bundle/call is already fully independent —
+    unlike soundscape/visuals/cinematography this agent needs no whole-story
+    context per call to begin with). The freshly-regenerated scenes are then
+    merge-spliced into `existing["storyboard"]` via `revision_merge.
+    merge_by_key`; `storyboard_style` (a whole-board judgment, not a per-scene
+    one) is kept from `existing` rather than adopted from a single revised
+    scene's opinion of it. Panel-level (as opposed to whole-scene) storyboard
+    TEXT revision isn't supported here — only whole scenes can be targeted;
+    panel-level revision of the rendered VIDEO is a separate, purely-visual
+    concern handled by `pipeline.rerender_panels`."""
     profile = profile or llm.agent_profile("storyboard")
     bundles = _scene_bundles(scenes, casting, soundscape, visuals, cinematography,
                              characters=characters, draft=draft, moodboard=moodboard,
@@ -460,8 +477,13 @@ def plan_storyboard(
     logline = structure.get("logline", "")
     tone = structure.get("tone", "")
 
+    scoped = revise_keys is not None and existing
+    if scoped:
+        revise_keys = set(revise_keys)
+        bundles = [b for b in bundles if b.get("scene_number") in revise_keys]
+
     board_scenes = []
-    storyboard_style = ""
+    storyboard_style = existing.get("storyboard_style", "") if scoped else ""
 
     for bundle in bundles:
         # Extract (and remove) the private source context field before sending
@@ -482,9 +504,17 @@ def plan_storyboard(
         )
         raw = llm.generate(prompt, profile=profile, system=SYSTEM, as_json=True)
         result = llm.safe_json(raw)
-        if not storyboard_style and result.get("storyboard_style"):
+        if not scoped and not storyboard_style and result.get("storyboard_style"):
             storyboard_style = result["storyboard_style"]
         board_scenes.extend(result.get("storyboard", []))
+
+    if scoped:
+        final_storyboard = merge_by_key(existing.get("storyboard", []), board_scenes,
+                                        lambda s: s.get("scene_number"), revise_keys)
+        return {
+            "storyboard_style": storyboard_style,
+            "storyboard": final_storyboard,
+        }
 
     return {
         "storyboard_style": storyboard_style,

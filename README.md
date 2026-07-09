@@ -384,6 +384,59 @@ revision note). Routing follows the provider policy — text stages on the open
 models, image/video stages on Gemini when a key is set (see below). `reel.pipeline.run`
 still runs the full pipeline with the HITL gate, concurrency, and `--resume`.
 
+## Revising a completed run
+
+`--feedback` (above) always regenerates a stage's *entire* output. For a
+targeted change — fix one scene, tweak one character's look, adjust one video
+panel — after a run has finished (or paused), use the interactive revision
+loop instead:
+
+```bash
+python -m reel.cli revise --out output
+```
+
+You don't have to run this as a separate command, either: once a full
+`python -m reel.cli story.txt` run finishes (video render included, if
+enabled), it offers to drop you straight into the same revision loop —
+type `revise` to start editing right away, or just press Enter to exit.
+(Skipped automatically for unattended/non-interactive runs — `hitl.enabled:
+false` in config, or no TTY.)
+
+Each round: pick any stage (or `source` for the raw ingested story text) to
+hand-edit in `$EDITOR` — the same "view/edit" mechanism the live pipeline gate
+already uses. On save, reel figures out **exactly what changed** (which scene
+numbers, character/location names, or storyboard panels — no LLM call, a
+deterministic diff) and proposes re-running only the stages that are actually
+downstream of the edit, scoped to just the changed keys — not the whole
+pipeline from scratch. You confirm before anything runs.
+
+A few things this is deliberately careful about:
+
+- **Character/location visual identity is preserved by default.** Editing one
+  character's casting entry doesn't cause the others to be silently reworded
+  and re-rendered — every downstream agent still gets full story context (for
+  coherence), but only the entries you actually targeted are trusted from its
+  response; everything else comes back byte-for-byte identical, so an
+  untouched character's rendered reference image is reused, not regenerated.
+  If your edit changes a character/location's description enough that it
+  might imply a different look, you get a warning and the OLD image is kept
+  by default — reworking it into the new look isn't attempted automatically.
+- **Video panels re-render cheaply and predictably.** Editing one storyboard
+  panel re-renders that panel plus exactly the one immediately after it (to
+  keep that seam visually smooth), then stops — it does not cascade through
+  the rest of the scene, so the API cost of a small edit stays small. Start/
+  end frames for every rendered panel are recorded in
+  `output/video/manifest.json`, which is what makes this targeted re-render
+  (and re-stitching it back into the scene/movie) possible.
+- **Scene count/order is assumed stable.** Editing content within existing
+  scenes is scoped; inserting, deleting, or reordering scenes is treated as a
+  larger ("drastic") change and falls back to a full downstream regenerate,
+  with a warning and a confirmation prompt — not a silent partial revision.
+- **One session, many rounds.** The revision loop reattaches to the run's
+  existing `output/session.json` (see [Session tracking](#session-tracking)
+  above) and keeps it `running` across every round; it's only marked
+  `complete`/`paused` when you type `quit`/`exit` or `pause` (or Ctrl-C).
+
 ## Story fidelity (consistency scoring)
 
 As the pipeline transforms the source through structure → … → screenplay →

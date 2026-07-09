@@ -17,6 +17,7 @@ import json
 from datetime import date
 
 from .. import llm
+from ..revision_merge import merge_by_key
 from .ingest import scene_source_context
 
 SYSTEM = (
@@ -278,7 +279,24 @@ def draft_screenplay(
     max_scenes: int | None = None,
     profile: str | None = None,
     feedback: str | None = None,
+    existing: dict | None = None,
+    revise_keys: set | None = None,
 ) -> dict:
+    """`existing` + `revise_keys` (a set of scene `number`s) support a scoped
+    revision. Unlike the whole-scene-list-in-one-call agents (scenes/casting/
+    soundscape/visuals/cinematography), this agent already loops one LLM call
+    PER SCENE — so a scoped revision doesn't need to call-then-discard: only
+    the targeted scenes enter the loop at all. The one thing that needs care
+    is `_prior_scenes_block`'s continuity context — normally it's fed from
+    whatever's been drafted so far THIS call; in revision mode it's instead
+    seeded from `existing["scenes"]` for every scene number below the current
+    target (so a target scene still sees real prior-scene continuity, not a
+    blank slate), updated in place as each target scene is freshly redrafted
+    so a LATER target in the same revision sees the FRESH draft of an EARLIER
+    one, not its stale prior version. The freshly-drafted target scenes are
+    then merge-spliced back into `existing["scenes"]` via
+    `revision_merge.merge_by_key` — every untouched scene number stays
+    byte-identical."""
     profile = profile or llm.agent_profile("screenplay")
     logline = structure.get("logline", source["title"])
     tone = structure.get("tone", "")
@@ -293,7 +311,18 @@ def draft_screenplay(
     )
 
     scene_list = scenes.get("scenes", [])
-    chosen = scene_list[:max_scenes] if max_scenes else scene_list
+    scoped = revise_keys is not None and existing
+    if scoped:
+        revise_keys = set(revise_keys)
+        chosen = [s for s in scene_list if s.get("number") in revise_keys]
+        # Continuity context for _prior_scenes_block, keyed by scene number —
+        # starts as the existing drafts, updated in place as each target is
+        # freshly redrafted so later targets see the fresh version.
+        context_by_num = {s.get("number"): s for s in existing.get("scenes", [])}
+    else:
+        chosen = scene_list[:max_scenes] if max_scenes else scene_list
+        context_by_num = {}
+
     drafted = []
     for scene in chosen:
         # Per-scene source context: use the chunk(s) mapped to this scene so the
@@ -303,6 +332,12 @@ def draft_screenplay(
         scene_num = scene.get("number")
         scene_chars = scene.get("characters", [])
         slugline = scene.get("slugline", "INT. LOCATION - DAY")
+        if scoped:
+            prior_ctx = [context_by_num[n] for n in sorted(k for k in context_by_num
+                                                            if isinstance(k, int) and isinstance(scene_num, int)
+                                                            and k < scene_num)]
+        else:
+            prior_ctx = drafted
         prompt = PROMPT.format(
             revision_note=revision_note,
             logline=logline,
@@ -311,7 +346,7 @@ def draft_screenplay(
             characters=_scene_char_brief(scene_chars, char_lookup),
             casting_block=_scene_casting_brief(scene_chars, casting_lookup),
             location_block=_scene_location_brief(scene.get("location", ""), casting_lookup),
-            prior_scenes_block=_prior_scenes_block(drafted),
+            prior_scenes_block=_prior_scenes_block(prior_ctx),
             slugline=slugline,
             scene_number=scene_num if scene_num is not None else 0,
             summary=scene.get("summary", ""),
@@ -328,6 +363,17 @@ def draft_screenplay(
         scene_doc["number"] = scene_num
         scene_doc["fountain"] = scene_to_fountain(scene_doc)  # rendered view
         drafted.append(scene_doc)
+        if scoped:
+            context_by_num[scene_num] = scene_doc
+
+    if scoped:
+        final_scenes = merge_by_key(existing.get("scenes", []), drafted,
+                                    lambda s: s.get("number"), revise_keys)
+        return {
+            "drafted_count": len(final_scenes),
+            "total_scenes": len(scene_list),
+            "scenes": final_scenes,
+        }
 
     return {
         "drafted_count": len(drafted),

@@ -47,9 +47,17 @@ judge neutrally). A human-in-the-loop gate reviews/iterates each stage.
   builder for rendering; `to_storyboard` folds cinematography camera grammar into
   Veo-aligned prompts using strict element ordering and Veo vocabulary),
   `session.py` (**session identity** — one story-to-video run's id, persisted to
-  `output/session.json`; see Conventions & decisions below), `agents/`
+  `output/session.json`; see Conventions & decisions below), `artifact_diff.py`
+  (**deterministic keyed-list diff** — no LLM; compares two versions of a
+  stage's JSON artifact to find which scene numbers / character-or-location
+  names / panel numbers actually changed, and flags a scene-count/reorder
+  change as `drastic`; powers the `revise` command's scoping), `revision_merge.py`
+  (the single shared `merge_by_key` splice primitive every scoped-revision
+  agent call uses — see Conventions & decisions below), `agents/`
   (ingest, **genre**, structure, **moodboard**, characters, casting, scenes,
-  soundscape, visuals, cinematography, storyboard, screenplay, fidelity).
+  soundscape, visuals, cinematography, storyboard, screenplay, fidelity,
+  **revision** — advisory ripple-effect suggestions + deterministic identity-
+  drift detection for the `revise` command).
 - `config/models.yaml` — model profiles, per-agent profile map, `hitl` gate
   knobs, `genre` block (value/steer/enforce/min_score), `moodboard` block
   (enabled/steer), `fidelity` block, `image` block (backend/model — default
@@ -210,6 +218,117 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
   zero dependency on any other `reel` module (stdlib only), so it's imported
   freely from `gemini.py`/`pipeline.py`/`stages.py`/`cli.py` without any risk
   of an import cycle.
+- **Revision agent (`python -m reel.cli revise`, `reel/agents/revision.py` +
+  `reel/artifact_diff.py` + `reel/revision_merge.py`):** a standalone,
+  post-hoc loop over a completed (or paused) run's `output/` checkpoints —
+  separate from the live per-run HITL `Gate`, which only exists during a
+  fresh `pipeline.run()`. Reattaches to the run's existing session
+  (`session.start(out, fresh=False)`) and stays `"running"` across as many
+  revision rounds as the operator wants; `session.finish` is only called on
+  explicit `quit`/`pause`. Each round: pick any stage (or `"source"` for the
+  raw ingested text) → hand-edit its JSON via `gate.edit_in_editor` (extracted
+  to a module-level function so both the live gate and `revise` share it,
+  `gate.py:_edit_in_editor` is now a 1-line delegate) → `artifact_diff.diff_artifact`
+  deterministically finds which scene numbers / character-or-location names /
+  panel numbers actually changed (no LLM — `diff_keyed_list` + a small
+  `ARTIFACT_SHAPES` table keyed by each artifact's list field + key function,
+  e.g. `scenes.json` by `number`, `casting.json` by `name`, `storyboard.json`
+  nested by `(scene_number, panel)`). **v1 scope assumption: scene
+  count/order is stable across a revision** — an added/removed scene number
+  sets `diff.drastic=True`, and `structure`/`moodboard`/`source` (no
+  scene/name-keyed structure at all) are always treated as drastic
+  (`artifact_diff.WHOLE_FILE_ARTIFACTS`) — a drastic change falls back to a
+  full, non-scoped downstream regen (with a confirm + warning), not a refusal.
+  For a non-drastic edit: `stages.downstream_of(name)` (transitive closure
+  over the `STAGES` registry's `inputs`/`optional` — the only place stage
+  deps exist as data) gives the affected stage set; each downstream agent
+  (`casting`/`characters`/`scenes`/`soundscape`/`visuals`/`cinematography`/
+  `screenplay`/`storyboard` — all gained uniform `existing=`/`revise_keys=`
+  kwargs, threaded through `stages.run_stage`) still gets FULL story context
+  in its prompt (cross-scene/cast coherence needs it) but the caller only
+  *trusts* the response for `revise_keys`; everything else is spliced back in
+  byte-identical from `existing` via `revision_merge.merge_by_key` — the one
+  shared primitive every agent uses, so untouched entries' text (and thus
+  their `pipeline._content_hash`) never drifts from incidental LLM rewording.
+  This is what makes casting **identity preservation** automatic: an untouched
+  character/location's `visual_prompt` stays byte-identical → its
+  `_render_casting_images` hash matches → its rendered PNG is reused with zero
+  code changes needed in that function. A genuinely NEW name doesn't need to
+  be in `revise_keys` at all (`merge_by_key` appends it automatically).
+  `screenplay`/`storyboard` already loop one LLM call per scene, so scoping
+  them just filters which scenes enter the loop (screenplay additionally
+  seeds `_prior_scenes_block` continuity from `existing` for any
+  untouched-but-preceding scene, so a later target still sees real prior
+  context, not a blank slate). Casting-name-keyed vs. scene-number-keyed
+  artifacts don't share a key type — `cli._translate_revise_keys` handles the
+  one meaningful cross-type case (a `scenes` edit reaching `casting` via the
+  revised scenes' `location` names) and falls back to a full non-scoped regen
+  for any other stage pair with no known translation, rather than skipping it
+  silently. **Drastic character/location identity changes are deliberately
+  NOT auto-handled** (out of scope for v1, per explicit instruction): a
+  deterministic (no LLM) heuristic, `revision.is_drastic_identity_change`
+  (`difflib.SequenceMatcher` ratio over the input description that fed
+  casting, threshold `config.revision.identity_drift_threshold`, default
+  0.55), just warns and preserves the OLD casting entry/image by default. A
+  `revision_agent.suggest_ripple_scenes` LLM call (open model, `models.text`,
+  `agent_profiles.revision: quality`) is separately, narrowly scoped:
+  advisory-only suggestions for OTHER scenes that might depend on what
+  changed (a plot detail, a prop) — presented for accept/reject, never
+  auto-applied. **Video-specific — panel-level re-render**: `_render_scene_frames`
+  (`pipeline.py`) now records explicit `"start_frame"`/`"end_frame"` paths per
+  panel in `output/video/manifest.json` (previously only the start/`"seed"`
+  was recorded, though the end/tail PNG was always written to disk). New
+  `only_scenes: set[int] | None` param targets specific `scene_number`s
+  (vs. `max_scenes`'s leading-slice); a companion `existing_manifest` param is
+  required to avoid a scoped call overwriting every OTHER scene's manifest
+  record. The per-panel render/hash/overlay/tail-extraction logic was
+  extracted into a shared `_render_one_panel` (used by both
+  `_render_scene_frames`'s normal loop and the new `pipeline.rerender_panels`)
+  and the per-scene ffmpeg concat into `_stitch_scene`, so the two call sites
+  can't drift. `rerender_panels(scene_number, panel_numbers)` re-renders the
+  targeted panel(s) **plus exactly ONE panel immediately after them**
+  (reseeded from the new end_frame, to keep that one seam smooth), then
+  **stops** — a deliberate, confirmed cost bound against Veo API spend, since
+  the existing `_content_hash`/`_stale` chain would otherwise naturally
+  cascade a re-render through the *entire rest* of the scene (every
+  subsequent panel's seed derives from the previous panel's tail). Stopping
+  the cascade correctly requires care: the panel *after* the one-hop panel
+  must not be spuriously judged stale on some future run just because the
+  one-hop panel's tail bytes genuinely changed underneath it — the fix is
+  **not** to touch that panel's actual clip/tail files (the accepted
+  one-hop-only visual discontinuity beyond that point is real and stays
+  real), but to recompute and rewrite *only its `.hash` sidecar* to the value
+  it would have if fully re-chained, so a later `_render_scene_frames`/
+  `rerender_panels` call doesn't redundantly re-trigger it — verified via a
+  4-panel stubbed scene (re-render panel 2 → panels 2 and 3 change, panel 4's
+  clip bytes stay identical, and a follow-up full-scene render pass does NOT
+  re-render panel 4). `cli._apply_scene_render_revision` picks
+  `rerender_panels` (cheap, one-hop-bounded) specifically for a **storyboard
+  panel-only** edit (identified via `artifact_diff.diff_nested`) and falls
+  back to scene-level `_render_scene_frames(..., only_scenes=...)` for any
+  other upstream stage reaching video (soundscape/visuals/cinematography/
+  screenplay/scenes/casting), since those legitimately touch every panel's
+  prompt in the scene, not just one. **Offered automatically, not just as a
+  standalone command:** right after a full `python -m reel.cli story.txt`
+  run completes (video render included), `cli._offer_revise` prompts once —
+  type `revise` to drop straight into the same loop (`cli._revise_loop`,
+  factored out of the standalone `revise` command so both share it) without
+  a second invocation, or press Enter to exit. `pipeline.run()` already
+  marks the session `"complete"` on its own successful return; choosing
+  `revise` here reopens it (`session.start(fresh=False)` reattaches and
+  flips status back to `"running"`) — declining leaves it exactly as
+  `pipeline.run()` left it. Skipped entirely when config `hitl.enabled` is
+  false (unattended/batch runs) or there's no TTY (`input()` raising
+  `EOFError` is treated as "don't block", the same convention `gate.py`
+  already uses) — a cron/CI run is never left waiting on this prompt. Inside
+  the loop, `quit`/`exit` (session → `"complete"`) and `pause` (session →
+  `"paused"`) are the two ways out, plus Ctrl-C (→ `"paused"`). The menu
+  lists `source` once for the raw ingested text (not a redundant second
+  `ingest` entry — `ingest` is the stage that *produces* `source.json`,
+  `Stage.produces="source"`, so `_revise_one` routes `stage_name in
+  ("source", "ingest")` to the same `_revise_source` handler, and the
+  interactive menu skips listing `ingest` at all to avoid showing two
+  entries for the same underlying artifact).
 - **Casting data model:** each character entry has an `actor` block (performer's
   own features) and a `character` block (that actor aged/costumed into the role).
   **Image generation renders the character only** — exactly one image per
@@ -415,6 +534,195 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
   / final cut phase.
 
 ## Session log
+- 2026-07-08 (later 4) — **Offer the revision loop automatically right after a
+  full pipeline run completes, plus an explicit 'exit' option.** User asked
+  for two additions to the just-built revision agent: (1) once the video
+  render finishes, offer to go straight into revise mode "apart from the
+  newly added command line option" (i.e. *in addition to*, not instead of,
+  the standalone `revise` command), and (2) a clear way to exit. Refactored
+  the standalone `revise` command's inner loop out into `cli._revise_loop`
+  (shared) so a new `cli._offer_revise(out)` — called from `main()` right
+  after a successful `run(...)` return, before the final `return 0` — can
+  drop into the exact same loop without a second process invocation. Design
+  point worth noting: `pipeline.run()` already marks the session
+  `"complete"` on its own successful return (from the earlier session-id
+  work), so choosing to revise at the offer prompt has to explicitly REOPEN
+  it (`session.start(out, fresh=False)` — reattach, flip status back to
+  `"running"`) rather than just calling `_revise_loop` directly; declining
+  correctly leaves the session exactly as `pipeline.run()` already left it,
+  with no extra session.json write. The offer itself is gated on config
+  `hitl.enabled` (skipped for unattended/batch runs — matches the same
+  bool that already gates the live per-stage gate) and wrapped in an
+  `EOFError` catch (non-interactive/no-TTY runs, e.g. cron, never block on
+  it — the same convention `gate.py`'s docstring already documents for its
+  own `input()` calls). For the "exit" request specifically: `_revise_loop`
+  already had `quit`/`pause`; added `exit`/`e` as an explicit synonym for
+  `quit` (both → session `"complete"`) since the user used that exact word,
+  and updated the loop's own prompt text to advertise it. **Found and fixed
+  a real latent bug while writing the test for this** (not something the
+  user asked about, but surfaced by exercising the menu): the stage-picker
+  menu listed both `source` (the special raw-text entry) AND `ingest` (a
+  normal `STAGES` entry) as separate choices, but `ingest`'s artifact IS
+  `source.json` (`Stage("ingest", ..., produces="source")`) — selecting
+  `ingest` from the menu would have gone through the GENERIC per-stage edit
+  path instead of `_revise_source`'s special handling (which recomputes
+  `chunks`/`word_count`/`char_count` after a hand-edit, since those are
+  derived from `text` and go stale otherwise). Fixed two ways: `_revise_one`
+  now routes `stage_name in ("source", "ingest")` to `_revise_source`
+  identically, AND the menu skips listing `ingest` at all (redundant with
+  `source`, which is already correctly handled) rather than showing two
+  entries for one artifact. Verified via stubbed tests (no live Ollama/Gemini
+  calls): `_offer_revise` skipped under `hitl.enabled=false`; EOFError caught
+  gracefully; blank Enter exits without entering the loop; typing `revise`
+  enters the loop AND reopens the session to `"running"`; `_revise_loop`'s
+  `exit`/`pause`/Ctrl-C paths all set the correct terminal session status;
+  `_revise_one("ingest", ...)` correctly routes to `_revise_source`, recomputes
+  chunks, and triggers the full-regen downstream cascade (confirmed via a
+  monkeypatched `stages.run_stage` recorder — real Ollama calls deliberately
+  avoided; an earlier version of this same test without the mock was caught
+  hanging against a live Ollama call mid-session and killed via `TaskStop`
+  before it could run unbounded). *(Uncommitted at time of writing — builds on
+  the still-uncommitted revision-agent work from the entry above.)*
+- 2026-07-08 (later 3) — **Added a revision agent (`python -m reel.cli revise`):
+  go back to any completed stage (including hand-editing the raw ingested
+  story text), preserve character/location visual identity by default,
+  selectively re-run only what's actually affected downstream, and re-render
+  specific video panels with a bounded one-hop cascade.** A large, explicitly
+  planned feature (used `EnterPlanMode` + two background Explore agents +
+  one Plan agent given the size — new modules, signature changes across 8
+  agent files, a `pipeline.py` render-path refactor, and a new interactive
+  CLI command). Confirmed with the user up front: edits are hand-made via
+  `$EDITOR` (reusing `gate.py`'s existing JSON view/edit mechanism, not a
+  new freeform-feedback UX); downstream regeneration uses each stage's
+  already-configured model profile (no special "revision model"); panel
+  re-render cascades **exactly one hop forward** then stops (bounded Veo
+  cost) — three explicit design decisions from the user before any code was
+  written. New: `reel/artifact_diff.py` (deterministic keyed-list diff, no
+  LLM — `ARTIFACT_SHAPES` table + `diff_keyed_list`/`diff_artifact`/
+  `diff_nested`/`diff_source_text`; a scene-count/reorder change is
+  `drastic`, since v1 assumes scene numbering stays stable across a
+  revision — a documented, deliberate scope limit, not an oversight — and
+  falls back to a full non-scoped regen with a warning+confirm rather than a
+  silent partial revision or an outright refusal); `reel/revision_merge.py`
+  (`merge_by_key` — the one shared splice primitive every scoped agent call
+  uses: full-story LLM context in, but only `revise_keys`' output is
+  trusted, everything else spliced back byte-identical from `existing`);
+  `reel/agents/revision.py` (`suggest_ripple_scenes` — an LLM call, open
+  model only, advisory-only "might this other scene also need a look"
+  suggestions, never auto-applied; `is_drastic_identity_change` — a
+  **deterministic** `difflib` heuristic, not an LLM call, for the same
+  "cheap reproducible fingerprint" reason `pipeline._content_hash` is
+  deterministic — flags when an edited character/location description has
+  drifted enough that the OLD casting image should be preserved by default
+  rather than silently replaced). `gate.py`'s `_edit_in_editor` extracted to
+  a module-level `edit_in_editor` (zero `self` usage, confirmed by reading
+  it — trivial, safe extraction) so `revise` reuses the exact same
+  proven $EDITOR mechanics as the live HITL gate, verified via a scripted
+  fake-`$EDITOR` shell script (one that edits the temp file, one that
+  doesn't). Eight agents (`casting`/`scenes`/`soundscape`/`visuals`/
+  `cinematography`/`screenplay`/`storyboard`/`characters`) gained uniform
+  `existing=`/`revise_keys=` kwargs — each stub-tested individually
+  (monkeypatched `llm.generate` returning a canned full response, asserting
+  the caller only trusts the targeted keys and preserves the rest
+  byte-identical, confirming e.g. a casting revision that only asked for
+  "Alice" doesn't let an LLM's incidental rewording of "Bob" flip Bob's
+  `_content_hash` and trigger an unwanted image re-render). `screenplay`/
+  `storyboard` needed different handling from the other four since they
+  already loop one LLM call per scene (confirmed via reading both files) —
+  scoping them filters which scenes even enter the loop (cheaper than
+  calling-then-discarding), and `screenplay` specifically needed its
+  `_prior_scenes_block` continuity context seeded from `existing` for any
+  untouched scene before a target, verified by asserting a scoped rerun's
+  prompt actually contains an unchanged prior scene's marker text.
+  `stages.downstream_of` (new — BFS over the `STAGES` registry's `inputs`/
+  `optional` reverse-adjacency, the only place stage dependencies exist as
+  data) computes the affected stage set from any edited stage; verified
+  against the real registry (e.g. `downstream_of("storyboard")` ==
+  `{scene_render, fidelity}` exactly). `pipeline.py`'s `_render_scene_frames`
+  gained explicit `"start_frame"`/`"end_frame"` manifest fields (the tail
+  PNG was always written to disk but never recorded — a one-line gap) and an
+  `only_scenes`/`existing_manifest` pair (targets specific scene numbers
+  without a scoped call silently wiping every OTHER scene's manifest
+  record — caught via a 3-scene stub test before it shipped). The per-panel
+  render/hash/overlay/tail-extraction logic was extracted into a shared
+  `_render_one_panel` (used by both the normal loop and the new
+  `rerender_panels`) and per-scene stitching into `_stitch_scene`, so a bug
+  fix to either can't drift between two call sites. **`rerender_panels`
+  was the highest-risk piece and caught two real bugs during its own
+  stub-test build** (a 4-panel fake scene, monkeypatched `i2v.*`, byte-level
+  clip comparison before/after): (1) initially threaded `prev_clip_path`
+  from "what this call itself just rendered" rather than "the immediately
+  preceding panel's CURRENT clip regardless of whether it was touched this
+  call" — produced a `_content_hash` that disagreed with what a later full
+  `_render_scene_frames` pass would compute for the same panel, so a
+  follow-up run spuriously re-rendered panels that should have stayed put;
+  fixed with a `_resolve_prev_clip_path` helper mirroring the existing
+  `_resolve_start_frame` one. (2) The one-hop cascade-stop mechanism: a
+  first instinct to "delete the `.hash` sidecar to force a re-render" is
+  actually backwards — confirmed by reading `_stale()` directly, a *missing*
+  hash file is treated as a pre-tracking baseline (NOT stale), the opposite
+  of forcing; the correct, verified mechanism is to leave the
+  one-hop-boundary panel's own clip/tail files completely untouched (the
+  accepted visual discontinuity there is real and should stay real) but
+  **recompute and rewrite its `.hash` sidecar** to the value it would have
+  if fully re-chained — forward-looking bookkeeping that prevents future
+  redundant re-renders without forging what was actually rendered. Verified
+  end-to-end: re-render panel 2 of a 4-panel scene → panels 2 and 3 (one
+  hop) get new content, panel 4 stays byte-identical, AND a follow-up full
+  `_render_scene_frames` call does not re-render panel 4 (the actual
+  correctness property, not just "the hash file changed"). New
+  `python -m reel.cli revise [--out DIR]` interactive loop
+  (`reel/cli.py`): reattaches to the run's existing session (`session.start
+  (fresh=False)` — stays `"running"` across every round, only
+  `session.finish`d on explicit quit/pause, per the third confirmed design
+  decision), menu of stages + `source`, edit → `artifact_diff` → (drastic?
+  confirm full regen : identity-drift warnings for casting + LLM ripple
+  suggestions for scene-keyed edits, accept/reject) → confirm → save +
+  selectively `run_stage` each downstream stage. Cross-key-type scoping
+  (`_translate_revise_keys`) handles the two real cases: same key type
+  propagates as-is; a `scenes` edit reaching `casting` translates via the
+  revised scenes' `location` names (the only way a scenes edit could affect
+  casting — it can't touch characters at all); any other combination falls
+  back to a full non-scoped regen for that one stage rather than being
+  silently skipped. A separate `_names_to_scene_numbers` handles the inverse
+  translation (a `casting`/`characters` edit reaching `scene_render`) by
+  scanning storyboard panels' `characters_in_frame` (falling back to
+  scenes.json's `characters` field) for the scenes a revised name actually
+  appears in — added specifically so a locked-identity change (which feeds
+  every panel's Veo Subject) re-renders the scenes it actually affects
+  instead of none at all. `_apply_scene_render_revision` dispatches to the
+  cheap one-hop `rerender_panels` specifically for a storyboard **panel**-only
+  edit (via `diff_nested`) and falls back to scene-level
+  `_render_scene_frames(..., only_scenes=...)` for anything else reaching
+  video, since an upstream soundscape/visuals/cinematography/screenplay/
+  scenes/casting change legitimately touches every panel's prompt in the
+  scene, not just one. Verified via three orchestration tests with
+  `stages.run_stage`/`cli._apply_scene_render_revision` monkeypatched as
+  call-recorders against real on-disk checkpoints (no LLM/API stubs needed
+  at this layer): a casting-only edit correctly reached
+  `{casting_images, fidelity, screenplay, storyboard}` with
+  screenplay/storyboard falling back to full regen (no casting→scene-keyed
+  translation exists) while `scene_render` correctly scoped to exactly the
+  two scenes Alice appears in via `_names_to_scene_numbers`; a drastic
+  scene-count-change correctly triggered a full `revise_keys=None` regen for
+  every downstream stage; a storyboard single-panel edit correctly resolved
+  to `panel_targets={1: [2]}` and dispatched to `scene_render` alone. A final
+  fully-wired end-to-end test (real `_apply_scene_render_revision`, stubbed
+  `i2v`/`llm`) drove `cli._revise_one` through to `rerender_panels` and
+  confirmed the same one-hop-cascade byte-level result as the isolated
+  pipeline test. `config/models.yaml` gained `agent_profiles.revision:
+  quality` and a `revision: {identity_drift_threshold: 0.55}` block (an
+  explicitly unvalidated starting heuristic, tunable without a code change).
+  Deferred, documented rather than silently missing: source-text edits get
+  no fine-grained diff (word-level diffing raw prose into "which scene's
+  source_line moved" was judged genuinely hard, disproportionate for v1);
+  cinematography's nested `shots` aren't independently merge-spliced (no
+  consumer needs that granularity); storyboard *text* revision is
+  scene-granular only (panel-granularity is exclusively the visual
+  `rerender_panels` path). All work verified via stubbed offline tests only
+  (no live Ollama/Gemini calls) per this project's established practice —
+  a live smoke test against the bundled sample story is the natural next
+  session's first step. *(Uncommitted at time of writing.)*
 - 2026-07-08 (later 2) — **Added a session-identity concept (`reel/session.py`)
   spanning the whole story-to-video workflow.** User asked to treat "the whole
   workflow of providing story to producing the video" as one session, then
