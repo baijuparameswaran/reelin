@@ -196,6 +196,27 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
   `run_group()` in `pipeline.py` is the checkpoint-aware stage runner (load → or
   compute concurrently → gate → save); stop raises `PipelineStopped`, caught in
   `cli.main`. A stage interrupted mid-flight is never half-saved — it re-runs.
+  **`--max-scenes`/`--profile` are inherited across `--resume`, not silently
+  reset** (`cli.py`: `_save_run_params`/`_load_run_params`,
+  `output/run_params.json`) — `main()` resolves an omitted `--max-scenes` via
+  a distinct sentinel (`_MAX_SCENES_UNSET`, NOT the same as `_max_scenes_arg`'s
+  own `None`, which is the meaningful explicit value "all") so it can tell
+  "flag not given, inherit" apart from "explicitly asked for all"; an
+  omitted `--profile` inherits the same way (no sentinel needed there — `None`
+  already unambiguously means "not given", since there's no CLI way to
+  explicitly request "no override" as a distinct value). An explicit flag on
+  the resume command always overrides the inherited value AND updates the
+  stored one, so it sticks for any later resume too. The printed "resume:"
+  hint at a pause always echoes the actual effective `--max-scenes`/
+  `--profile` used, so copy-pasting it reproduces the same run instead of
+  silently reverting to argparse's own defaults (1 scene, no profile
+  override) — the bug this fixes. `--genre` needed no equivalent treatment:
+  it's already checkpointed to `output/genre.json` and reloaded on `--resume`
+  by `pipeline.run()` itself (`genre_loaded = _checkpoint_load(out, "genre")
+  if resume else None`), predating this fix. Missing/corrupt `run_params.json`
+  (a pre-existing `--out` from before this existed, or one only ever touched
+  by standalone `stage`/`revise` commands, which don't go through this path)
+  degrades to the normal argparse defaults, never raises.
 - **Session identity (`reel/session.py`):** one full story-to-video run (ingest
   through render) is a **session**, identified by a generated id
   (`<timestamp>-<random>`) persisted to `output/session.json`
@@ -534,6 +555,44 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
   / final cut phase.
 
 ## Session log
+- 2026-07-09 (later) — **`--max-scenes`/`--profile` now survive `--resume`
+  instead of silently resetting to their defaults.** User asked a direct
+  diagnostic question about the printed resume hint (`python -m reel.cli
+  samples/sample_story.txt --out output --resume`, missing `--max-scenes=all`
+  from the original run) — traced it to a real gap: `main()` never persisted
+  `args.max_scenes`/`args.profile` anywhere; each invocation was fully
+  independent, so the printed hint (and `--resume` alone in general) would
+  silently fall back to argparse's defaults (1 scene, no profile override)
+  regardless of what the original run actually used — a correctness bug, not
+  just a UX one, since any remaining unfinished casting-image/video rendering
+  would only cover scene 1 instead of the full story. Confirmed `--genre` was
+  the ONE exception already handled correctly (checkpointed to
+  `output/genre.json`, reloaded via `_checkpoint_load` when `resume=True`).
+  Fixed by adding the same treatment for the other two: `cli.py` gained
+  `_save_run_params`/`_load_run_params` (`output/run_params.json`, holding
+  the EFFECTIVE — already-inheritance-resolved — `max_scenes`/`profile`/
+  `genre` a run used, re-written every invocation so it stays current across
+  any number of resumes) and a `_MAX_SCENES_UNSET` sentinel distinct from
+  `_max_scenes_arg`'s own `None` (the meaningful, explicit value "all") so
+  `main()` can tell "flag omitted, inherit" apart from "explicitly asked for
+  every scene" — `--profile` needed no equivalent sentinel since `None`
+  already unambiguously means "not given" for it (no CLI way exists to
+  explicitly request "no override" as a distinct value). An explicit flag on
+  the resume command always overrides the inherited value and becomes the
+  new stored default for any LATER resume too. The printed "resume:" hint
+  now always echoes the actual effective values used, so copy-pasting it
+  reproduces the same run instead of silently downgrading it. Verified via
+  stubbed tests (`cli.run` mocked to capture what it was actually called
+  with, no live Ollama/Gemini): fresh run with `--max-scenes all` persists
+  `null`; a bare `--resume` correctly inherits `all`; an explicit
+  `--max-scenes 3` on a later resume overrides AND updates the stored value;
+  a SUBSEQUENT bare resume after that now inherits `3`, not the original
+  `all`; `--profile` inheritance works the same way; and a `--resume` against
+  a directory with no `run_params.json` at all (simulating a pre-existing
+  `--out` from before this fix, or one only ever touched by standalone
+  `stage`/`revise` commands) falls back to the normal defaults without
+  crashing. Docs updated (README's Pause & resume section, this file).
+  *(Uncommitted at time of writing.)*
 - 2026-07-09 — **Fixed a real character-name mismatch between `scenes` and
   `characters` (found by the user inspecting live output, not by test
   coverage): the `scenes` agent could independently re-derive a different

@@ -60,6 +60,58 @@ def _max_scenes_arg(v: str) -> int | None:
     return int(v)
 
 
+def _scenes_label(max_scenes: int | None) -> str:
+    return "all" if max_scenes is None else str(max_scenes)
+
+
+# Distinct from `_max_scenes_arg`'s own `None` (which means the explicit,
+# meaningful value "all") — this sentinel means "the --max-scenes flag was
+# not given at all", so `main()` can tell "explicitly asked for all" apart
+# from "didn't say, inherit whatever the previous run used if resuming".
+_MAX_SCENES_UNSET = object()
+
+
+def _run_params_path(out):
+    from pathlib import Path
+    return Path(out) / "run_params.json"
+
+
+def _load_run_params(out) -> dict:
+    """Best-effort read of the CLI-level knobs (max_scenes/profile/genre) the
+    previous full-pipeline run at `out` was actually invoked with — written
+    by `_save_run_params` below. Missing/corrupt file (e.g. a pre-existing
+    `--out` from before this existed, or one only ever touched by standalone
+    `stage`/`revise` commands) degrades to an empty dict, never raises —
+    callers treat that the same as "no prior record, use the normal
+    argparse default", never as an error."""
+    import json
+    p = _run_params_path(out)
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _save_run_params(out, *, max_scenes, profile, genre) -> None:
+    """Persist the EFFECTIVE (already-resolved, post-inheritance) knobs a
+    full-pipeline run used, so a later `--resume` that omits `--max-scenes`/
+    `--profile` inherits the same values instead of silently falling back to
+    argparse's own defaults (1 scene, no profile override) — which would
+    otherwise be a correctness gap, not just a UX one: an unfinished
+    `--max-scenes all` run resumed bare would only render scene 1's worth of
+    casting images/video from then on. Re-written on every run (fresh or
+    resumed) with whatever was actually used THIS time, so the stored value
+    stays current across any number of resumes and an explicit override on
+    one resume becomes the new inherited default for the next."""
+    import json
+    p = _run_params_path(out)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"max_scenes": max_scenes, "profile": profile, "genre": genre},
+                            ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def _list_models() -> int:
     cfg = llm.config()
     have = llm.installed_models()
@@ -763,15 +815,19 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="reel", description=__doc__)
     ap.add_argument("source", nargs="?", help="path to source text (book/story/script)")
     ap.add_argument("--out", default="output", help="output directory (default: output)")
-    ap.add_argument("--max-scenes", type=_max_scenes_arg, default=1,
+    ap.add_argument("--max-scenes", type=_max_scenes_arg, default=_MAX_SCENES_UNSET,
                     help="how many scenes to RENDER — casting images and video "
                          "(default: 1, prototype), or 'all' for every scene; "
                          "every shot within each rendered scene is always rendered. "
                          "Design/planning stages (screenplay, storyboard, soundscape, "
                          "visuals, cinematography) always process every scene, "
-                         "regardless of this flag")
+                         "regardless of this flag. Omitted on a --resume run: "
+                         "inherits whatever the run being resumed actually used, "
+                         "not silently reset to the default")
     ap.add_argument("--profile", choices=["fast", "quality"], default=None,
-                    help="force a single quality tier for every agent")
+                    help="force a single quality tier for every agent. Omitted on a "
+                         "--resume run: inherits whatever the run being resumed "
+                         "actually used")
     ap.add_argument("--genre", default=None,
                     help="force the adaptation's genre (e.g. 'noir thriller'); "
                          "overrides config genre.value. Omit to use config / auto-detect")
@@ -787,14 +843,40 @@ def main(argv: list[str] | None = None) -> int:
     if not args.source:
         ap.error("a SOURCE file is required (or use --list-models)")
 
+    # Resolve --max-scenes/--profile inheritance: an explicit flag always
+    # wins; an OMITTED flag on a --resume run inherits whatever the run being
+    # resumed actually used (persisted below to output/run_params.json) —
+    # otherwise resuming with the bare hint this command itself prints would
+    # silently fall back to argparse's defaults (1 scene, no profile
+    # override) instead of continuing with the original run's settings.
+    prev_params = _load_run_params(args.out) if args.resume else {}
+    if args.max_scenes is _MAX_SCENES_UNSET:
+        if args.resume and "max_scenes" in prev_params:
+            max_scenes = prev_params["max_scenes"]
+            print(f"[reel] --max-scenes not given — inheriting "
+                 f"{_scenes_label(max_scenes)} from the run being resumed")
+        else:
+            max_scenes = 1
+    else:
+        max_scenes = args.max_scenes
+    profile = args.profile
+    if profile is None and args.resume and prev_params.get("profile"):
+        profile = prev_params["profile"]
+        print(f"[reel] --profile not given — inheriting {profile!r} from the run being resumed")
+
+    _save_run_params(args.out, max_scenes=max_scenes, profile=profile, genre=args.genre)
+
     try:
-        run(args.source, out_dir=args.out, max_scenes=args.max_scenes,
-            profile_override=args.profile, resume=args.resume, genre=args.genre)
+        run(args.source, out_dir=args.out, max_scenes=max_scenes,
+            profile_override=profile, resume=args.resume, genre=args.genre)
     except PipelineStopped as e:
         session.finish(args.out, "paused")
         print(f"\n[reel] paused at '{e.stage}'. Completed stages saved in {args.out}/.")
-        print(f"[reel] resume:  python -m reel.cli {args.source} "
-              f"--out {args.out} --resume")
+        resume_cmd = (f"python -m reel.cli {args.source} --out {args.out} --resume "
+                     f"--max-scenes {_scenes_label(max_scenes)}")
+        if profile:
+            resume_cmd += f" --profile {profile}"
+        print(f"[reel] resume:  {resume_cmd}")
         return 0
     except KeyboardInterrupt:
         session.finish(args.out, "paused")

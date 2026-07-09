@@ -239,6 +239,16 @@ each completed `output/<stage>.json` and only recomputes the first stage that
 isn't done yet (and everything after it). A stage that was mid-flight when you
 stopped is never half-saved — it simply re-runs.
 
+`--max-scenes`/`--profile` are **inherited automatically** on `--resume` if you
+don't repeat them — the effective values from the run being resumed are saved
+to `output/run_params.json` and reused, so `--resume` alone (as printed at the
+pause prompt) never silently drops back to `--max-scenes`'s default of `1`
+even if the original run used `--max-scenes all`. Passing either flag
+explicitly on the resume command always overrides the inherited value (and
+becomes the new one remembered for any later resume). `--genre` doesn't need
+this — it's already checkpointed to `output/genre.json` and reloaded
+automatically on `--resume`.
+
 ### Session tracking
 
 A full story-to-video run (ingest through the final render) is one **session**,
