@@ -1607,9 +1607,10 @@ def run(
     # ── 3/10  scenes (scenes←structure) ────────────────────────────────────────
     g = run_group("3/10", "scenes", [
         _spec("scenes",
-              lambda: segment_scenes(source, structure, profile=profile_override),
+              lambda: segment_scenes(source, structure, profile=profile_override, characters=characters),
               _summarize_scenes,
-              lambda fb, p=None: segment_scenes(source, structure, profile=p or profile_override, feedback=fb)),
+              lambda fb, p=None: segment_scenes(source, structure, profile=p or profile_override,
+                                                feedback=fb, characters=characters)),
     ])
     scenes = g["scenes"]
     n_dropped = len(scenes.get("dropped_scenes") or [])

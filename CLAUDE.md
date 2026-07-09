@@ -534,6 +534,59 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
   / final cut phase.
 
 ## Session log
+- 2026-07-09 — **Fixed a real character-name mismatch between `scenes` and
+  `characters` (found by the user inspecting live output, not by test
+  coverage): the `scenes` agent could independently re-derive a different
+  label for the same person than the `characters` agent already settled on,
+  silently breaking every later name-keyed lookup.** Concretely: the sample
+  story only ever describes one character in prose ("a beautiful young
+  woman"), never a proper name — `characters.py` named her "Young Woman" in
+  `characters.json`, but `scenes.py` (run independently, with no shared
+  naming anchor) called her "Woman" in every scene's `characters` list.
+  `pipeline.run()`'s casting-image active-names filter (`pipeline.py:1635-
+  1640`) builds its allow-list from `scenes[...].characters` and does a
+  literal string match against `casting.json` — since `"Young Woman" !=
+  "Woman"`, her image was silently skipped in every run, independent of
+  `--max-scenes` (the name mismatch was present in every scene, not just
+  ones beyond the cap — raising `--max-scenes` alone would not have fixed
+  it). This is the exact same class of problem `location` already had a
+  fix for (scenes.py locks location naming to one consistent string,
+  casting matches against it) — character names never got the same
+  treatment, since `characters` and `scenes` run concurrently in the
+  pipeline with no cross-reference. Fixed in `reel/agents/scenes.py` with
+  a NEW optional `characters` parameter on `segment_scenes` (pipeline.py's
+  "2/10 structure ‖ characters" stage already completes before "3/10
+  scenes" runs, so passing it through is a pure plumbing change, no
+  reordering needed) — two layers, deliberately paired rather than relying
+  on either alone (this codebase has hit prompt-instruction-alone drift
+  before, e.g. the storyboard focus-term bias from an earlier session):
+  (1) `_canonical_names_block` feeds characters.json's settled names into
+  the prompt as a CANONICAL CHARACTER NAMES list with an explicit
+  do-not-shorten/rephrase instruction; (2) `_reconcile_character_names` is
+  a deterministic (no LLM) post-processing safety net — if a scene names
+  someone with a string that isn't an exact canonical name but whose words
+  are a strict subset of exactly ONE canonical name's words (e.g. "Woman" ⊂
+  "Young Woman"), it's rewritten to the canonical form; genuinely ambiguous
+  (matches more than one canonical name) or unrelated names are left
+  untouched rather than guessed. `stages.py`'s "scenes" `Stage` gained
+  `characters` as an `optional` input (also means `stages.downstream_of
+  ("characters")` now correctly includes "scenes" transitively — verified);
+  `pipeline.py`'s two `segment_scenes(...)` call sites (initial + feedback
+  rerun) now pass `characters=characters`. Verified via stubbed offline
+  tests (canonical-names-block-present-in-prompt, reconciliation fixing the
+  exact "Woman"→"Young Woman" case, ambiguous-match/no-match/no-characters-
+  available all correctly left untouched, full `run_stage("scenes")`
+  round-trip) — **then applied live against this repo's own `output/`** at
+  the user's request: found (and had the user stop first) a stale live
+  `reel.cli` process still holding that `output/` dir from a prior session
+  before touching anything, backed up the pre-fix `scenes.json` to
+  `scenes.json.bak-before-name-fix`, re-ran `stage scenes` (local Ollama,
+  free — regenerated scenes.json, confirmed "Young Woman" now used
+  correctly in scenes 4-5) and `stage casting_images` (Gemini — confirmed
+  `output/casting/young_woman.png` now exists and `casting.json`'s
+  `image_path` is set). *(Code fix uncommitted at time of writing — the
+  live output/ regeneration is gitignored working-directory state, not
+  something to commit.)*
 - 2026-07-08 (later 4) — **Offer the revision loop automatically right after a
   full pipeline run completes, plus an explicit 'exit' option.** User asked
   for two additions to the just-built revision agent: (1) once the video

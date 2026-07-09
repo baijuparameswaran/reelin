@@ -74,7 +74,8 @@ def _moodboard(ctx, *, profile=None, feedback=None, max_scenes=1, **_):
 
 def _scenes(ctx, *, profile=None, feedback=None, existing=None, revise_keys=None, **_):
     return segment_scenes(ctx["source"], ctx["structure"], profile=profile, feedback=feedback,
-                          existing=existing, revise_keys=revise_keys)
+                          existing=existing, revise_keys=revise_keys,
+                          characters=ctx.get("characters"))
 
 def _casting(ctx, *, profile=None, feedback=None, existing=None, revise_keys=None, **_):
     return cast_characters(ctx["structure"], ctx["characters"], profile, feedback=feedback,
@@ -144,7 +145,8 @@ STAGES: list[Stage] = [
     Stage("moodboard", ["structure"], _moodboard, optional=("source", "genre"),
           desc="film-wide visual-tone moodboard (steers downstream stages)"),
     Stage("characters", ["source"], _characters, desc="character breakdown"),
-    Stage("scenes", ["source", "structure"], _scenes, desc="numbered scene list"),
+    Stage("scenes", ["source", "structure"], _scenes, optional=("characters",),
+          desc="numbered scene list"),
     Stage("casting", ["structure", "characters"], _casting, optional=("scenes",),
           desc="actor/character/location casting"),
     Stage("soundscape", ["structure", "scenes"], _soundscape, desc="score / sound design"),
