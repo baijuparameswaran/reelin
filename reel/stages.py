@@ -38,6 +38,7 @@ from .agents.storyboard import plan_storyboard
 from .agents.structure import analyze_structure
 from .agents.visuals import design_visuals
 from . import gemini
+from . import session
 
 
 @dataclass
@@ -221,6 +222,7 @@ def run_stage(name: str, out: str | Path = "output", *, input_path: str | None =
         raise KeyError(f"unknown stage '{name}'. Known: {', '.join(names())}")
     stage = REGISTRY[name]
     outp = Path(out)
+    session.start(outp, source=input_path, fresh=False)
     gemini.set_log_dir(outp)
     ctx: dict = {}
     for dep in stage.inputs:

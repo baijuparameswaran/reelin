@@ -45,7 +45,9 @@ judge neutrally). A human-in-the-loop gate reviews/iterates each stage.
   via `python -m reel.cli veo-sync`), `cli.py` (entry), `manifest.py` (model list
   for the updater), `fountain.py` (Fountain parser + screenplay→storyboard/shot
   builder for rendering; `to_storyboard` folds cinematography camera grammar into
-  Veo-aligned prompts using strict element ordering and Veo vocabulary), `agents/`
+  Veo-aligned prompts using strict element ordering and Veo vocabulary),
+  `session.py` (**session identity** — one story-to-video run's id, persisted to
+  `output/session.json`; see Conventions & decisions below), `agents/`
   (ingest, **genre**, structure, **moodboard**, characters, casting, scenes,
   soundscape, visuals, cinematography, storyboard, screenplay, fidelity).
 - `config/models.yaml` — model profiles, per-agent profile map, `hitl` gate
@@ -186,6 +188,28 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
   `run_group()` in `pipeline.py` is the checkpoint-aware stage runner (load → or
   compute concurrently → gate → save); stop raises `PipelineStopped`, caught in
   `cli.main`. A stage interrupted mid-flight is never half-saved — it re-runs.
+- **Session identity (`reel/session.py`):** one full story-to-video run (ingest
+  through render) is a **session**, identified by a generated id
+  (`<timestamp>-<random>`) persisted to `output/session.json`
+  (`session_id`/`source`/`started_at`/`status`/`resumes`). `session.start(out,
+  fresh=...)` mints a NEW id on a fresh (non-`--resume`) `pipeline.run()` call
+  (`fresh=True`, overwriting any prior `session.json` — matches the existing
+  fresh-run checkpoint-overwrite semantics), or **reattaches** to whatever
+  session is already in `out` otherwise (`--resume`, and every standalone
+  `stage`/`render` invocation) — so a multi-day run spanning several
+  `--resume`s, or a mix of full-pipeline + standalone-stage invocations against
+  the same `--out`, all stay one session rather than each minting a new id.
+  `session.finish(out, status)` marks a terminal status
+  (`complete`/`paused`/`failed`) — wired into `pipeline.run`'s successful
+  return and `cli.main`'s `PipelineStopped`/`KeyboardInterrupt`/generic-
+  exception handlers. `gemini.py`'s `_log_call` (the `gemini_api.log` writer)
+  and `pipeline._write_scene_prompt_log` (the per-scene Veo prompt log) both
+  best-effort-read the active session id via `session.current(out)` and tag
+  every line/file with it, so logs stay attributable to the run that produced
+  them even if `--out` is later reused for a different story. `session.py` has
+  zero dependency on any other `reel` module (stdlib only), so it's imported
+  freely from `gemini.py`/`pipeline.py`/`stages.py`/`cli.py` without any risk
+  of an import cycle.
 - **Casting data model:** each character entry has an `actor` block (performer's
   own features) and a `character` block (that actor aged/costumed into the role).
   **Image generation renders the character only** — exactly one image per
@@ -391,6 +415,40 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
   / final cut phase.
 
 ## Session log
+- 2026-07-08 (later 2) — **Added a session-identity concept (`reel/session.py`)
+  spanning the whole story-to-video workflow.** User asked to treat "the whole
+  workflow of providing story to producing the video" as one session, then
+  clarified via AskUserQuestion they wanted an actual session id/concept added
+  to the pipeline (not just doc framing). Until now every artifact under
+  `output/` was scoped only by the `--out` directory itself — fine for a single
+  run, but `gemini_api.log` and the per-scene Veo prompt logs had no way to
+  tell which lines came from which invocation if the same `--out` was reused
+  (resumed days apart, or mixed with standalone `stage`/`render` calls).
+  New `session.py`: `start(out, source=, fresh=)` mints a new id
+  (`<UTC timestamp>-<random hex>`) on a fresh `pipeline.run()` (overwriting any
+  prior `session.json`, matching existing fresh-run checkpoint-overwrite
+  semantics) or reattaches to the existing session otherwise; `finish(out,
+  status)` marks a terminal status; `current(out)` is a best-effort read used
+  purely for log tagging. Zero dependency on other `reel` modules by design, so
+  it can be imported from `gemini.py` without any import-cycle risk. Wired in:
+  `pipeline.run()` calls `start(..., fresh=not resume)` right after creating
+  `out/`, logs the id, stores it in `project.json`, and calls `finish(out,
+  "complete")` just before returning; `stages.run_stage()` and `cli.py`'s
+  standalone `render` command both call `start(..., fresh=False)` so they
+  reattach to whatever session a prior full-pipeline run (or another standalone
+  stage) already established in that `--out`; `cli.main()` calls `finish(...,
+  "paused")` on `PipelineStopped`/`KeyboardInterrupt` and `finish(...,
+  "failed")` on any other exception (re-raised afterward, so tracebacks are
+  unaffected). `gemini._log_call` now reads the active session id via
+  `session.current()` and prepends `session=<id>` to every
+  `gemini_api.log` line; `pipeline._write_scene_prompt_log` adds a `Session:
+  <id>` header line to every `scene_NN_veo_prompts.txt`. Verified via stubbed
+  offline tests (no real API calls): fresh-mints-new-id vs.
+  reattach-keeps-same-id vs. a second fresh run minting yet another new id;
+  gemini log-line tagging; scene-prompt-log header tagging;
+  `cli.main`'s `PipelineStopped` path correctly writing `status: "paused"` to
+  `session.json` via a monkeypatched `run()`. `README.md` gained a "Session
+  tracking" section under Pause & resume. *(Committed and pushed.)*
 - 2026-07-08 (later) — **Veo extend-mode made as robust as seed mode;
   `--max-scenes` consistency fixed so it only restricts actual rendering.**
   Two independent investigations, both triggered by direct questions rather

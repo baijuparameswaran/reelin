@@ -21,6 +21,8 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import session as _session
+
 BASE = "https://generativelanguage.googleapis.com"
 
 # ── API invocation log ─────────────────────────────────────────────────────
@@ -47,7 +49,9 @@ def _log_call(kind: str, *, model: str = "", backend: str = "", outcome: str = "
     try:
         logs_dir.mkdir(parents=True, exist_ok=True)
         ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        bits = [ts, kind, f"model={model}", f"backend={backend}", f"outcome={outcome}"]
+        sid = _session.current(_LOG_DIR) or "-"
+        bits = [ts, f"session={sid}", kind, f"model={model}", f"backend={backend}",
+                f"outcome={outcome}"]
         if path is not None:
             bits.append(f"path={path}")
         if note:

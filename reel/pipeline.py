@@ -68,6 +68,7 @@ from . import imagegen
 from . import i2v
 from . import veo_guide
 from . import gemini
+from . import session
 
 
 def _log(msg: str) -> None:
@@ -550,6 +551,7 @@ def _write_scene_prompt_log(out: Path, snum, model: str, seed_note: str,
     tag = f"{int(snum):02d}" if isinstance(snum, int) else str(snum)
     lines = [
         f"Scene {snum} — Veo render log",
+        f"Session: {session.current(out) or '-'}",
         f"Model: {model}",
         f"Seed method: {seed_note}",
         "",
@@ -1088,6 +1090,8 @@ def run(
     t0 = time.time()
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
+    session_id = session.start(out, source=input_path, fresh=not resume)
+    _log(f"session {session_id} → {out}/session.json")
     gemini.set_log_dir(out)
 
     # Persist each stage as soon as it's approved, so a failure, timeout, or pause
@@ -1466,6 +1470,7 @@ def run(
 
     project = {
         "title": source["title"],
+        "session_id": session_id,
         "source": source["source_path"],
         "word_count": source["word_count"],
         "structure": structure,
@@ -1485,6 +1490,7 @@ def run(
         "elapsed_seconds": round(time.time() - t0, 1),
     }
     save("project", project)
+    session.finish(out, "complete")
 
     _log(f"done in {project['elapsed_seconds']}s → {out}/")
     return project

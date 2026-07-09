@@ -43,6 +43,7 @@ import argparse
 import sys
 
 from . import llm
+from . import session
 from .pipeline import run, PipelineStopped
 
 
@@ -123,7 +124,7 @@ def _render_video(argv: list[str]) -> int:
     import shutil
     from pathlib import Path
 
-    from . import fountain, i2v, gemini
+    from . import fountain, i2v, gemini, session
     from .pipeline import _render_scene_frames
 
     ap = argparse.ArgumentParser(prog="reel render",
@@ -138,6 +139,7 @@ def _render_video(argv: list[str]) -> int:
                          "old clips are backed up to output/video_prev)")
     a = ap.parse_args(argv)
     out = Path(a.out)
+    session.start(out, fresh=False)
     gemini.set_log_dir(out)
 
     fpath = out / "screenplay.fountain"
@@ -384,14 +386,19 @@ def main(argv: list[str] | None = None) -> int:
         run(args.source, out_dir=args.out, max_scenes=args.max_scenes,
             profile_override=args.profile, resume=args.resume, genre=args.genre)
     except PipelineStopped as e:
+        session.finish(args.out, "paused")
         print(f"\n[reel] paused at '{e.stage}'. Completed stages saved in {args.out}/.")
         print(f"[reel] resume:  python -m reel.cli {args.source} "
               f"--out {args.out} --resume")
         return 0
     except KeyboardInterrupt:
+        session.finish(args.out, "paused")
         print("\n[reel] interrupted. Completed stages are saved; "
               "resume with --resume.")
         return 130
+    except Exception:
+        session.finish(args.out, "failed")
+        raise
     return 0
 
 

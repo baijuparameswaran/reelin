@@ -239,6 +239,20 @@ each completed `output/<stage>.json` and only recomputes the first stage that
 isn't done yet (and everything after it). A stage that was mid-flight when you
 stopped is never half-saved — it simply re-runs.
 
+### Session tracking
+
+A full story-to-video run (ingest through the final render) is one **session**,
+identified by a generated id (`<timestamp>-<random>`) written to
+`output/session.json` (`session_id`, `source`, `started_at`, `status` —
+`running`/`complete`/`paused`/`failed`, `resumes`). A plain `python -m reel.cli
+story.txt` mints a new session; `--resume` and standalone `stage`/`render`
+invocations against the same `--out` reattach to whatever session is already
+there instead of minting a new one, so a multi-day run across several
+`--resume`s stays one session. Every line in `output/logs/gemini_api.log` and
+every `output/logs/scene_NN_veo_prompts.txt` is tagged with the active session
+id, so if the same `--out` dir is ever reused for a different story, its API
+calls and prompt logs are still attributable to the run that made them.
+
 ## Character + location image generation (Gemini)
 
 The casting stage generates **one image per casting entry** — per character
