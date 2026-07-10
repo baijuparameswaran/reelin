@@ -186,6 +186,51 @@
   / final cut phase.
 
 ## Session log
+- 2026-07-10 (later 5) — **Fixed a real, reported bug: a JSON-schema
+  EXAMPLE in casting.py's prompt leaked into actual model output.** User
+  reported "Marcel's pocket watch" — the illustrative example casting.py's
+  PROMPT used to show what a `kind: "prop"` entry looks like — showing up as
+  a genuinely derived prop even though no such object exists in the actual
+  story being processed. Root cause, confirmed by checking whether "Marcel"
+  is a real character: it IS, in `samples/sample_story.2.txt` (0 hits in
+  `sample_story.txt`, 2 in `.2.txt`) — the example wasn't a random invented
+  name, it happened to collide with a real character already present in the
+  same prompt's context, so the model had no clean signal that "Marcel's
+  pocket watch" was a hypothetical illustration rather than a genuine
+  suggestion tied to a character it could already see. Audited every
+  PROMPT-facing string (not docstrings — those never reach the model) across
+  all 13 agent files for the same pattern (a concrete, narrative-sounding
+  proper noun used as an "e.g." example) and found exactly two files with
+  the risk, both introduced in the props/casting work from earlier today:
+  `casting.py`'s LOCATION and PROP schema examples ("Rusty Anchor Bar",
+  "Marcel's pocket watch") and `scenes.py`'s rule 8 (`location`) and rule 10
+  (`props`) inline examples (same two terms, plus "Lumen Field"). Fixed by
+  replacing the two JSON-schema "name" field examples in casting.py with
+  clearly generic, bracket-style placeholders ("LOCATION NAME (must exactly
+  match a name in LOCATIONS INPUT below — this is a placeholder illustrating
+  the shape, not a real place to include)" / the equivalent for PROP NAME) —
+  matching the same unambiguous-placeholder convention already used
+  elsewhere in this codebase (`characters.py`'s "NAME", `storyboard.py`'s
+  "CHARACTER_A") rather than inventing a new pattern; and by swapping the
+  inline "e.g." examples in scenes.py / casting.py's docstring for generic,
+  possessive-free, non-proper-noun alternatives ("the harbor tavern", "a
+  corner café", "a tarnished pocket watch") that read unambiguously as
+  format illustrations rather than real suggested content. Every other
+  agent prompt (soundscape/visuals/cinematography/screenplay/storyboard/
+  characters/structure/genre/moodboard/fidelity/revision) was checked and
+  found already clean — either no invented-name examples at all, or already
+  using the generic placeholder convention. Added a permanent regression
+  test, `TestNoStoryLikeExamplesInPrompts` in `tests/test_prompt_rules.py`:
+  renders every prompt in the codebase and asserts none contain the terms
+  involved in this incident ("Marcel", "Rusty Anchor Bar", "Lumen Field"),
+  plus a check that casting.py's two schema examples now use the generic
+  placeholder form — a cheap, permanent tripwire against the same mistake
+  recurring if an "e.g." list is ever expanded without thinking through
+  this risk. Suite now 63 tests (was 61), still <1s, still zero LLM/API
+  calls. One docstring-only mention of "Marcel" in `scenes.py`'s
+  `_validate` (an unrelated whitespace-line-wrap-matching illustration,
+  never sent to any model) was deliberately left alone — out of scope
+  since it has zero LLM exposure.
 - 2026-07-10 (later 4) — **`make demo`/`make run` now depend on `make test`.**
   User asked for the prompt-rule suite to run before the demo, to make sure
   the codebase is intact first. Added `test` as a Makefile prerequisite to

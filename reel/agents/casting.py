@@ -134,7 +134,8 @@ every one of those otherwise-unrelated scenes."
       }}
     }},
     {{
-      "name": "Rusty Anchor Bar (example — LOCATION entries only, see LOCATIONS rule)",
+      "name": "LOCATION NAME (must exactly match a name in LOCATIONS INPUT below \
+— this is a placeholder illustrating the shape, not a real place to include)",
       "kind": "location",
       "character": {{
         "visual_prompt": "a concise text-to-image prompt describing ONLY the \
@@ -147,7 +148,8 @@ population baked in."
       }}
     }},
     {{
-      "name": "Marcel's pocket watch (example — PROP entries only, see PROPS rule)",
+      "name": "PROP NAME (must exactly match a name in PROPS INPUT below — this \
+is a placeholder illustrating the shape, not a real object to include)",
       "kind": "prop",
       "character": {{
         "visual_prompt": "a VERY DESCRIPTIVE text-to-image prompt naming the \
@@ -321,8 +323,8 @@ def _prop_entries(scenes: dict) -> list[dict]:
     """Distinct props worth casting their own locked identity: a prop name
     (exact string match — scenes.py rule 10 asks the model to reuse the same
     string for the same recurring object, the same consistency treatment
-    `location` already gets in rule 8; a near-miss like "the watch" vs
-    "Marcel's pocket watch" isn't caught here, a known limitation shared with
+    `location` already gets in rule 8; a near-miss like "the watch" vs "a
+    tarnished pocket watch" isn't caught here, a known limitation shared with
     `_map_chunks`'s identical source_line-matching approach) that appears in
     2 OR MORE distinct scenes ANYWHERE in the story — not scoped to one
     location, since a portable prop (a character's watch, a letter) can

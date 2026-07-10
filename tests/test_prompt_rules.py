@@ -591,5 +591,87 @@ class TestProviderPolicySteeringSplit(unittest.TestCase):
                                  "(would bypass steer=False and pick up creative direction)")
 
 
+class TestNoStoryLikeExamplesInPrompts(unittest.TestCase):
+    """Regression guard for a real, reported incident: a JSON-schema example
+    that used a concrete, narrative-sounding proper noun ("Marcel's pocket
+    watch" as the PROP example, "Rusty Anchor Bar" as the LOCATION example
+    in casting.py) got picked up by the model as if it were real story
+    content — "Marcel's pocket watch" showed up as a derived prop in actual
+    output even though no such object existed in that story's text. Root
+    cause: "Marcel" happened to also be a real character name in the story
+    being processed, so the example wasn't clearly distinguishable from
+    genuine input data. Fixed by replacing every such example with either a
+    generic, non-proper-noun placeholder (bracket/CAPS style, matching the
+    "NAME"/"CHARACTER_A" convention already used elsewhere in this
+    codebase) or a possessive-free generic object description. This test
+    renders every prompt in the codebase and asserts none of them contain
+    the specific terms involved in the reported incident, plus a couple of
+    other invented proper nouns from the same prior examples — a cheap,
+    permanent tripwire against the same class of mistake creeping back in
+    (e.g. if an "e.g." list is ever expanded with a new illustrative name
+    without thinking through this risk)."""
+
+    BLOCKED_TERMS = ("Marcel", "Rusty Anchor Bar", "Lumen Field")
+
+    def _all_rendered_prompts(self) -> dict:
+        return {
+            "scenes": scenes.PROMPT.format(
+                target="as few as possible", beats="{}", title="T",
+                text="some source text", character_names_block=""),
+            "casting": casting.PROMPT.format(
+                logline="L", genre="Drama", tone="melancholic",
+                characters="[]", locations_block="", props_block=""),
+            "soundscape": soundscape.PROMPT.format(
+                logline="L", genre="G", tone="T", themes="x", scenes="[]"),
+            "visuals": visuals.PROMPT.format(
+                logline="L", genre="G", tone="T", themes="x", scenes="[]"),
+            "cinematography": cinematography.PROMPT.format(
+                logline="L", genre="G", tone="T", themes="x",
+                duration_rule="", scenes="[]"),
+            "screenplay": screenplay.PROMPT.format(
+                revision_note="", logline="L", tone="T", story_block="",
+                characters="c", casting_block="", location_block="",
+                prior_scenes_block="", slugline="INT. X - DAY",
+                scene_number=3, summary="s", purpose="p",
+                soundscape_block="", visuals_block="", cinema_block=""),
+            "storyboard": storyboard.PROMPT.format(
+                logline="L", genre="G", tone="T", story_block="", bundles="[]"),
+            "characters": characters_agent.PROMPT.format(title="T", text="story text"),
+            "structure": structure_agent.PROMPT.format(title="T", text="story text"),
+            "genre_determine": genre_agent.DETERMINE_PROMPT.format(
+                hint="Infer the genre.", story="a story"),
+            "genre_enforce": genre_agent.ENFORCE_PROMPT.format(
+                stage="scenes", genre="Drama, melancholic", genre_name="Drama",
+                artifact="{}"),
+            "moodboard": moodboard_agent.PROMPT.format(
+                revision_note="", logline="L", genre="Drama", tone="T",
+                themes="x", genre_block="", story_block="", tiles=4),
+            "fidelity_stage": fidelity.STAGE_PROMPT.format(
+                stage="scenes", story="a story", artifact="{}"),
+            "fidelity_holistic": fidelity.PROMPT.format(
+                story="a story", screenplay="FADE IN:", storyboard="{}"),
+            "revision_ripple": revision.RIPPLE_PROMPT.format(
+                story="a story", scenes="[]", changed_scene_numbers=[1],
+                change_summary="x"),
+        }
+
+    def test_no_blocked_terms_in_any_prompt(self):
+        for name, rendered in self._all_rendered_prompts().items():
+            for term in self.BLOCKED_TERMS:
+                with self.subTest(prompt=name, term=term):
+                    self.assertNotIn(term, rendered,
+                                     f"{name}'s prompt contains {term!r} — a "
+                                     "narrative-sounding example that can be "
+                                     "mistaken for real story content by the "
+                                     "model (see this test's docstring)")
+
+    def test_casting_schema_examples_use_generic_placeholders(self):
+        rendered = casting.PROMPT.format(
+            logline="L", genre="Drama", tone="melancholic",
+            characters="[]", locations_block="", props_block="")
+        self.assertIn('"name": "LOCATION NAME', rendered)
+        self.assertIn('"name": "PROP NAME', rendered)
+
+
 if __name__ == "__main__":
     unittest.main()

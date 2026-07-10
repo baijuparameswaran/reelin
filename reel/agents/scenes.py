@@ -100,8 +100,10 @@ STRICT RULES:
    never list two scenes whose `summary`/`source_line` cover substantially the same
    moment. Each scene must earn its place with something the others don't already
    cover.
-8. `location` is the plain NAME of the physical setting (e.g. "Rusty Anchor Bar",
-   "Lumen Field", "Antwerp café") — NOT the full slugline formatting (no "INT./EXT."
+8. `location` is the plain NAME of the physical setting (e.g. "the harbor tavern",
+   "a wheat field", "a corner café" — generic illustrations of the FORMAT only;
+   use the source's own name for the place when it has one) — NOT the full
+   slugline formatting (no "INT./EXT."
    or "- DAY/NIGHT"). If two or more scenes are set in the same real place, they
    MUST use the exact identical `location` string, even if their sluglines differ
    (e.g. one is DAY and another is NIGHT at the same place) — this name is the
@@ -121,8 +123,10 @@ STRICT RULES:
    still apply in full) — it only means telling everything that happens in one
    place at one time as a single scene instead of several redundant ones.
 10. `props` lists notable PHYSICAL OBJECTS explicitly present or mentioned in
-    the source text for this scene (e.g. "a brass diving bell", "Marcel's
-    pocket watch", "an unopened letter") — grounded the same way `characters`
+    the source text for this scene (e.g. "a brass diving bell", "a tarnished
+    pocket watch", "an unopened letter" — generic illustrations of the level
+    of specificity wanted, not suggestions to include) — grounded the same
+    way `characters`
     is: only objects the source text actually mentions, never invented set
     dressing. Empty list if the source names nothing worth rendering. A prop
     that's a fixed, recurring part of the location itself (always there,
