@@ -120,8 +120,10 @@ so an update can't silently break the agents, and logs to
   `config/models.yaml` for the RAM/VRAM available; see that file's comments
   before changing them for a very different host.
 
-See `CLAUDE.md` for this project's specific dev host, current status, and
-session-to-session history.
+See `CLAUDE.md` (entry point) — or directly `ARCHITECTURE.md` for this
+project's specific dev host and conventions, `AGENTS.md` for a per-agent
+reference, and `PROGRESS.md` for current status and session-to-session
+history.
 
 ## Iteration 1 — "screenplay material"
 
