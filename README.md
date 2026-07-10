@@ -84,6 +84,17 @@ falls back to whatever's installed (see `config/models.yaml`). On a
 single-GPU/CPU-only host, `--profile fast` (one small model, no reloads
 between agents) is much faster than the mixed default.
 
+### Testing
+
+```bash
+make test   # or: python -m unittest discover -s tests -v
+```
+
+`tests/test_prompt_rules.py` validates every agent prompt against this
+project's prompting conventions (sandwiching, tie-breakers, schema fields)
+and the deterministic logic that backs some of those rules — no LLM or API
+calls, runs in well under a second.
+
 ## Local models & the update cadence
 
 Preferred models are **Qwen3 4B** (fast) and **Qwen3 8B** (quality); larger

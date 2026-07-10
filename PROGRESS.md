@@ -161,14 +161,21 @@
   `! curl -fsSL https://ollama.com/install.sh | sh`
   Then re-pull: `ollama pull qwen3:4b && ollama pull qwen3:8b`.
   Verify: `ollama ps` → "PROCESSOR" should show GPU or GPU+CPU.
-- **Shelved (2026-07-09): a formal `tests/` end-to-end test suite** (stdlib
-  `unittest`, stubbing every paid API — Gemini image/video — plus Ollama for
-  hermeticity) was drafted (full `pipeline.run()` drive-through + a
-  scene-alignment self-heal scenario) but explicitly shelved before being
+- **`tests/test_prompt_rules.py` is now a real, committed suite** (stdlib
+  `unittest`, `make test` — see the 2026-07-10 session log entry for what it
+  covers). Narrower in scope than the full end-to-end suite shelved below —
+  pure prompt-text and deterministic-enforcement checks, no LLM/API calls at
+  all — but genuinely committed and run, not a throwaway per-session script.
+- **Still shelved (2026-07-09): a formal `tests/` end-to-end pipeline suite**
+  (stdlib `unittest`, stubbing every paid API — Gemini image/video — plus
+  Ollama for hermeticity) was drafted (full `pipeline.run()` drive-through +
+  a scene-alignment self-heal scenario) but explicitly shelved before being
   verified or committed; the two draft files were removed per instruction, no
-  trace left. Revisit if/when a real test suite becomes a priority — this
-  project's established practice until then remains throwaway stubbed
-  scripts per session (see the session log entries above for worked
+  trace left. Distinct from `test_prompt_rules.py` above — this would be a
+  much larger, slower suite exercising the actual orchestration/gate/resume
+  machinery, not just prompt text. Revisit if/when that becomes a priority —
+  this project's established practice for THAT scope remains throwaway
+  stubbed scripts per session (see the session log entries above for worked
   examples), not a committed suite.
 - **Next up:** confirm the still-running `storyboard` live test (bundle
   location/cast data, panel consistency with the rendered location image);
@@ -179,6 +186,60 @@
   / final cut phase.
 
 ## Session log
+- 2026-07-10 (later 3) — **Added a real, committed unittest suite
+  (`tests/test_prompt_rules.py`, `make test`) validating that agent
+  prompts actually follow this project's established prompting rules, and
+  that rules enforced deterministically (not just by prompt instruction)
+  do what they claim.** User asked directly for this after several rounds
+  of ad-hoc, throwaway smoke-testing (`.format()` + substring checks run
+  by hand each time a prompt changed) — converted that pattern into a
+  proper, permanent suite instead of re-deriving it every session. Scoped
+  deliberately narrower than the `pipeline.run()` end-to-end suite shelved
+  in an earlier session (see the "Still shelved" bullet above) — pure
+  prompt-text and deterministic-logic checks, zero LLM/API calls, so it's
+  fully offline and runs in well under a second (61 tests, ~0.01s).
+  Two kinds of checks, mirroring how this project's prompting conventions
+  actually work: (1) PROMPT TEXT — every one of the seven "sandwiched"
+  prompts (scenes/casting/soundscape/visuals/cinematography/screenplay/
+  storyboard, per the 2026-07-09 audit) is asserted to actually contain
+  its "Before you respond" reminder block at the TRUE end of the rendered
+  string (not just present somewhere) with zero leftover unresolved
+  `{placeholder}`s, plus every high-stakes rule keyword this session
+  added or audited (MINIMIZE SCENE COUNT, SOURCE OVER COVERAGE,
+  TIE-BREAKER, ISOLATION covering props, PROPS, SELF-CONTAINED VS. BRIEF,
+  the "at least 1 shot" floor) is confirmed present in the actual text
+  sent to the model, not just described in a docstring; a companion
+  regression guard confirms the four short prompts (characters/structure/
+  genre/moodboard) and two grader prompts (fidelity/revision) remain
+  deliberately un-sandwiched, so a future edit can't silently drift either
+  way without a test noticing. (2) ENFORCEMENT — the deterministic
+  functions that catch what prompting alone doesn't reliably guarantee are
+  tested directly: `scenes._validate` (drops a hallucinated `source_line`,
+  keeps a real quote spanning a hard line-wrap), `scenes.
+  _attach_source_excerpts` (contiguous non-overlapping partition, ordered
+  by actual source position not scene `number`, graceful degradation for
+  an unfindable line), `scenes._reconcile_character_names` (fixes the
+  exact "Woman"/"Young Woman" class of near-miss, leaves a genuinely
+  ambiguous or unrelated name alone), `casting._location_entries`'s
+  `recurring_props` heuristic and `casting._prop_entries`'s global
+  (not location-scoped) recurrence requirement, `storyboard.
+  _build_scene_board`'s deterministic `key_props` copy (including the
+  empty-list-not-missing-key edge case), and `duration_budget.
+  suggest_shots_per_scene`'s 1-shot floor. A separate
+  `TestProviderPolicySteeringSplit` class statically inspects (via
+  `inspect.getsource`, no live calls) every creative-agent module for an
+  `llm.generate(` call (steered) and every grader/direction-setting module
+  for `models.text(` while asserting `llm.generate(` is ABSENT — turning
+  ARCHITECTURE.md's provider-policy prose ("Gemini only for image/video;
+  graders judge neutrally") into an actual regression-tested invariant
+  rather than a convention that could silently drift. Caught one real bug
+  in the suite's own first draft before it ever ran clean: a stale expected
+  reminder-block tail string in the scenes.py test (written before this
+  session's earlier prop-rule addition extended that same reminder block
+  with one more bullet) — fixed by re-deriving the exact current tail from
+  the file rather than trusting memory, the same "verify against current
+  state, not what you remember" discipline the sandwiched prompts
+  themselves now enforce on the model. Wired into `Makefile` as `make test`.
 - 2026-07-10 (later 2) — **Recurring props now get a locked, very
   descriptive `visual_prompt` — the same identity-consistency treatment
   characters and locations already have — so the same object renders

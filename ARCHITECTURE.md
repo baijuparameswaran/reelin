@@ -53,8 +53,17 @@
   gracefully with a hint; the text pipeline is unaffected.
 - `scripts/` — `update-models.sh` (cadence), `install-cron.sh`, `model-updates.log`.
 - `samples/` — bundled test story. `output/` — generated artifacts (gitignored).
+- `tests/test_prompt_rules.py` — stdlib `unittest`, offline (no LLM/API
+  calls, <1s): validates every agent PROMPT template actually follows this
+  project's prompting conventions (sandwiching, tie-breakers, schema
+  fields) and that the deterministic functions backing some of those rules
+  (`scenes._validate`/`_attach_source_excerpts`/`_reconcile_character_names`,
+  `casting._location_entries`/`_prop_entries`, `storyboard._build_scene_board`,
+  `duration_budget.suggest_shots_per_scene`) do what the prompts describe,
+  plus a static check (via `inspect.getsource`) that the steer-vs-neutral
+  provider-policy split below actually holds in the code. Run via `make test`.
 - Entry points via `Makefile`: `setup`, `demo`, `run`, `models`, `update`,
-  `update-all`, `install-cron`. Run pipeline as `python -m reel.cli`.
+  `update-all`, `install-cron`, `test`. Run pipeline as `python -m reel.cli`.
 
 ## Hardware reality (binding constraint)
 Host `dev-host`, WSL2/Ubuntu 24.04. **NVIDIA GeForce RTX 2070 Super, 8 GB

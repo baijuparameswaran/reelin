@@ -2,7 +2,7 @@
 PY := .venv/bin/python
 PIP := .venv/bin/pip
 
-.PHONY: help setup setup-image run demo models update update-all install-cron clean
+.PHONY: help setup setup-image run demo models update update-all install-cron test clean
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -43,6 +43,9 @@ install-cron: ## Install weekly + monthly model-update cron jobs
 
 secrets: ## Manage encrypted API keys (set / get / delete / status)
 	$(PY) -m reel.secrets $(or $(CMD),status)
+
+test: ## Run the offline prompt-rule test suite (no LLM/API calls, <1s)
+	$(PY) -m unittest discover -s tests -v
 
 clean: ## Remove generated output
 	rm -rf output /tmp/reel_smoke
