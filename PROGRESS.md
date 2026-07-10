@@ -179,6 +179,48 @@
   / final cut phase.
 
 ## Session log
+- 2026-07-10 — **Scene segmentation now actively minimizes scene count (fewer
+  scenes → fewer rendered video clips downstream), and every scene captures
+  its own precise source-text excerpt + word-count metadata.** User framed
+  scene generation as "the critical phase for all other downstream actions"
+  and asked for two things: (1) keep the scene count to a minimum, since
+  scene count drives how many videos get rendered; (2) have each scene
+  capture the actual portion of the story that defined it, plus metadata.
+  For (1): added STRICT RULE 9 (MINIMIZE SCENE COUNT) to `scenes.py`'s
+  prompt — merge consecutive beats sharing a `location` and continuous time
+  into ONE scene, splitting only on a real location/time/purpose change, not
+  for every new beat or line — reinforced in the prompt's task-intro line and
+  its "before you respond" sandwich block (a new merge-check bullet). This is
+  explicitly a pacing/cost bias, not a fidelity relaxation — rules 1-2/7
+  (no invented scenes, no unnecessary repeats) still stand, so the model
+  can't drop real events to save a scene, only stop over-fragmenting a single
+  continuous moment. `segment_scenes`'s standalone default `target` changed
+  from the flat "8-14 scenes" to "as few scenes as the story can be told
+  in — often 3-6 for a short story", so a bare `stage scenes` run (no
+  duration-budget guidance) gets the same bias. For (2): new deterministic
+  (no LLM, so no hallucination risk) `_attach_source_excerpts` partitions the
+  source text into one contiguous, non-overlapping span per scene — from
+  that scene's already-validated `source_line` position to the next scene's
+  — and attaches it as `source_excerpt` plus a `word_count` metadatum, a
+  strict superset of the short 5-15-word `source_line` anchor that only ever
+  existed for hallucination-checking and chunk-matching. Wired through:
+  `ingest.scene_source_context` gained a `source_excerpt` param it prefers
+  over the older, coarser chunk-based join (which only approximates scene
+  boundaries at ~3000-char chunk granularity and can pull in neighboring
+  scenes' text); `screenplay.py`/`storyboard.py`'s per-scene context lookups
+  now pass it through, falling back gracefully for checkpoints predating this
+  field. Known, documented limitation shared with the pre-existing
+  `_map_chunks`: if a `source_line` phrase genuinely repeats verbatim
+  elsewhere in the story, `str.find` locates its first occurrence, which may
+  not be the one a given scene actually covers — inherent to anchoring on
+  short quoted text, not new to this change. Verified via a full stubbed
+  `segment_scenes()` round-trip (contiguous partition boundaries correct,
+  last scene runs to end of text, unfindable `source_line` degrades to an
+  empty excerpt rather than raising) and the scoped-revision path
+  (`revise_keys`-untouched scenes keep their OLD `source_excerpt` byte-
+  identical via `merge_by_key`, the revised scene gets a freshly computed
+  one) — both against real `.venv` execution, no live Ollama call needed
+  since these are pure deterministic post-processing steps.
 - 2026-07-09 (later 7) — **Removed the hardcoded "at least 2 shots per scene"
   floor — a scene now only needs a minimum of 1 shot/panel.** User pointed
   out a scene may only need one shot. Found the floor in two places:

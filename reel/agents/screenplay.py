@@ -339,9 +339,12 @@ def draft_screenplay(
 
     drafted = []
     for scene in chosen:
-        # Per-scene source context: use the chunk(s) mapped to this scene so the
-        # model sees only the relevant passage rather than a truncated global head.
-        scene_ctx = scene_source_context(source, scene.get("chunk_indices"))
+        # Per-scene source context: prefer the scene's own precise source_excerpt
+        # (see scenes.py's _attach_source_excerpts), else the chunk(s) mapped to
+        # this scene, so the model sees only the relevant passage rather than a
+        # truncated global head.
+        scene_ctx = scene_source_context(source, scene.get("chunk_indices"),
+                                         source_excerpt=scene.get("source_excerpt"))
         story_blk = _story_block(scene_ctx)
         scene_num = scene.get("number")
         scene_chars = scene.get("characters", [])

@@ -3,6 +3,16 @@
 The source text is the ONLY authority — every scene must correspond to an actual
 event in the source. Structural beats are a secondary ordering scaffold only.
 
+This is the single most consequential stage for downstream cost: every scene
+becomes a separate rendered video clip (or several, one per shot) further down
+the pipeline, so the prompt actively steers toward the FEWEST scenes that can
+still tell the story faithfully — merging continuous beats that share a
+location and continuous time into one scene, splitting only on a real
+location/time/purpose change (see STRICT RULE 9, "MINIMIZE SCENE COUNT",
+below). This is a cost/pacing bias, not a fidelity relaxation: the existing
+"never invent scenes to hit a count" / "no unnecessary repeats" rules already
+prevent the opposite failure mode (dropping real events to save a scene).
+
 Each scene also carries a `location` — the plain name of its physical setting,
 identical across every scene set in the same place (independent of the DAY/NIGHT
 slugline formatting). This locks the scene→location association explicitly
@@ -21,6 +31,18 @@ character the source text only ever describes in prose, never names outright
 differently by the `characters` agent ("Young Woman") and this one ("Woman"),
 which silently breaks every later name-keyed lookup (casting image rendering,
 storyboard/screenplay character briefs) for that person.
+
+Each scene also captures the actual PORTION of the story it covers, not just
+the short `source_line` anchor (5-15 words, used only for hallucination-
+checking and chunk-matching): `_attach_source_excerpts` deterministically (no
+LLM, no hallucination risk) partitions the source text into one contiguous
+span per scene, from that scene's `source_line` position to the next scene's,
+and attaches it as `source_excerpt` plus a `word_count` metadatum. This is the
+authoritative per-scene text every downstream per-scene agent should ground
+against — `ingest.scene_source_context` prefers it over the older, coarser
+chunk-based join (which only approximates scene boundaries at ~3000-char
+chunk granularity and can pull in neighboring scenes' text) whenever it's
+present.
 """
 from __future__ import annotations
 
@@ -39,8 +61,11 @@ SYSTEM = (
 )
 
 PROMPT = """\
-Break the story below into filmable scenes. Aim for {target}, but use FEWER scenes
-if the story doesn't have enough distinct events — never invent scenes to hit a count.
+Break the story below into filmable scenes. Aim for {target}. Never invent
+scenes to hit a count — but every scene below becomes a separate rendered
+video clip downstream, so also never split what can be told as ONE continuous
+scene; prefer the FEWEST scenes that still tell the story faithfully (see
+STRICT RULE 9 below).
 
 STRICT RULES:
 1. SOURCE TEXT IS THE ONLY AUTHORITY. Every scene must correspond to an actual
@@ -69,6 +94,18 @@ STRICT RULES:
    anchor a later stage uses to keep that location visually consistent, so
    inconsistent naming of the same place defeats the purpose. A location need not
    recur to deserve its own name; name it precisely either way.
+9. MINIMIZE SCENE COUNT: each scene here becomes a separate rendered video clip
+   (often several, one per camera shot) further down the pipeline — more scenes
+   directly means more render time and cost. Merge consecutive beats that share
+   the same `location` and continuous, uninterrupted time into ONE scene rather
+   than splitting them across several, as long as the combined action can still
+   read clearly through continuous coverage. Only start a NEW scene when the
+   location changes, there's a real time jump (a scene break, not just the next
+   sentence), or the dramatic purpose genuinely shifts — not for every new beat,
+   line of dialogue, or minor action within an otherwise continuous moment. This
+   does not license dropping or compressing away real events (rules 1-2 above
+   still apply in full) — it only means telling everything that happens in one
+   place at one time as a single scene instead of several redundant ones.
 
 Respond with JSON in exactly this shape (no extra keys, no commentary):
 {{
@@ -103,6 +140,9 @@ just read, not just what you remember from the rules list):
   exactly, if one was given.
 - Every `location` string is byte-identical across every scene set in that
   same place.
+- No two adjacent scenes share the same `location` AND continuous time without
+  a real reason they're split (MINIMIZE SCENE COUNT, rule 9) — if you find one,
+  merge them before responding.
 """
 
 
@@ -185,6 +225,58 @@ def _validate(scenes: list[dict], source_text: str) -> tuple[list[dict], list[di
     return valid, dropped
 
 
+def _attach_source_excerpts(scenes: list[dict], source_text: str) -> list[dict]:
+    """Deterministically capture the actual PORTION of the story each scene
+    covers — not just the short `source_line` anchor (5-15 words, only used
+    for hallucination-checking and chunk-matching) but the real span of prose
+    between this scene's anchor and the next one's. No LLM involved: it's a
+    straight substring extraction from `source_line` positions `_validate`
+    has already confirmed exist in the source text, so there's no
+    hallucination risk the way there would be if the model were asked to
+    quote a long passage verbatim.
+
+    Scenes are ordered by where their `source_line` actually occurs in the
+    text (not by their `number`, in case the model's numbering and the
+    source's real order ever disagree) so each excerpt is a genuine
+    contiguous, non-overlapping partition of the story — the last scene's
+    excerpt runs to the end of the text. Known limitation, shared with
+    `_map_chunks`'s identical `source_line`-matching approach: if a phrase
+    genuinely repeats verbatim elsewhere in the story, `str.find` locates
+    its FIRST occurrence, which may not be the one this scene actually
+    covers — an inherent limit of anchoring on short quoted text, not
+    something this function can resolve on its own.
+
+    `word_count` rides along as a cheap, directly useful metadatum for
+    downstream duration/pacing estimation (`reel.duration_budget`) — a real
+    signal from the actual source material, not just storyboard.py's
+    per-shot-type heuristic.
+
+    A scene whose `source_line` can't be located (shouldn't happen after
+    `_validate` already dropped those) gets an empty excerpt rather than
+    raising."""
+    norm_source = re.sub(r"\s+", " ", source_text)
+    lower_source = norm_source.lower()
+
+    positioned = []
+    for sc in scenes:
+        sl = re.sub(r"\s+", " ", (sc.get("source_line") or "").strip())
+        pos = lower_source.find(sl.lower()) if sl else -1
+        positioned.append((pos if pos >= 0 else None, sc))
+
+    located = sorted((p for p in positioned if p[0] is not None), key=lambda p: p[0])
+    for i, (pos, sc) in enumerate(located):
+        end = located[i + 1][0] if i + 1 < len(located) else len(norm_source)
+        excerpt = norm_source[pos:end].strip()
+        sc["source_excerpt"] = excerpt
+        sc["word_count"] = len(excerpt.split())
+    for pos, sc in positioned:
+        if pos is None:
+            sc.setdefault("source_excerpt", "")
+            sc.setdefault("word_count", 0)
+
+    return scenes
+
+
 def _map_chunks(scenes: list[dict], source: dict) -> list[dict]:
     """Add chunk_indices to every scene by matching its source_line against chunks.
 
@@ -216,7 +308,7 @@ def _map_chunks(scenes: list[dict], source: dict) -> list[dict]:
 def segment_scenes(
     source: dict,
     structure: dict,
-    target: str = "8-14 scenes",
+    target: str = "as few scenes as the story can be told in — often 3-6 for a short story",
     profile: str | None = None,
     feedback: str | None = None,
     existing: dict | None = None,
@@ -261,6 +353,7 @@ def segment_scenes(
     result = llm.safe_json(raw)
     scenes = result.get("scenes") or []
     scenes, dropped = _validate(scenes, source_text)
+    scenes = _attach_source_excerpts(scenes, source_text)
     scenes = _map_chunks(scenes, source)
     scenes = _reconcile_character_names(scenes, characters)
     if revise_keys is not None and existing:

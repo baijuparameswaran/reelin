@@ -59,13 +59,25 @@ def chunk_text(text: str,
 
 def scene_source_context(source: dict,
                           chunk_indices: list[int] | None,
-                          max_chars: int = 6000) -> str:
-    """Return the source text relevant to a scene from its chunk indices.
+                          max_chars: int = 6000,
+                          source_excerpt: str | None = None) -> str:
+    """Return the source text relevant to a scene.
 
-    Falls back to the head of the full text when chunks are absent (old
-    checkpoints) or no indices are mapped yet. Adjacent chunks are joined
-    with a separator; overlap at boundaries is accepted (the model ignores it).
+    Prefers `source_excerpt` when given — a scene's own deterministically
+    computed portion of the story (`reel.agents.scenes._attach_source_excerpts`),
+    a genuine contiguous span from that scene's `source_line` position to the
+    next scene's. This is tighter and more accurate than the chunk-based join
+    below, which only approximates scene boundaries at ~3000-char chunk
+    granularity and can pull in neighboring scenes' text. Falls back to the
+    chunk-based join for scenes without one (checkpoints from before this
+    field existed), then to the head of the full text when chunks are absent
+    too. Adjacent chunks are joined with a separator; overlap at boundaries
+    is accepted (the model ignores it).
     """
+    if source_excerpt:
+        return source_excerpt if len(source_excerpt) <= max_chars else \
+            source_excerpt[:max_chars] + "\n[… excerpt truncated]"
+
     chunks: list[dict] = source.get("chunks") or []
     full_text: str = source.get("text", "")
 

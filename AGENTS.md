@@ -74,12 +74,24 @@ provider-policy bullet.
   texture/atmosphere/influences), run once right after `structure`; its
   render-ready `tiles` are capped to `--max-scenes` since they're an actual
   media-generation step (unlike its film-wide aesthetic fields).
-- **`scenes.py`** — segments the story into a numbered scene list; source
-  text is the *only* authority (rule 1), structural beats are a secondary
-  ordering hint that loses on conflict (rule 6). Every scene also carries a
-  `location` string, identical across every scene set in the same place —
-  the anchor `casting.py` uses to cast locations. `_reconcile_character_names`
-  is a deterministic safety net on top of the prompt instruction to reuse
+- **`scenes.py`** — segments the story into a numbered scene list; the single
+  most consequential stage for downstream render cost, since every scene
+  becomes at least one rendered video clip. Source text is the *only*
+  authority (rule 1), structural beats are a secondary ordering hint that
+  loses on conflict (rule 6), and rule 9 (MINIMIZE SCENE COUNT) actively
+  steers toward the fewest scenes that can still tell the story faithfully —
+  merging consecutive beats that share a location and continuous time,
+  splitting only on a real location/time/purpose change. Every scene also
+  carries a `location` string, identical across every scene set in the same
+  place — the anchor `casting.py` uses to cast locations — and a
+  deterministically-computed (no LLM) `source_excerpt` + `word_count`
+  (`_attach_source_excerpts`): the actual contiguous portion of the story
+  text that scene covers, a strict superset of the short `source_line`
+  anchor. `ingest.scene_source_context` prefers `source_excerpt` over the
+  coarser chunk-based join whenever it's present, so `screenplay.py`/
+  `storyboard.py` ground their per-scene prompts in the precise passage
+  rather than an approximate chunk. `_reconcile_character_names` is a
+  deterministic safety net on top of the prompt instruction to reuse
   `characters.json`'s settled names.
 - **`casting.py`** — locks each character's on-screen visual form: an
   `actor` block (the performer's own intrinsic look) plus a `character`

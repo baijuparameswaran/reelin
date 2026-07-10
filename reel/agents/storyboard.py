@@ -461,11 +461,14 @@ def _scene_bundles(
                 "label": mood_tile.get("label", ""),
                 "visual_reference": mood_tile.get("image_prompt", ""),
             } if mood_tile else None,
-            # Per-scene source context: the chunk(s) of the story that this scene
-            # corresponds to.  Used in the per-scene storyboard LLM call so the
-            # model sees the specific passage rather than a global truncated head.
+            # Per-scene source context: prefers the scene's own precise
+            # source_excerpt (see scenes.py's _attach_source_excerpts), else the
+            # chunk(s) of the story that this scene corresponds to. Used in the
+            # per-scene storyboard LLM call so the model sees the specific
+            # passage rather than a global truncated head.
             "_source_context": scene_source_context(
-                source or {}, scene.get("chunk_indices")) if source else "",
+                source or {}, scene.get("chunk_indices"),
+                source_excerpt=scene.get("source_excerpt")) if source else "",
         })
     return bundles
 
