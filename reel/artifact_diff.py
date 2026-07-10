@@ -93,6 +93,13 @@ ARTIFACT_SHAPES: dict[str, tuple] = {
                         ("panels", lambda p: p.get("panel"))),
 }
 
+# Which ARTIFACT_SHAPES entries are keyed by scene_number vs. by name — a
+# single shared definition so the revision CLI's cross-type key translation
+# (cli.py's _translate_revise_keys) and the fidelity agent's scene-alignment
+# check (fidelity.check_scene_alignment) don't each maintain their own copy.
+SCENE_KEYED_ARTIFACTS = {"scenes", "soundscape", "visuals", "cinematography", "screenplay", "storyboard"}
+NAME_KEYED_ARTIFACTS = {"characters", "casting"}
+
 # Whole-file artifacts with no natural keyed-list shape — a flat dict of
 # fields that every downstream agent's prompt draws on directly (logline,
 # genre, palette, ...). An edit here always counts as drastic (full

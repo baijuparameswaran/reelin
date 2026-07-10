@@ -1,6 +1,6 @@
 """Storyboard agent: a production-ready board for every scene of the film.
 
-This is the synthesis stage. It fuses all upstream artifacts into a structured
+This is the fusion stage. It merges all upstream artifacts into a structured
 storyboard that a director, DP, and VFX team — or a video generation model —
 can work from directly:
 
@@ -24,16 +24,39 @@ Output schema mirrors a real production storyboard:
                    camera_movement / lens / composition / duration / action /
                    dialogue / sound / emotional_note / transition / image_prompt
 
-NOTE on image_prompt: the model writes it in the guide's five-ELEMENT order
-(Subject/Action/Style/Camera/Focus), but that is no longer the order actually
-submitted to Veo for real renders. pipeline._render_scene_frames reconstructs
-the prompt from structured fields (this panel's own shot_type/camera_angle/
-camera_movement/lens, casting.json, the scene's visual_overview) into the
-newer five-PART formula — Cinematography+Subject+Action+Context+Style&Ambiance,
-per Google's Veo 3.1 prompting guide (see pipeline._five_part_veo_prompt) —
-whenever casting context is available. image_prompt is still generated and is
-used verbatim only as a fallback when that context is absent (e.g. a
-standalone gen-video prompt with no casting/scene data).
+BUILD PATH — deterministic by default, LLM only when there's an actual creative
+judgment call to make. Every field above already has an authoritative source
+in an upstream artifact (that's the whole point of a FUSION stage — it isn't
+supposed to make new creative decisions, just faithfully combine ones already
+made). `_build_scene_board` constructs the entire scene deterministically —
+`_scene_bundles` (pure Python, no LLM) already merges everything scene-by-scene
+keyed off `scene_number`; `_align_shots` pairs cinematography's shot list
+(authoritative for panel count/order — the "coverage plan") with screenplay's
+shot list (should already track it 1:1, since screenplay.py's own prompt
+instructs it to derive shots from the camera coverage; falls back to
+positional pairing when they don't). A deterministic merge can't drift,
+hallucinate, or drop a field the way an LLM sometimes did in practice (see
+CLAUDE.md's session log — dropped voiceover lines, unused visual_filter/
+sound_events/key_props, invented transitions). The ONE thing genuinely
+invented rather than sourced is `characters_in_frame` for close-shot panels,
+which is a heuristic (dialogue speaker, when the shot type is a close-up
+family) since no artifact actually specifies who's visually in a given shot.
+
+`feedback` is the one path that still calls the LLM (`_llm_generate_scene`,
+the prior full generation prompt) — a directed creative note ("add more
+close-ups", "make it darker") needs actual judgment to apply, which the
+deterministic builder can't do. Everything else — a fresh run, a scoped
+`revise_keys` revision with no `feedback` — is fully deterministic.
+
+NOTE on image_prompt: even where it's still generated (the deterministic
+fallback, or the LLM feedback path), it's not what's actually submitted to
+Veo for real renders — pipeline._render_scene_frames reconstructs the prompt
+from structured fields (this panel's own shot_type/camera_angle/camera_movement/
+lens, casting.json, the scene's visual_overview) into the five-PART formula —
+Cinematography+Subject+Action+Context+Style&Ambiance, per Google's Veo 3.1
+prompting guide (see pipeline._five_part_veo_prompt) — whenever casting context
+is available. image_prompt here is used verbatim only as a fallback when that
+context is absent (e.g. a standalone gen-video prompt with no casting/scene data).
 """
 from __future__ import annotations
 
@@ -70,7 +93,8 @@ For each scene produce:
 narrative purpose, characters present, estimated screen duration (e.g. "1m 45s")
 
 2. visual_overview — color_palette for this scene, lighting_setup (rig or natural \
-light description), mood (one line)
+light description), visual_filter (lens/grading style, e.g. "desaturated, cool blue \
+cast, soft grain"), mood (one line)
 
 3. audio_overview — score_cue (music/score description), ambient (ambient bed), \
 key_sounds (list of "moment: sound" strings)
@@ -122,6 +146,31 @@ midday sun", "soft diffused overcast light"). Do NOT include dialogue or sound e
 those live in the panel's dialogue and sound fields and are added to the Veo prompt \
 separately
 
+MERGE SOURCE — where each output field's ground truth already lives in the scene
+bundle below (an earlier stage already decided this; ground your output in it
+rather than reinventing it):
+- visual_overview.color_palette / lighting_setup / mood  <- bundle.art.color_palette / \
+.lighting / .emotional_function
+- visual_overview.visual_filter                          <- bundle.art.visual_filter, \
+used close to verbatim
+- audio_overview.ambient / score_cue                      <- bundle.audio.ambient_bed / \
+.score_direction — UNLESS bundle.audio.silence is true, in which case leave both \
+empty/minimal: silence there is a deliberate choice, not a gap to fill
+- audio_overview.key_sounds                               <- one "panel N: <sound>" \
+entry per item in bundle.audio.sound_events, not invented from scratch
+- panel.action                                            <- grounded in the matching \
+bundle.screenplay_shots.description (the SAME event the screenplay already wrote — \
+add cinematic specificity, but do not describe a different event)
+- panel.dialogue                                          <- copied verbatim from the \
+matching bundle.screenplay_shots.dialogue, PLUS a {{"speaker", "line", "vo": true}} \
+entry for bundle.screenplay_shots.voiceover whenever a shot has one — voiceover is a \
+SEPARATE field from dialogue; never drop it or substitute your own narration
+- panel.composition / image_prompt                        <- incorporate \
+bundle.art.visual_moments (beat-keyed visual specifics) and bundle.art.key_props \
+where they apply to this panel's beat, rather than inventing unrelated detail
+- the LAST panel's transition                             <- bundle.camera.transition_to_next \
+when present, used as-is rather than an invented scene-ending transition
+
 JSON schema (respond with this shape and nothing else):
 {{
   "storyboard_style": "one sentence: overall visual language of the boards",
@@ -141,6 +190,7 @@ if present (use it verbatim — do not rephrase), otherwise from the slugline",
       "visual_overview": {{
         "color_palette": "describe the dominant colors and contrast for this scene",
         "lighting_setup": "describe the light source(s) and quality",
+        "visual_filter": "lens/grading style from the scene bundle's art.visual_filter",
         "mood": "one line capturing the emotional atmosphere"
       }},
       "audio_overview": {{
@@ -198,7 +248,10 @@ Rules:
 material above. Do not invent scenes, add character motivations, or introduce \
 relationships not present in the story.
 - Dialogue is LOCKED: copy each line verbatim from `screenplay_shots.dialogue` \
-into the matching panel's `dialogue` list. Never paraphrase, merge, or add lines.
+into the matching panel's `dialogue` list. Never paraphrase, merge, or add lines. \
+`screenplay_shots.voiceover` is a SEPARATE field, not part of `.dialogue` — when a \
+shot has one, copy it in too as its own `dialogue` entry with `vo: true`; do not \
+drop it just because it isn't in the `.dialogue` list.
 - One panel per camera shot — every shot in the coverage, in order (never merge or drop)
 - Align each panel with its screenplay shot; bake in the verbatim attributed dialogue
 - image_prompt is self-contained and render-ready — the character look, setting, \
@@ -429,6 +482,258 @@ def _story_block(context_text: str) -> str:
     )
 
 
+# ── deterministic scene-board construction (no LLM) ───────────────────────────
+# See the module docstring's "BUILD PATH" section for why this is the default.
+
+_CLOSE_SHOT_TYPES = {"CU", "ECU", "MCU", "OTS", "POV"}
+
+_SHOT_BASE_SECONDS = {
+    "ECU": 2, "CU": 3, "MCU": 3, "MS": 4, "FS": 5, "WS": 5,
+    "ELS": 6, "POV": 4, "OTS": 4, "2S": 4, "INSERT": 2,
+}
+
+
+def _align_shots(cam_shots: list[dict], scr_shots: list[dict]) -> list[tuple[dict, dict]]:
+    """Pair each cinematography shot (authoritative for panel count/order —
+    it's the coverage plan every panel is required to follow) with its
+    corresponding screenplay shot. Primary: match by shot number — screenplay.py's
+    own prompt already instructs it to derive its shots from the camera
+    coverage, so the two lists should carry the same numbering in the common
+    case. Falls back to positional pairing when a cinematography shot has no
+    `shot_number` or the numbering doesn't line up (the two lists genuinely
+    have different counts) — a best-effort pairing rather than losing that
+    beat's dialogue/action entirely."""
+    scr_by_num = {sh["shot"]: sh for sh in scr_shots if isinstance(sh.get("shot"), int)}
+    pairs = []
+    for i, cam in enumerate(cam_shots):
+        num = cam.get("shot_number")
+        scr = scr_by_num.get(num) if isinstance(num, int) else None
+        if scr is None and i < len(scr_shots):
+            scr = scr_shots[i]
+        pairs.append((cam, scr or {}))
+    return pairs
+
+
+def _panel_dialogue(scr: dict) -> list[dict]:
+    """`screenplay_shots.dialogue` copied as-is, plus a `vo: true` entry for
+    `.voiceover` — a separate field from `.dialogue` that's easy to miss
+    (see the module docstring; an LLM missed it in practice)."""
+    dialogue = [
+        {"speaker": d.get("speaker", ""), "line": d.get("line", ""), "vo": False}
+        for d in (scr.get("dialogue") or []) if d.get("line")
+    ]
+    vo = scr.get("voiceover")
+    if isinstance(vo, dict) and vo.get("line"):
+        dialogue.append({"speaker": vo.get("speaker") or "NARRATOR", "line": vo["line"], "vo": True})
+    return dialogue
+
+
+def _panel_characters_in_frame(cam: dict, dialogue: list[dict], scene_characters: list) -> list:
+    """HEURISTIC, not a citation — no artifact actually specifies who's
+    visually in a given shot. For a close-shot-family panel (CU/ECU/MCU/OTS/
+    POV) with dialogue, assume it's on whoever's speaking (a close-up
+    typically follows the speaker or their reaction). Otherwise — a wide/
+    establishing/full shot, or a close shot with no dialogue — default to
+    everyone present in the scene, since narrower shots are the exception,
+    not the rule."""
+    shot_type = (cam.get("type") or "").upper()
+    if shot_type in _CLOSE_SHOT_TYPES:
+        speakers, seen = [], set()
+        for d in dialogue:
+            sp = d.get("speaker")
+            if sp and sp not in seen:
+                seen.add(sp)
+                speakers.append(sp)
+        if speakers:
+            return speakers
+    return list(scene_characters)
+
+
+def _panel_sound(cam: dict, scr: dict, audio: dict) -> str:
+    """Ambient bed (empty when `audio.silence` is true — a deliberate choice,
+    not a gap to fill) plus SFX: the matching screenplay shot's own `sound`
+    field if it has one, else the `audio.sound_events` entry whose `moment`
+    text overlaps this shot's `moment` — both sourced, never invented."""
+    ambient = "" if audio.get("silence") else audio.get("ambient_bed", "")
+    sfx = scr.get("sound", "")
+    if not sfx:
+        moment = (cam.get("moment") or "").lower()
+        for ev in audio.get("sound_events", []):
+            ev_moment = (ev.get("moment") or "").lower()
+            if ev_moment and moment and (ev_moment in moment or moment in ev_moment):
+                sfx = ev.get("sound", "")
+                break
+    return " | ".join(p for p in (ambient, sfx) if p)
+
+
+def _estimate_duration(shot_type: str, dialogue: list[dict]) -> str:
+    """No artifact provides per-shot screen time, so this is a heuristic, not
+    a citation: a base duration by shot type (wider/establishing shots read
+    longer on screen, close-ups/inserts shorter), extended to cover any
+    dialogue in the shot at a natural speaking pace (~2.5 words/sec) plus a
+    short buffer, whichever is larger."""
+    base = _SHOT_BASE_SECONDS.get((shot_type or "").upper(), 4)
+    words = sum(len((d.get("line") or "").split()) for d in dialogue)
+    spoken = round(words / 2.5) + 1 if words else 0
+    return f"{max(base, spoken)}s"
+
+
+def _format_total_duration(panels: list[dict]) -> str:
+    total = 0
+    for p in panels:
+        m = re.match(r"(\d+)", p.get("duration") or "")
+        if m:
+            total += int(m.group(1))
+    if total < 60:
+        return f"{total}s"
+    minutes, seconds = divmod(total, 60)
+    return f"{minutes}m {seconds}s" if seconds else f"{minutes}m"
+
+
+def _fallback_image_prompt(cam: dict, action: str, characters_in_frame: list,
+                           cast_lookup: dict, location_desc: str, art: dict) -> str:
+    """A serviceable but intentionally simple fallback — the real Veo prompt
+    for an actual render is reconstructed from structured fields by
+    pipeline._five_part_veo_prompt, not read from here (see the module
+    docstring); this only matters for a caller with no casting/scene context
+    (e.g. a bare `gen-video` prompt)."""
+    subjects = []
+    for name in characters_in_frame:
+        form = (cast_lookup.get(name) or {}).get("physical_form", "")
+        subjects.append(f"{name} ({form})" if form else name)
+    subject = " and ".join(subjects) or "the scene"
+    bits = [f"{subject} {action}".strip(), "Cinematic, photorealistic"]
+    cam_bits = ", ".join(b for b in (
+        cam.get("type", ""), (cam.get("angle") or "").lower(),
+        (cam.get("movement") or "").lower(), cam.get("lens", ""),
+    ) if b)
+    if cam_bits:
+        bits.append(cam_bits)
+    if location_desc:
+        bits.append(location_desc)
+    mood = ", ".join(b for b in (art.get("color_palette", ""), art.get("lighting", "")) if b)
+    if mood:
+        bits.append(mood)
+    return " ".join(b.rstrip(".") + "." for b in bits if b)
+
+
+def _build_panel(panel_num: int, cam: dict, scr: dict, bundle: dict, is_last: bool) -> dict:
+    art = bundle.get("art", {})
+    audio = bundle.get("audio", {})
+    cast_lookup = {c["name"]: c for c in bundle.get("cast", [])}
+    location_desc = (bundle.get("location") or {}).get("visual_prompt", "")
+
+    dialogue = _panel_dialogue(scr)
+    characters_in_frame = _panel_characters_in_frame(cam, dialogue, bundle.get("characters_in_scene", []))
+    action = scr.get("description") or cam.get("moment") or ""
+    transition = (bundle.get("camera", {}).get("transition_to_next") if is_last else "") or "CUT TO"
+
+    return {
+        "panel": panel_num,
+        "shot_type": cam.get("type", ""),
+        "camera_angle": cam.get("angle", ""),
+        "camera_movement": cam.get("movement", ""),
+        "lens": cam.get("lens", ""),
+        "composition": cam.get("framing", ""),
+        "duration": _estimate_duration(cam.get("type", ""), dialogue),
+        "characters_in_frame": characters_in_frame,
+        "action": action,
+        "dialogue": dialogue,
+        "sound": _panel_sound(cam, scr, audio),
+        "emotional_note": (cam.get("emotional_function") or art.get("emotional_function")
+                           or audio.get("emotional_function") or ""),
+        "transition": transition,
+        "image_prompt": _fallback_image_prompt(cam, action, characters_in_frame, cast_lookup,
+                                               location_desc, art),
+    }
+
+
+def _build_scene_board(bundle: dict) -> dict:
+    """Deterministically build one scene's full storyboard entry — header,
+    visual_overview, audio_overview, panels — from its bundle. See the
+    module docstring's "BUILD PATH" section."""
+    slug_parsed = bundle.get("slugline_parsed", {})
+    location = bundle.get("location") or {}
+    art = bundle.get("art", {})
+    audio = bundle.get("audio", {})
+
+    cam_shots = bundle.get("camera", {}).get("shots", [])
+    scr_shots = bundle.get("screenplay_shots", [])
+    pairs = _align_shots(cam_shots, scr_shots)
+    panels = [
+        _build_panel(i + 1, cam, scr, bundle, is_last=(i == len(pairs) - 1))
+        for i, (cam, scr) in enumerate(pairs)
+    ]
+
+    header = {
+        "slugline": bundle.get("slugline", ""),
+        "int_ext": slug_parsed.get("int_ext", ""),
+        "location": location.get("name") or slug_parsed.get("location", ""),
+        "time_of_day": slug_parsed.get("time_of_day", ""),
+        "purpose": bundle.get("purpose", ""),
+        "characters": bundle.get("characters_in_scene", []),
+        "duration_estimate": _format_total_duration(panels),
+    }
+    visual_overview = {
+        "color_palette": art.get("color_palette", ""),
+        "lighting_setup": art.get("lighting", ""),
+        "visual_filter": art.get("visual_filter", ""),
+        "mood": art.get("emotional_function", ""),
+    }
+    audio_overview = {
+        "score_cue": audio.get("score_direction", ""),
+        "ambient": "" if audio.get("silence") else audio.get("ambient_bed", ""),
+        "key_sounds": [
+            f"{e.get('moment', '')}: {e.get('sound', '')}".strip(": ")
+            for e in audio.get("sound_events", []) if e.get("sound")
+        ],
+    }
+
+    return {
+        "scene_number": bundle.get("scene_number"),
+        "header": header,
+        "visual_overview": visual_overview,
+        "audio_overview": audio_overview,
+        "panels": panels,
+    }
+
+
+def _deterministic_storyboard_style(visuals: dict, cinematography: dict, moodboard: dict | None,
+                                    genre_name: str, tone: str) -> str:
+    """`storyboard_style` is a whole-board judgment, not a per-scene one — no
+    single artifact owns it, but several already carry a film-wide summary
+    that's a strict superset of what an LLM would otherwise have to invent
+    fresh: prefer visuals'/cinematography's own top-level style fields, then
+    the moodboard's overall aesthetic, then fall back to genre + tone."""
+    bits = [visuals.get("visual_palette", ""), cinematography.get("cinematography_style", "")]
+    style = " ".join(b for b in bits if b)
+    if style:
+        return style
+    if moodboard and moodboard.get("overall_aesthetic"):
+        return moodboard["overall_aesthetic"]
+    return f"{genre_name} — {tone}".strip(" —") or "Cinematic, photorealistic."
+
+
+def _llm_generate_scene(bundle: dict, logline: str, genre_name: str, tone: str,
+                        source_text: str, feedback: str, profile: str) -> tuple[dict | None, str]:
+    """The one remaining LLM path — used only when `feedback` (a directed
+    creative note) is given, since the deterministic builder above can't
+    interpret free text. Same PROMPT/SYSTEM as the original full-generation
+    design. Returns (scene_doc_or_None, storyboard_style)."""
+    scene_ctx = bundle.pop("_source_context", "") or source_text
+    story_blk = _story_block(scene_ctx)
+    single_bundle = json.dumps([bundle], ensure_ascii=False, indent=2)
+    prompt = llm.with_feedback(
+        PROMPT.format(logline=logline, genre=genre_name, tone=tone,
+                      story_block=story_blk, bundles=single_bundle),
+        feedback,
+    )
+    raw = llm.generate(prompt, profile=profile, system=SYSTEM, as_json=True)
+    result = llm.safe_json(raw)
+    returned = result.get("storyboard") or []
+    return (returned[0] if returned else None), result.get("storyboard_style", "")
+
+
 def plan_storyboard(
     structure: dict,
     scenes: dict,
@@ -448,26 +753,26 @@ def plan_storyboard(
     existing: dict | None = None,
     revise_keys: set | None = None,
 ) -> dict:
-    """Build the storyboard scene by scene.
-
-    Each scene is sent in its own LLM call. The source context injected is the
-    specific chunk(s) mapped to that scene (from scenes[*].chunk_indices), so
-    the model sees the relevant passage rather than a generic head truncation.
+    """Build the storyboard scene by scene — deterministically by default (see
+    the module docstring's "BUILD PATH" section), falling back to the LLM
+    (`_llm_generate_scene`) only when `feedback` is given, since applying a
+    directed creative note needs actual judgment the deterministic builder
+    can't provide. Either way this is scene-by-scene: the source context
+    used by the LLM fallback is the specific chunk(s) mapped to that scene
+    (from scenes[*].chunk_indices), so the model sees the relevant passage
+    rather than a generic head truncation.
 
     `existing` + `revise_keys` (a set of `scene_number`s) support a scoped
-    revision: since this agent already calls the LLM once per scene, a scoped
-    revision simply restricts WHICH scenes' bundles enter the loop at all
-    (skip calling the LLM for untouched scenes, rather than calling-then-
-    discarding, since each scene's bundle/call is already fully independent —
-    unlike soundscape/visuals/cinematography this agent needs no whole-story
-    context per call to begin with). The freshly-regenerated scenes are then
-    merge-spliced into `existing["storyboard"]` via `revision_merge.
-    merge_by_key`; `storyboard_style` (a whole-board judgment, not a per-scene
-    one) is kept from `existing` rather than adopted from a single revised
-    scene's opinion of it. Panel-level (as opposed to whole-scene) storyboard
-    TEXT revision isn't supported here — only whole scenes can be targeted;
-    panel-level revision of the rendered VIDEO is a separate, purely-visual
-    concern handled by `pipeline.rerender_panels`."""
+    revision: restricts WHICH scenes' bundles get (re)built at all — for the
+    deterministic path this just means fewer scenes to build; for the LLM
+    fallback it means fewer LLM calls, same as before. The freshly-built
+    scenes are merge-spliced into `existing["storyboard"]` via
+    `revision_merge.merge_by_key`; `storyboard_style` (a whole-board
+    judgment, not a per-scene one) is kept from `existing` rather than
+    adopted from a single revised scene. Panel-level (as opposed to
+    whole-scene) storyboard TEXT revision isn't supported here — only whole
+    scenes can be targeted; panel-level revision of the rendered VIDEO is a
+    separate, purely-visual concern handled by `pipeline.rerender_panels`."""
     profile = profile or llm.agent_profile("storyboard")
     bundles = _scene_bundles(scenes, casting, soundscape, visuals, cinematography,
                              characters=characters, draft=draft, moodboard=moodboard,
@@ -483,30 +788,46 @@ def plan_storyboard(
         bundles = [b for b in bundles if b.get("scene_number") in revise_keys]
 
     board_scenes = []
-    storyboard_style = existing.get("storyboard_style", "") if scoped else ""
+    dropped: list[dict] = []
 
-    for bundle in bundles:
-        # Extract (and remove) the private source context field before sending
-        # the bundle JSON to the model — the context goes into story_block instead.
-        scene_ctx = bundle.pop("_source_context", "") or source_text
-        story_blk = _story_block(scene_ctx)
+    if feedback:
+        # A directed creative note needs actual model judgment to apply —
+        # the deterministic builder below can't interpret free text.
+        storyboard_style = existing.get("storyboard_style", "") if scoped else ""
+        for bundle in bundles:
+            expected_num = bundle.get("scene_number")
+            scene_doc, style = _llm_generate_scene(bundle, logline, genre_name, tone,
+                                                   source_text, feedback, profile)
+            if style and not storyboard_style:
+                storyboard_style = style
+            # Each call is sent exactly ONE scene's bundle, so the response
+            # should come back as exactly one storyboard entry for it — but
+            # nothing actually enforces that on the model's side. Reconcile
+            # deterministically rather than trust the echo, the same way
+            # _five_part_veo_prompt reconstructs the Veo prompt from
+            # structured fields instead of the model's free text: a scene
+            # the model dropped entirely (empty/failed response) is recorded
+            # in `dropped_scenes` instead of silently vanishing from the
+            # board (mirrors scenes.py's own `dropped_scenes`); a
+            # scene_number the model got wrong or omitted is corrected to
+            # the one we KNOW is right, since we sent exactly one scene per
+            # call — there's no ambiguity to resolve, only bookkeeping to
+            # trust ourselves over the model for.
+            if scene_doc is None:
+                dropped.append({"scene_number": expected_num, "reason": "model returned no storyboard entry"})
+                continue
+            if scene_doc.get("scene_number") != expected_num:
+                scene_doc["scene_number"] = expected_num
+            board_scenes.append(scene_doc)
+    else:
+        storyboard_style = existing.get("storyboard_style", "") if scoped else \
+            _deterministic_storyboard_style(visuals, cinematography, moodboard, genre_name, tone)
+        board_scenes = [_build_scene_board(bundle) for bundle in bundles]
 
-        single_bundle = json.dumps([bundle], ensure_ascii=False, indent=2)
-        prompt = llm.with_feedback(
-            PROMPT.format(
-                logline=logline,
-                genre=genre_name,
-                tone=tone,
-                story_block=story_blk,
-                bundles=single_bundle,
-            ),
-            feedback,
-        )
-        raw = llm.generate(prompt, profile=profile, system=SYSTEM, as_json=True)
-        result = llm.safe_json(raw)
-        if not scoped and not storyboard_style and result.get("storyboard_style"):
-            storyboard_style = result["storyboard_style"]
-        board_scenes.extend(result.get("storyboard", []))
+    # Keep the final scene list in the SAME order scenes.json established,
+    # regardless of any incidental reordering (deterministic build already
+    # preserves it; this guards the LLM-feedback path too).
+    board_scenes.sort(key=lambda s: (s.get("scene_number") is None, s.get("scene_number")))
 
     if scoped:
         final_storyboard = merge_by_key(existing.get("storyboard", []), board_scenes,
@@ -514,9 +835,11 @@ def plan_storyboard(
         return {
             "storyboard_style": storyboard_style,
             "storyboard": final_storyboard,
+            "dropped_scenes": dropped,
         }
 
     return {
         "storyboard_style": storyboard_style,
         "storyboard": board_scenes,
+        "dropped_scenes": dropped,
     }

@@ -48,6 +48,7 @@ import sys
 
 from . import llm
 from . import session
+from . import artifact_diff
 from .pipeline import run, PipelineStopped
 
 
@@ -396,9 +397,8 @@ def _stitch(argv: list[str]) -> int:
     return 0
 
 
-_SCENE_KEYED_STAGES = {"scenes", "soundscape", "visuals", "cinematography",
-                       "screenplay", "storyboard"}
-_NAME_KEYED_STAGES = {"characters", "casting"}
+_SCENE_KEYED_STAGES = artifact_diff.SCENE_KEYED_ARTIFACTS
+_NAME_KEYED_STAGES = artifact_diff.NAME_KEYED_ARTIFACTS
 
 
 def _translate_revise_keys(from_stage: str, to_stage: str, revise_keys, edited_from_artifact: dict):

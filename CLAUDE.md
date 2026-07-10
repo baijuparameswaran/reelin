@@ -123,6 +123,50 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
   OPEN models (never Gemini); toggle with config `fidelity.per_stage`. Best-effort
   (a failed check never blocks the pipeline). `check_alignment` remains for a
   holistic screenplay+storyboard-vs-story check.
+- **Scene-structure alignment (`fidelity.check_scene_alignment`/
+  `strip_orphan_scenes`) — deterministic, self-healing, distinct from story
+  fidelity above:** story fidelity is a *qualitative* judgment call (does this
+  stage still tell the same story?), so it's an LLM grader that only *advises*
+  at the gate. Scene alignment is a different question — does this stage's own
+  scene-keyed data structurally match scenes.json, the actual upstream INPUT
+  every scene-keyed stage (soundscape/visuals/cinematography/screenplay/
+  storyboard — `artifact_diff.SCENE_KEYED_ARTIFACTS`) is declared to depend on
+  — and that's not a judgment call, it's an objective bug (a scene scenes.json
+  has that this stage doesn't, or a stale scene left over from before an
+  earlier `revise` edit to scenes.json). So it's deterministic (no LLM, reuses
+  `artifact_diff.ARTIFACT_SHAPES`'s scene-keying knowledge) and **self-heals
+  automatically inside `run_group`, BEFORE the operator ever sees the review
+  gate** — not just advisory like fidelity/genre. For each scene-keyed stage's
+  freshly-computed result: `strip_orphan_scenes` unconditionally drops any
+  entry whose scene_number scenes.json doesn't have (a `revise_keys`-scoped
+  agent call can only add/replace keys, never delete one — see
+  `revision_merge.merge_by_key` — so a stale orphan can only be cleared by
+  filtering it out directly); any remaining MISSING scene numbers trigger one
+  reiteration — the SAME agent function called again scoped to just those
+  numbers (`existing=<flawed result>, revise_keys=<missing set>`, the exact
+  mechanism `reel/cli.py`'s `revise` command already uses for hand-edits) —
+  then a final re-check. `_spec()` gained an optional `realign(result, keys)`
+  callable (soundscape/visuals/cinematography/screenplay/storyboard's specs
+  each pass one; structure/characters/casting/moodboard/scenes don't — scenes
+  IS the source of truth, nothing to align it against). Any gap the single
+  reiteration attempt still leaves (no `realign` for that stage, or the LLM's
+  scoped rerun still didn't cover it) shows up at the gate via `_format_alignment`,
+  the same pattern as `_format_fidelity`/`_format_genre` but computed once by
+  `run_group` rather than re-checked every gate loop iteration. **Found and
+  fixed a real latent bug while building this**: `screenplay.py`'s per-scene
+  loop used `scene_doc.setdefault("scene_number", scene_num)` — meaning a
+  scene_number the model returned (even a wrong one) was trusted as-is, since
+  `setdefault` only fills in an ABSENT key; changed to force-set it like
+  `"number"` already correctly does, matching the same fix `storyboard.py`'s
+  `plan_storyboard` already had (each call is sent exactly one scene, so the
+  correct scene_number is always known — no reason to trust the model's echo
+  over it). Verified via a full stubbed end-to-end `pipeline.run()` (not just
+  isolated unit tests): a simulated soundscape omission (scene 2 missing) plus
+  a simulated stale orphan (scene 99) were both corrected automatically before
+  the gate — exactly 2 LLM calls for soundscape (initial + one reiteration),
+  final scene_numbers `[1, 2, 3]` — and the screenplay.py bug above was caught
+  BY this same test (a naive stub that always echoed `scene_number: 1`
+  surfaced "still missing [2, 3] after reiteration" until the fix landed).
 - **Creative direction = genre + moodboard STEER every stage (`reel/agents/genre.py`,
   `reel/agents/moodboard.py`, open models):** two cross-cutting agents are fixed
   once and shape the whole run via ONE shared steering hook. **Genre** is resolved
@@ -147,16 +191,55 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
   backend) into `output/moodboard/tile_NN.png`, palette+lighting appended for
   coherence; that's image generation (policy-consistent), the moodboard *spec* still
   comes from the open text models. Standalone stage `moodboard_tiles`.
-- **Storyboard + screenplay capture FULL detail (they drive video):** the screenplay
-  agent now also gets **casting** (a "locked on-screen look" block per character, so
-  action stays true to what's rendered); the storyboard agent's `_scene_bundles`
-  fuses the COMPLETE detail of every artifact — cast look + voice/mannerism +
-  casting `visual_prompt`/image, full visuals (filter, visual_moments, emotional_fn),
-  full soundscape (sound_events, emotional_fn), full camera (framing, coverage,
-  transition, per-shot emotional_fn), scene purpose, AND the screenplay's own written
-  shots + attributed dialogue — and the prompt requires each `image_prompt` to be a
-  self-contained, render-ready video prompt. Pipeline passes screenplay←`casting`,
-  storyboard←`characters`+`draft`+`genre`.
+- **Storyboard is built deterministically (no LLM) except when `feedback` is
+  given:** the screenplay agent gets **casting** (a "locked on-screen look" block
+  per character, so action stays true to what's rendered); the storyboard agent's
+  `_scene_bundles` fuses the COMPLETE detail of every artifact — cast look +
+  voice/mannerism + casting `visual_prompt`/image, full visuals (filter,
+  visual_moments, emotional_fn), full soundscape (sound_events, emotional_fn),
+  full camera (framing, coverage, transition, per-shot emotional_fn), scene
+  purpose, AND the screenplay's own written shots + attributed dialogue. Pipeline
+  passes screenplay←`casting`, storyboard←`characters`+`draft`+`genre`.
+  `_scene_bundles` iterates `scenes.get("scenes", [])` (the list `scenes.py` —
+  "the structure formed while preparing the scenes at the beginning of the
+  pipeline" — already established) and looks up every other artifact's per-scene
+  entry by `scene_number`, so one bundle per scene, in scenes.json's own order,
+  is structurally guaranteed regardless of what any individual upstream stage's
+  output looks like. **`_build_scene_board` then constructs the ENTIRE scene
+  deterministically from that bundle — no LLM call at all in the default path.**
+  Rationale (from a direct "does this need an LLM?" question, followed by a
+  field-by-field audit of the previous per-scene LLM prompt): a fusion stage
+  isn't supposed to make new creative decisions, only faithfully combine ones
+  earlier stages already made — and every output field already has an
+  authoritative source in an upstream artifact. `header`/`visual_overview`/
+  `audio_overview` are straight copies from the bundle (respecting
+  `audio.silence` — no invented ambient bed for a deliberately silent scene).
+  Panels come from `_align_shots`, which pairs cinematography's shot list
+  (authoritative for panel count/order — the coverage plan) with screenplay's
+  shot list (by `shot_number` when it lines up — screenplay.py's own prompt
+  already instructs it to follow the camera coverage — else positional
+  fallback); `dialogue` is copied verbatim from `screenplay_shots[].dialogue`
+  PLUS a `vo: true` entry for `.voiceover` (a separate field an LLM had
+  actually been dropping in practice); `transition` on the last panel uses
+  `camera.transition_to_next` when present. The ONE field genuinely invented
+  rather than sourced is `characters_in_frame` for close-shot panels — a
+  documented heuristic (dialogue speaker, for CU/ECU/MCU/OTS/POV shots; full
+  scene cast otherwise), since no artifact specifies who's visually in a given
+  shot. `duration`/`header.duration_estimate` are likewise a documented
+  heuristic (shot-type base + dialogue word count at ~2.5 words/sec), since no
+  artifact provides per-shot screen time either. `storyboard_style` prefers
+  `visuals.visual_palette`+`cinematography.cinematography_style`, then
+  `moodboard.overall_aesthetic`, then genre+tone. **`feedback` is the one
+  remaining LLM path** (`_llm_generate_scene`, the prior full per-scene
+  generation prompt, `agent_profiles.storyboard: synthesis`) — a directed
+  creative note ("make it darker") needs actual judgment the deterministic
+  builder can't provide; a fresh run or a scoped `revise_keys` revision with no
+  `feedback` is fully deterministic. That LLM path still reconciles the
+  model's response against the bundle it was built for (a wrong/omitted
+  `scene_number` is corrected — unambiguous, since each call sends exactly one
+  scene — and an empty response is recorded in `dropped_scenes`, surfaced at
+  the gate via `_summarize_storyboard`, mirroring `scenes.py`'s own
+  `dropped_scenes`) rather than trusting its echo blindly.
 - **Standalone video render (`python -m reel.cli render [--fresh]`):** builds a
   camera-directed render plan from `screenplay.fountain`+`cinematography.json` (every
   drafted scene, every shot — NO caps by default) via `fountain.to_storyboard`
@@ -546,6 +629,15 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
   `! curl -fsSL https://ollama.com/install.sh | sh`
   Then re-pull: `ollama pull qwen3:4b && ollama pull qwen3:8b`.
   Verify: `ollama ps` → "PROCESSOR" should show GPU or GPU+CPU.
+- **Shelved (2026-07-09): a formal `tests/` end-to-end test suite** (stdlib
+  `unittest`, stubbing every paid API — Gemini image/video — plus Ollama for
+  hermeticity) was drafted (full `pipeline.run()` drive-through + a
+  scene-alignment self-heal scenario) but explicitly shelved before being
+  verified or committed; the two draft files were removed per instruction, no
+  trace left. Revisit if/when a real test suite becomes a priority — this
+  project's established practice until then remains throwaway stubbed
+  scripts per session (see the session log entries above for worked
+  examples), not a committed suite.
 - **Next up:** confirm the still-running `storyboard` live test (bundle
   location/cast data, panel consistency with the rendered location image);
   Increment 5 — wire location + character references into Veo's
@@ -555,6 +647,168 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
   / final cut phase.
 
 ## Session log
+- 2026-07-09 (later 4) — **Fidelity agent gained a deterministic, self-healing
+  scene-structure alignment check, wired to automatically reiterate any
+  scene-keyed stage that drifts from scenes.json — before the operator ever
+  sees the gate — and this same work caught a real pre-existing bug in
+  screenplay.py.** User asked to "make sure the fidelity agent make sure that
+  the alignment to scenes are maintained in every stage and reiterate as
+  needed... with all the inputs coming in in every stage." Distinguished this
+  from what `fidelity.check_stage` already does (a qualitative LLM judgment —
+  does this stage still tell the same STORY — only ever advisory at the gate)
+  — scene alignment is a different, objective question: does a stage's own
+  scene-keyed data structurally match scenes.json, which is literally one of
+  its declared `stages.py` inputs. Being objective (not a judgment call), it's
+  deterministic (no LLM) and self-heals automatically rather than just
+  advising. New `fidelity.check_scene_alignment`/`strip_orphan_scenes`, reused
+  the scene/name-keying knowledge already centralized in `artifact_diff.py`
+  (added `SCENE_KEYED_ARTIFACTS`/`NAME_KEYED_ARTIFACTS` there as the one
+  shared definition — `cli.py`'s `_SCENE_KEYED_STAGES`/`_NAME_KEYED_STAGES`
+  now alias them instead of duplicating). Wired into `pipeline.run()`'s
+  `run_group`: `_spec()` gained an optional `realign(result, keys)` callable
+  (added to soundscape/visuals/cinematography/screenplay/storyboard's specs —
+  each just calls the same agent with `existing=`/`revise_keys=`, the exact
+  mechanism the `revise` CLI command already uses); right after a stage
+  computes, orphan scenes (stale leftovers `revise_keys`-scoped calls can
+  never delete, only add/replace — see `revision_merge.merge_by_key`) are
+  stripped unconditionally, then any still-missing scenes trigger ONE
+  reiteration attempt before the gate is shown at all. `_gated` gained an
+  `alignment_rep` param (a snapshot, unlike fidelity/genre which re-check
+  every gate loop iteration) and a new `_format_alignment` readout — only
+  ever prints when the one reiteration attempt still left a gap. **Building
+  the verification for this surfaced a real, independent bug**: a full
+  stubbed end-to-end `pipeline.run()` test (not just isolated unit tests —
+  deliberately chosen so the actual `run_group` wiring got exercised, not a
+  reimplementation of it) correctly self-healed a simulated soundscape
+  omission and stripped a simulated stale orphan scene exactly as designed,
+  but a crude screenplay stub (always echoing `scene_number: 1`) kept failing
+  alignment even after reiteration — traced to `screenplay.py`'s
+  `scene_doc.setdefault("scene_number", scene_num)`, which only fills in an
+  ABSENT key, so a wrong or stale scene_number from the model was trusted
+  as-is; `"number"` right next to it was already correctly force-set, just
+  not `"scene_number"` (the field `artifact_diff`/fidelity's alignment check
+  actually keys off) — same class of bug `storyboard.py`'s `plan_storyboard`
+  already had fixed for the same reason. Fixed identically (force-set, don't
+  setdefault — each call is sent exactly one scene, so the correct
+  scene_number is always known, no reason to trust the model's echo).
+  Re-verified the full end-to-end test after the fix: soundscape self-healed
+  in exactly 2 LLM calls (initial + 1 reiteration), screenplay now aligns on
+  the first attempt with no reiteration needed at all, storyboard shows no
+  alignment warning (already deterministic-by-default from the entry above,
+  so it's aligned by construction). Existing screenplay.py scoped-revision
+  regression test re-run clean after the fix. *(Uncommitted at time of
+  writing, on top of the three uncommitted entries below from the same
+  session.)*
+- 2026-07-09 (later 3) — **Storyboard construction made fully deterministic
+  (no LLM call) in the default path.** Direct follow-up question after the
+  merge-gap audit above: "does storyboard aggregation require an LLM ... this
+  could be done based on the input artifacts locally scene by scene ... would
+  this give better results." Worked through it field by field against what
+  `_scene_bundles` already assembles: `header`/`visual_overview`/
+  `audio_overview` were already near-1:1 copies from the bundle (exactly what
+  the just-added "MERGE SOURCE" prompt block had been asking the LLM to do
+  faithfully rather than reinvent); most panel fields (`shot_type`/
+  `camera_angle`/`camera_movement`/`lens`/`dialogue`/`sound`/`transition`) had
+  a direct source too. Two fields looked LLM-only at first — `composition`
+  and shot alignment — but turned out not to be: cinematography.py's own
+  per-shot schema already includes a `framing` field ("specific compositional
+  note"), making storyboard's `composition` field redundant with data that
+  already existed; and screenplay.py's prompt already instructs it to derive
+  its own shots from the camera coverage, so `camera.shots[]` and
+  `screenplay_shots[]` should already share the same order in the common
+  case, needing only a fallback pairing (by `shot_number`, else positional)
+  for when they don't — not real LLM judgment. This went further than what
+  was proposed and agreed just beforehand ("keep a lightweight LLM call for
+  shot alignment + composition") — flagged the deviation transparently rather
+  than silently doing more than asked, then proceeded given it's a strict
+  quality improvement in the same already-approved direction. Implemented:
+  `_align_shots` (shot_number match, positional fallback), `_build_panel`/
+  `_build_scene_board` (deterministic construction of every field),
+  `_panel_characters_in_frame` (the one genuinely INVENTED field — no
+  artifact says who's visually in a shot — a documented heuristic: dialogue
+  speaker for close-shot-family panels, full scene cast otherwise),
+  `_estimate_duration`/`_format_total_duration` (the other invented field —
+  no artifact gives per-shot screen time — shot-type base duration extended
+  to cover dialogue at ~2.5 words/sec), `_deterministic_storyboard_style`
+  (prefers visuals'/cinematography's own top-level style fields, then
+  moodboard, then genre+tone). **`feedback` is the one path that still calls
+  the LLM** (`_llm_generate_scene`, the prior full generation prompt) — a
+  directed creative note needs actual judgment the deterministic builder
+  can't provide; `plan_storyboard` branches on whether `feedback` was given.
+  The scene_number-correction/`dropped_scenes` tracking added in the entry
+  above is now specific to that LLM-feedback path (structurally impossible in
+  the deterministic path — there's no model response to misbehave). Verified
+  with a full realistic scene test (2 characters, dialogue + voiceover, a
+  wide shot and a close-up) confirming every design decision landed correctly
+  in one pass: the WS panel defaulted to the full scene cast,
+  `characters_in_frame` on the CU panel correctly narrowed to just the
+  speaker, the voiceover line appeared alongside regular dialogue with
+  `vo: true`, the last panel's transition used cinematography's
+  `transition_to_next` while the earlier panel got the "CUT TO" default,
+  sound correctly combined ambient bed + screenplay's own SFX field, and
+  `storyboard_style` combined visuals' and cinematography's own top-level
+  fields; plus explicit tests confirming zero `llm.generate` calls in the
+  no-feedback path, the LLM fallback still fires correctly when `feedback` IS
+  given (with scene_number correction and dropped-scene tracking both intact),
+  and scoped `revise_keys` revision with no feedback rebuilds only the
+  targeted scene deterministically while leaving other scenes byte-identical.
+  `pipeline._summarize_storyboard` confirmed to render the new output shape
+  without changes. Net effect: storyboard — previously one `synthesis`-tier
+  (the slowest/most expensive profile) LLM call per scene — now costs zero
+  LLM calls for a fresh run or most revisions, is immune to the whole class
+  of drift/omission bugs the merge-gap audit above was busy patching, and
+  only pays for an LLM call when there's a genuine creative note to apply.
+  *(Uncommitted at time of writing, on top of the two uncommitted entries
+  below from the same session.)*
+- 2026-07-09 (later 2) — **Storyboard merge hardened: scene-list structure now
+  enforced deterministically (not just architecturally correct), and a
+  field-by-field prompt audit closed real merge gaps, including one that
+  could silently drop voice-over lines.** User asked to "make sure" the
+  storyboard merges all completed stages scene-by-scene while adhering to
+  the scene structure `scenes.py` established — tracing `_scene_bundles`
+  confirmed the ARCHITECTURE was already correct (it iterates
+  `scenes.get("scenes", [])` and builds one bundle per scene via
+  `scene_number` lookups into every other artifact, so scenes.json's own
+  order/count is the natural backbone), but found a real gap: nothing
+  verified the model's per-scene response actually respected that structure
+  — a wrong/omitted `scene_number` or an empty response for one call had no
+  correction or visibility, unlike `scenes.py`'s own `dropped_scenes`
+  handling. Fixed in `plan_storyboard`: each call is known to correspond to
+  exactly one scene (its bundle), so a returned `scene_number` mismatch is
+  corrected to the one actually sent (no ambiguity to resolve — deterministic
+  bookkeeping, not a guess) and an empty response is recorded in a new
+  `dropped_scenes` list rather than silently vanishing from the board;
+  `pipeline._summarize_storyboard` surfaces it at the gate, mirroring
+  `_summarize_scenes`'s existing pattern. Verified via a stubbed test
+  covering all three failure modes in one run (wrong scene_number corrected,
+  an empty-response scene dropped-and-recorded, order preserved) plus the
+  existing scoped-revision regression test (unaffected). **User then asked a
+  follow-up mid-fix**: whether the PROMPT ITSELF has gaps in how it uses the
+  merged bundle data, "it may as well employ scene by scene formation if
+  needed" (confirmed: it already does, this follow-up was about prompt
+  CONTENT, not architecture). Did a field-by-field audit — every field
+  `_scene_bundles` puts into a bundle, cross-checked against whether the
+  PROMPT's rules or schema actually instruct the model to use it — and found
+  seven real gaps where bundle data was sent but never actually grounded to
+  an output field: `art.visual_filter` had no output field at all (added one
+  to `visual_overview`'s schema); `art.key_props`/`art.visual_moments`
+  (beat-keyed) were never referenced; `audio.silence` was never referenced
+  (risk: a deliberately silent scene still gets an invented ambient bed);
+  `audio.sound_events` was never mapped to `audio_overview.key_sounds`;
+  `camera.transition_to_next` (already decided by cinematography) was never
+  cited as authoritative for a panel's own `transition`; and — the most
+  consequential, since it's a genuine data-loss risk, not just an
+  under-specification — `screenplay_shots[].voiceover` is a field SEPARATE
+  from `.dialogue` that the existing "dialogue is locked, copy verbatim"
+  rule never mentioned at all, meaning a screenplay shot's voice-over line
+  had no instruction path into the storyboard whatsoever. Fixed by adding an
+  explicit "MERGE SOURCE" block to the prompt mapping every one of these
+  bundle fields to its exact output field (plus a `visual_filter` schema
+  field addition and a strengthened dialogue rule explicitly calling out
+  voiceover as separate from dialogue). Verified via `.format()` smoke test
+  (no stray placeholders from the new block's literal JSON-brace examples)
+  and re-ran the existing scoped-revision regression test clean. *(Both
+  fixes in this entry uncommitted at time of writing.)*
 - 2026-07-09 (later) — **`--max-scenes`/`--profile` now survive `--resume`
   instead of silently resetting to their defaults.** User asked a direct
   diagnostic question about the printed resume hint (`python -m reel.cli

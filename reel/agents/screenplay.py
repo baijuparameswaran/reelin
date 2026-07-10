@@ -357,7 +357,13 @@ def draft_screenplay(
         )
         raw = llm.generate(prompt, profile=profile, system=SYSTEM, as_json=True)
         scene_doc = llm.safe_json(raw)
-        scene_doc.setdefault("scene_number", scene_num)
+        # Force, don't setdefault: each call is sent exactly ONE scene, so we
+        # KNOW its correct scene_number — trusting the model's echo (only
+        # filling it in when absent) let a wrong or stale value silently
+        # persist, breaking artifact_diff/fidelity.check_scene_alignment's
+        # scene_number-keyed lookup for this artifact (same class of bug
+        # storyboard.py's plan_storyboard already corrects this way).
+        scene_doc["scene_number"] = scene_num
         scene_doc.setdefault("slugline", slugline)
         scene_doc.setdefault("shots", [])
         scene_doc["number"] = scene_num

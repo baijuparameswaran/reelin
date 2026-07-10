@@ -223,6 +223,15 @@ def _summarize_storyboard(r: dict) -> str:
             rows.append(f"      p{p.get('panel', p.get('frame','?'))}  [{cam}]"
                         f"  {p.get('action', p.get('moment',''))[:55]}"
                         + (f"  — {p.get('emotional_note','')[:24]}" if p.get('emotional_note') else ""))
+    dropped = r.get("dropped_scenes") or []
+    if dropped:
+        # A scene from scenes.json that the per-scene storyboard call returned
+        # nothing usable for — surfaced here instead of silently vanishing
+        # from the board (mirrors _summarize_scenes' own dropped_scenes).
+        rows.append(f"  ⚠ {len(dropped)} scene(s) missing from the board — no usable "
+                    "storyboard response for that scene:")
+        for s in dropped:
+            rows.append(f"      scene {s.get('scene_number', '?')}: {s.get('reason', '')}")
     return "\n".join(rows)
 
 
@@ -1195,9 +1204,17 @@ def _checkpoint_load(out: Path, name: str) -> dict | None:
         return None
 
 
-def _spec(name: str, compute: Callable, summarize: Callable, rerun: Callable) -> dict:
-    """Describe one stage: how to compute it, summarize it, and re-run it."""
-    return {"name": name, "compute": compute, "summarize": summarize, "rerun": rerun}
+def _spec(name: str, compute: Callable, summarize: Callable, rerun: Callable,
+          realign: Callable | None = None) -> dict:
+    """Describe one stage: how to compute it, summarize it, re-run it on
+    feedback, and (for scene-keyed stages) reiterate it to fix scene-structure
+    alignment. `realign(result, revise_keys) -> dict` calls the SAME agent
+    scoped to just the given scene numbers (existing=result, revise_keys=...)
+    — distinct from `rerun`, which always regenerates from scratch on operator
+    feedback. `None` for stages with no scene-keyed structure to align
+    (structure, characters, casting, moodboard) — see run_group's use of it,
+    and reel.agents.fidelity.check_scene_alignment for what "aligned" means."""
+    return {"name": name, "compute": compute, "summarize": summarize, "rerun": rerun, "realign": realign}
 
 
 # ── gate loop helper ──────────────────────────────────────────────────────────
@@ -1233,6 +1250,24 @@ def _format_genre(rep: dict | None, min_score: int = 70) -> str:
     return line
 
 
+def _format_alignment(rep: dict | None) -> str:
+    """One-block scene-alignment readout for the review gate. Unlike fidelity/
+    genre (a judgment call, advisory-only), a scene-alignment gap is a
+    structural bug — run_group already tries to self-heal it (strip orphans,
+    reiterate missing scenes) BEFORE the gate is shown, so this only ever
+    prints when that reiteration still left a gap (orphans are always fully
+    resolved by the deterministic strip; only `missing_scenes` can survive,
+    e.g. no `realign` callable for this stage, or the LLM's scoped rerun
+    still didn't cover it)."""
+    if not rep or rep.get("aligned"):
+        return ""
+    missing = rep.get("missing_scenes") or []
+    if not missing:
+        return ""
+    return (f"\n  ⚠ scene alignment: missing scene(s) {missing} vs scenes.json "
+           "— reiteration did not fully resolve this; consider re-running with feedback")
+
+
 def _model_label(profile: str | None) -> str:
     """'profile / resolved-model' string for display; graceful on lookup failure."""
     if not profile:
@@ -1254,6 +1289,7 @@ def _gated(
     min_score: int = 70,
     genre_fn: Callable | None = None,
     genre_min: int = 70,
+    alignment_rep: dict | None = None,  # precomputed by run_group, AFTER its self-heal attempt
     profile: str | None = None,     # resolved profile name (display + escalation)
     escalate_after: int = 3,        # consecutive low-score reruns before gradual escalation
     escalate_score_gap: int = 20,   # escalate immediately when score is this far below threshold
@@ -1273,6 +1309,14 @@ def _gated(
     Both paths reset the counter on escalation. If already at quality_high, a clear
     message is logged instead. Rerun lambdas must accept (feedback, profile=None).
 
+    `alignment_rep` (scene-structure alignment vs. scenes.json — see
+    reel.agents.fidelity.check_scene_alignment) is a SNAPSHOT computed once by
+    run_group, after it already tried to self-heal the stage (strip orphans,
+    reiterate missing scenes) — unlike fidelity_fn/genre_fn it is not
+    recomputed each loop iteration, since by the time this gate is showing,
+    the automatic fix has already been attempted; it's surfaced here purely
+    so the operator can see when that attempt still left a gap.
+
     Returns (approved_result, fidelity_report, genre_report). Raises PipelineStopped.
     """
     result = initial_result
@@ -1288,7 +1332,8 @@ def _gated(
         _log(f"      {name}  [{_model_label(current_profile)}]  ({iter_label})")
 
         def _summary(r, _rep=report, _g=grep):
-            return summarize_fn(r) + _format_fidelity(_rep, min_score) + _format_genre(_g, genre_min)
+            return (summarize_fn(r) + _format_fidelity(_rep, min_score)
+                   + _format_genre(_g, genre_min) + _format_alignment(alignment_rep))
 
         decision = gate.review(name, result, _summary)
         if decision.approved:
@@ -1520,9 +1565,36 @@ def run(
                 if (fid_on and nm in _FID_STAGES) else None
             gen_fn = (lambda res, _nm=nm: genre_report(_nm, res)) \
                 if (gen_enforce and nm in _GENRE_STAGES) else None
+
+            # Scene-structure alignment: self-heal BEFORE the gate is shown,
+            # since a misaligned scene isn't a judgment call for the operator
+            # to weigh in on — it's an objective structural bug (see
+            # reel.agents.fidelity.check_scene_alignment's docstring). Orphan
+            # scenes (stale data scenes.json no longer has) are stripped
+            # unconditionally; missing scenes (scenes.json has them, this
+            # stage doesn't) are reiterated once via the SAME agent scoped to
+            # just those scene numbers — the same existing=/revise_keys=
+            # mechanism the `revise` CLI command uses.
+            align_rep = None
+            realign_fn = s.get("realign")
+            if realign_fn is not None:
+                raws[nm] = fidelity.strip_orphan_scenes(nm, raws[nm], scenes)
+                align_rep = fidelity.check_scene_alignment(nm, raws[nm], scenes)
+                if not align_rep["aligned"]:
+                    missing = {k for k in align_rep["missing_scenes"] if isinstance(k, int)}
+                    if missing:
+                        _log(f"      ⚠ [{nm}] scene alignment drift vs scenes.json "
+                             f"(missing {sorted(missing)}) — reiterating …")
+                        raws[nm] = realign_fn(raws[nm], missing)
+                        align_rep = fidelity.check_scene_alignment(nm, raws[nm], scenes)
+                        _log(f"      {'✓' if align_rep['aligned'] else '⚠'} [{nm}] scene alignment "
+                             + ("restored" if align_rep["aligned"]
+                                else f"still missing {align_rep['missing_scenes']} after reiteration"))
+
             r, rep, grep = _gated(gate, nm, raws[nm], s["summarize"], s["rerun"],
                                   fidelity_fn=fid_fn, min_score=fid_min,
                                   genre_fn=gen_fn, genre_min=gen_min,
+                                  alignment_rep=align_rep,
                                   profile=stage_profile, escalate_after=escalate_after,
                                   escalate_score_gap=escalate_score_gap)
             save(nm, r)
@@ -1650,15 +1722,21 @@ def run(
         _spec("soundscape",
               lambda: design_soundscape(structure, scenes, profile_override),
               _summarize_soundscape,
-              lambda fb, p=None: design_soundscape(structure, scenes, p or profile_override, feedback=fb)),
+              lambda fb, p=None: design_soundscape(structure, scenes, p or profile_override, feedback=fb),
+              realign=lambda result, keys: design_soundscape(structure, scenes, profile_override,
+                                                              existing=result, revise_keys=keys)),
         _spec("visuals",
               lambda: design_visuals(structure, scenes, profile_override),
               _summarize_visuals,
-              lambda fb, p=None: design_visuals(structure, scenes, p or profile_override, feedback=fb)),
+              lambda fb, p=None: design_visuals(structure, scenes, p or profile_override, feedback=fb),
+              realign=lambda result, keys: design_visuals(structure, scenes, profile_override,
+                                                           existing=result, revise_keys=keys)),
         _spec("cinematography",
               lambda: plan_cinematography(structure, scenes, profile_override),
               _summarize_cinematography,
-              lambda fb, p=None: plan_cinematography(structure, scenes, p or profile_override, feedback=fb)),
+              lambda fb, p=None: plan_cinematography(structure, scenes, p or profile_override, feedback=fb),
+              realign=lambda result, keys: plan_cinematography(structure, scenes, profile_override,
+                                                                existing=result, revise_keys=keys)),
     ])
     soundscape, visuals, cinematography = g["soundscape"], g["visuals"], g["cinematography"]
 
@@ -1673,8 +1751,15 @@ def run(
             soundscape=soundscape, visuals=visuals, cinematography=cinematography,
             casting=casting, profile=p or profile_override, feedback=fb,
         )
+    def _draft_realign(result, keys):
+        return draft_screenplay(
+            source, structure, characters, scenes,
+            soundscape=soundscape, visuals=visuals, cinematography=cinematography,
+            casting=casting, profile=profile_override,
+            existing=result, revise_keys=keys,
+        )
     g = run_group("8/10 screenplay (all scenes)", "draft", [
-        _spec("screenplay", lambda: _draft(), _summarize_screenplay, _draft),
+        _spec("screenplay", lambda: _draft(), _summarize_screenplay, _draft, realign=_draft_realign),
     ])
     draft = g["screenplay"]
     fountain = to_fountain(source, structure, draft)
@@ -1690,8 +1775,16 @@ def run(
             source_text=source.get("text", ""), # backward-compat fallback
             profile=p or profile_override, feedback=fb, out=out,
         )
+    def _board_realign(result, keys):
+        return plan_storyboard(
+            structure, scenes, casting, soundscape, visuals, cinematography,
+            characters=characters, draft=draft, genre=genre_spec,
+            moodboard=moodboard, source=source, source_text=source.get("text", ""),
+            profile=profile_override, out=out,
+            existing=result, revise_keys=keys,
+        )
     g = run_group("9/10", "storyboard", [
-        _spec("storyboard", lambda: _board(), _summarize_storyboard, _board),
+        _spec("storyboard", lambda: _board(), _summarize_storyboard, _board, realign=_board_realign),
     ])
     storyboard = g["storyboard"]
 
