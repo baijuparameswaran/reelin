@@ -73,6 +73,14 @@ should vary between them, not the room tone itself
 
 SCENE LIST:
 {scenes}
+
+Before you respond, re-check against the scene list above (long scene lists \
+push early rules out of recent context — re-verify against what you just \
+read, not just what you remember from the rules list):
+- Every scene sharing a `location` with another keeps that place's base \
+`ambient_bed` identical — only `sound_events` vary.
+- `scene_number` in your output matches the `number` field from the scene list \
+above exactly, one output scene per input scene, none skipped or renumbered.
 """
 
 

@@ -74,6 +74,10 @@ Rules:
   character does something, don't have them do it.
 - Derive shots from the camera coverage when given; otherwise cover the key beats
   from the scene summary (which itself comes from the source).
+- SOURCE OVER COVERAGE: if the camera coverage's suggested shot implies an action,
+  line, or beat the SOURCE MATERIAL above doesn't actually support, the source
+  wins — adapt that shot's framing/content to what the source shows (or drop the
+  shot) rather than inventing material to fill a suggested camera set-up.
 - EVERY dialogue line MUST have a `speaker` that matches a character name above.
 - Do NOT repeat or contradict anything already established in prior scenes — no
   restating a plot point, description, or line the audience has already been
@@ -98,6 +102,16 @@ Rules:
   `voiceover` field. Keep `parenthetical` short or "".
 - Keep action economical and shootable; no camera directions inside `description`
   beyond what the shot_type implies.
+
+Before you respond, re-check against the SOURCE MATERIAL above (long scene
+context pushes early rules out of recent context — re-verify against what you
+just read, not just what you remember from the rules list):
+- Every shot's action/dialogue is traceable to that source excerpt — where
+  camera coverage and the source disagree, the source wins (SOURCE OVER
+  COVERAGE above).
+- `scene_number` in your output is exactly {scene_number}, matching the ONE
+  scene you were asked to write — never a different or stale number.
+- Every dialogue `speaker` matches one of the exact names given above.
 """
 
 

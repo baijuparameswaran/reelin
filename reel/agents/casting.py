@@ -150,8 +150,17 @@ Rules:
   costume, and weathering out of `features` and in the `character` block.
 - `character.visual_prompt` must read as the SAME person from `actor.features`,
   just aged/costumed/styled into the role.
-- Invent the actor; do NOT name or imitate a real, identifiable person.
-- character.physical_form must be internally consistent and reusable across scenes.
+- Invent the actor; do NOT name or imitate a real, identifiable person. This
+  "invent" only concerns WHO plays the role — a fictional, non-real-world
+  person — it does NOT relax the STORY FIDELITY rule below on WHICH physical
+  attributes that invented person has: invent the person, ground their
+  attributes in the source.
+- character.physical_form must be internally consistent and reusable across
+  scenes, but — like `character.visual_prompt` — stays context-free: no
+  scene, location, prop, or lighting mention, just the person/creature and
+  their costume/mannerism. It differs from `visual_prompt` only in being a
+  descriptive field rather than an image-generation prompt; the ISOLATION
+  rule below applies equally to both.
 - ISOLATION (strict, person/animal/bird/creature/group entries only —
   LOCATIONS invert this, see the LOCATIONS rule above): `character.visual_prompt`
   (like `actor.visual_prompt`) describes ONLY the person/creature and their
@@ -179,7 +188,21 @@ Rules:
 
 CHARACTER BREAKDOWN:
 {characters}
-{locations_block}"""
+{locations_block}
+Before you respond, re-check against the breakdown above (long input pushes
+early rules out of recent context — re-verify against what you just read, not
+just what you remember from the rules list):
+- ISOLATION: every person/animal/bird/creature/group `character.visual_prompt`
+  (and `physical_form`) names ONLY the body and costume, ends with the fixed
+  backdrop clause verbatim, and contains no scene/location/prop/other-character/
+  lighting/time-of-day word — not even the character's own signature location.
+- STORY FIDELITY: no physical attribute (face shape, eye colour, hair texture,
+  body proportions, skin tone) beyond what the breakdown above actually states
+  or clearly implies.
+- GENDER: pronouns/gender-marked nouns match the breakdown above exactly, held
+  consistent across `actor.features`, `actor.visual_prompt`, `physical_form`,
+  and `character.visual_prompt` — never defaulted or guessed.
+"""
 
 
 def _location_entries(scenes: dict) -> list[dict]:

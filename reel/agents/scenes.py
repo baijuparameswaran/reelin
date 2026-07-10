@@ -93,6 +93,16 @@ SOURCE MATERIAL — primary fidelity anchor (title: {title}):
 STRUCTURAL BEATS (secondary scaffold — ordering/emphasis only, not a replacement
 for what the source actually says):
 {beats}
+
+Before you respond, re-check against the source material above (long source
+text pushes early rules out of recent context — re-verify against what you
+just read, not just what you remember from the rules list):
+- Every `source_line` is an actual short verbatim quote FROM THE SOURCE TEXT above,
+  not paraphrased and not from the structural beats.
+- Every name in `characters` matches the CANONICAL CHARACTER NAMES list above
+  exactly, if one was given.
+- Every `location` string is byte-identical across every scene set in that
+  same place.
 """
 
 
@@ -127,7 +137,7 @@ def _canonical_names_block(characters: dict | None) -> str:
 def _reconcile_character_names(scenes: list[dict], characters: dict | None) -> list[dict]:
     """Deterministic safety net on top of the prompt-level instruction above:
     prompt instructions alone aren't always reliably followed (this codebase
-    has hit that class of drift before — see CLAUDE.md's session log), so
+    has hit that class of drift before — see PROGRESS.md's session log), so
     this catches the common case where a scene names someone with a string
     that isn't an exact canonical name but whose words are a strict subset
     of exactly ONE canonical name's words (case-insensitive) — e.g. "Woman"

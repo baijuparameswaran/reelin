@@ -36,7 +36,7 @@ shot list (should already track it 1:1, since screenplay.py's own prompt
 instructs it to derive shots from the camera coverage; falls back to
 positional pairing when they don't). A deterministic merge can't drift,
 hallucinate, or drop a field the way an LLM sometimes did in practice (see
-CLAUDE.md's session log — dropped voiceover lines, unused visual_filter/
+PROGRESS.md's session log — dropped voiceover lines, unused visual_filter/
 sound_events/key_props, invented transitions). The ONE thing genuinely
 invented rather than sourced is `characters_in_frame` for close-shot panels,
 which is a heuristic (dialogue speaker, when the shot type is a close-up
@@ -275,6 +275,14 @@ the environment in every panel's `image_prompt` consistently with it. Do not \
 contradict it (a different layout, different fixed decor) and do not re-describe \
 it fully in every panel — establish it in the first panel's composition, then \
 reference it briefly in later panels of the same scene.
+- SELF-CONTAINED VS. BRIEF (not a conflict — different scope): "self-contained" \
+above means every panel's image_prompt independently carries the CHARACTER LOOK, \
+CAMERA GRAMMAR, and ACTION needed to render that panel alone, with nothing \
+implied from a neighboring panel. It does NOT mean re-describing the LOCATION's \
+full architecture/decor in every panel — that one element follows the brief-\
+after-first-panel rule just above. A later panel's image_prompt is still fully \
+self-contained for rendering purposes even with just a short location anchor \
+phrase (e.g. "in the same bar" rather than restating every fixture).
 - emotional_note and transition are required on every panel
 - Keep character names consistent with the cast
 - Avoid unnecessary repetition across panels: each panel's `image_prompt` and
@@ -285,6 +293,19 @@ reference it briefly in later panels of the same scene.
 
 SCENE DESIGN BUNDLES:
 {bundles}
+
+Before you respond, re-check against the scene design bundle above (long \
+bundles push early rules out of recent context — re-verify against what you \
+just read, not just what you remember from the rules list):
+- Every `dialogue` line is copied verbatim from `screenplay_shots.dialogue`, \
+plus a separate `vo: true` entry for any `screenplay_shots.voiceover` — neither \
+paraphrased nor dropped.
+- One panel per camera shot in `camera.shots`, in the same order, none merged \
+or dropped.
+- Each panel's `image_prompt` re-decides Focus & Ambiance from THAT panel's own \
+shot_type (see SELF-CONTAINED VS. BRIEF above) — not copied from a neighboring \
+panel.
+- `scene_number` in your output matches the bundle's own `scene_number` exactly.
 """
 
 

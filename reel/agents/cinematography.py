@@ -93,9 +93,24 @@ low angles; romance → soft telephoto, slow dolly)
 the same fixed space (that place has a locked, rendered layout) — vary angle, \
 movement, and lens to keep coverage distinct, but don't imply a different \
 architecture or layout than an earlier scene at the same place
+- TIE-BREAKER: the location rule above and the motif rule above can pull in \
+opposite directions for an establishing/wide shot at a shared location (motif \
+wants it to recur; location wants it to vary). For that specific case, the \
+location rule wins — keep coverage visually distinct so the space doesn't feel \
+copy-pasted. Motif development belongs in the OTHER shots of the scene (angle/ \
+lens choices on character coverage), not the establishing shot.
 
 SCENE LIST:
 {scenes}
+
+Before you respond, re-check against the scene list above (long scene lists \
+push early rules out of recent context — re-verify against what you just \
+read, not just what you remember from the rules list):
+- Every scene sharing a `location` with another keeps that place's established \
+architecture/layout consistent — only angle/movement/lens vary, per the \
+TIE-BREAKER rule above.
+- `scene_number` in your output matches the `number` field from the scene list \
+above exactly, one output scene per input scene, none skipped or renumbered.
 """
 
 
