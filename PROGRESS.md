@@ -179,6 +179,22 @@
   / final cut phase.
 
 ## Session log
+- 2026-07-09 (later 7) — **Removed the hardcoded "at least 2 shots per scene"
+  floor — a scene now only needs a minimum of 1 shot/panel.** User pointed
+  out a scene may only need one shot. Found the floor in two places:
+  `cinematography.py`'s PROMPT rule ("Each scene should have at least 2
+  shots") and, more consequentially, `duration_budget.suggest_shots_per_scene`
+  — its `est_total_shots`/`per_scene` math used `max(scene_count * 2, ...)`/
+  `max(2, ...)`, so even a very short `--target-duration` (which should
+  imply ~1 shot/scene at the ~6s/shot planning assumption) was silently
+  doubled in the guidance text fed to cinematography.py, working against the
+  user's own target. Both floors dropped to 1. Verified `_build_scene_board`/
+  `rerender_panels` already handle a single-panel scene correctly with no
+  code change needed (`is_last` is true for a lone panel;
+  `rerender_panels`'s one-hop cascade already treats "no next panel" as a
+  no-op, not an error). Verified via `.format()` smoke test (rule text now
+  says "at least 1 shot") and `suggest_shots_per_scene(10, 10)` now
+  correctly returns "about 1 shot(s) per scene" instead of being floored to 2.
 - 2026-07-09 (later 6) — **Prompt-pitfall audit: lost-in-the-middle sandwiching +
   priority-conflict tie-breakers across every agent prompt.** User asked
   directly whether any prompt suffers from "lost in the middle" (Liu et al.

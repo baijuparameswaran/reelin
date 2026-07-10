@@ -83,7 +83,10 @@ smash-cut | wipe | jump-cut (empty string for final scene)"
 }}
 
 Rules:
-- Each scene should have at least 2 shots; aim for a realistic coverage plan{duration_rule}
+- A scene needs at least 1 shot; most scenes benefit from more for real \
+coverage, but a single decisive shot is fine when the beat is that simple \
+(a brief insert, a single reaction) — don't pad out a shot list just to hit \
+a count. Aim for a realistic coverage plan{duration_rule}
 - Shot types and movement should reflect the genre \
 (thriller → tight, handheld; drama → measured, Steadicam; horror → Dutch tilts, \
 low angles; romance → soft telephoto, slow dolly)

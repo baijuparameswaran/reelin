@@ -41,11 +41,13 @@ def suggest_shots_per_scene(target_seconds: int, scene_count: int) -> str:
     """Guidance text for cinematography.py's prompt: roughly how many shots
     each scene should carry so the film's total shot count — at the ~6s/shot
     planning assumption — lands near `target_seconds`. Empty string when
-    there's nothing to compute (`scene_count <= 0`)."""
+    there's nothing to compute (`scene_count <= 0`). Floor of 1 shot/scene,
+    not 2 — a scene needs only one decisive shot when the beat is that
+    simple; this is a budget hint, not a coverage-count minimum."""
     if scene_count <= 0:
         return ""
-    est_total_shots = max(scene_count * 2, round(target_seconds / ASSUMED_SECONDS_PER_SHOT))
-    per_scene = max(2, round(est_total_shots / scene_count))
+    est_total_shots = max(scene_count, round(target_seconds / ASSUMED_SECONDS_PER_SHOT))
+    per_scene = max(1, round(est_total_shots / scene_count))
     return (f"the film has a target total runtime of about {target_seconds}s; at roughly "
            f"{ASSUMED_SECONDS_PER_SHOT}s per shot, that's about {est_total_shots} shot(s) "
            f"total across {scene_count} scene(s) — aim for about {per_scene} shot(s) per "
