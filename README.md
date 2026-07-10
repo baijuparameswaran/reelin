@@ -93,7 +93,9 @@ make test   # or: python -m unittest discover -s tests -v
 `tests/test_prompt_rules.py` validates every agent prompt against this
 project's prompting conventions (sandwiching, tie-breakers, schema fields)
 and the deterministic logic that backs some of those rules — no LLM or API
-calls, runs in well under a second.
+calls, runs in well under a second. `make demo` and `make run` both depend
+on `test`, so a broken prompt/rule is caught before either spends any real
+time or API quota on an actual run.
 
 ## Local models & the update cadence
 

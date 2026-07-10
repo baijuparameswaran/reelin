@@ -186,6 +186,19 @@
   / final cut phase.
 
 ## Session log
+- 2026-07-10 (later 4) — **`make demo`/`make run` now depend on `make test`.**
+  User asked for the prompt-rule suite to run before the demo, to make sure
+  the codebase is intact first. Added `test` as a Makefile prerequisite to
+  both `demo` and `run` (not just `demo` — the same rationale applies
+  identically to running the pipeline against a user's own story) — `make`
+  stops on a non-zero exit by default, so a failing test now blocks the
+  actual pipeline invocation before it spends any real time or API quota,
+  rather than surfacing a prompt regression only after a run is already
+  underway. Verified via `make -n demo`/`make -n run` (dry-run, confirms
+  `test`'s command prints first without executing the pipeline) and a
+  throwaway deliberately-failing test in a scratch directory (confirmed
+  `python -m unittest discover` exits non-zero, which is what makes the
+  dependency actually block `make`).
 - 2026-07-10 (later 3) — **Added a real, committed unittest suite
   (`tests/test_prompt_rules.py`, `make test`) validating that agent
   prompts actually follow this project's established prompting rules, and
