@@ -186,6 +186,40 @@
   / final cut phase.
 
 ## Session log
+- 2026-07-10 (later 7) — **`soundscape.json` gained a `score_direction`
+  field, fixing a real pre-existing bug: `storyboard.py`'s `_build_scene_board`
+  has always read `bundle.audio.score_direction` into `audio_overview.
+  score_cue` (the field `pipeline._panel_video_prompt` asserts as Veo's
+  music directive), but `soundscape.py`'s schema never asked the model to
+  produce that field — every scene's score direction has always been
+  silently empty.** Found while implementing a larger, user-requested
+  architectural change this session (moving character extraction/casting to
+  the very start of the pipeline before a single scene exists, with
+  rendering happening immediately; a scenes.py rule forcing a new scene at
+  each character's first story appearance; a "keep background score
+  subtle" config toggle). That work was reviewed carefully first (see the
+  review below) — one real bug was found and fixed during the review
+  (`stages.py`'s registry list order, reordered to cosmetically match the
+  new pipeline sequence, broke `cli._revise_source`'s full-regen loop,
+  which treats that list as a topological execution order) — but the user
+  then asked to discard all the new architectural changes entirely and
+  keep only genuine bug fixes. Reverted `pipeline.py`, `stages.py`,
+  `casting.py`, `scenes.py`, and `config/models.yaml` to their pre-session
+  state via `git checkout`; kept only the `score_direction` schema field
+  (a real, independently-verifiable bug — storyboard.py's own MERGE SOURCE
+  block already documented reading this exact field), stripped of the
+  "subtle score" config-flag wrapping it had been bundled with (that
+  wrapping was the architectural feature being discarded, not the bug fix
+  itself). Added one regression test (`score_direction` present in the
+  rendered schema) to `tests/test_prompt_rules.py`; suite is 77 tests
+  (was 76 before this session's work began), full package compiles clean.
+  The character-first pipeline reordering, the character-introduction
+  scene-boundary rule, and the subtle-score toggle remain unimplemented —
+  revisit as a fresh, focused piece of work if still wanted, informed by
+  the review findings above (the two-phase casting split needs the
+  `_revise_source` ordering issue solved differently next time, e.g. by
+  NOT reordering `stages.py`'s registry to match, exactly as this review
+  concluded).
 - 2026-07-10 (later 6) — **`revise` now inherits the original run's
   attributes (profile, max_scenes, target_duration, genre/moodboard
   steering) instead of silently reverting to bare defaults.** User asked

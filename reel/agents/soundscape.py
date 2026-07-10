@@ -7,11 +7,19 @@ enters a car, a building industrial hum that bleeds into the next scene.
 Each scene gets:
   ambient_bed     — the continuous audio floor (or silent)
   sound_events    — moment-keyed transient cues within the scene
+  score_direction — the background score/music direction (see below)
   transition_to_next — how audio evolves at the scene boundary
   silence         — true when silence itself is the dramatic choice
   emotional_function — why this audio choice serves the story
 
 Genre and tone from the structure agent seed the overall audio palette.
+
+`score_direction` fixes a real, previously-latent bug: `storyboard.py`'s
+`_build_scene_board` has always read `bundle.audio.score_direction` into
+`audio_overview.score_cue` (the field `pipeline._panel_video_prompt`
+actually asserts as Veo's music directive), but this schema never asked
+the model to produce it — every scene's score direction has always been
+silently empty.
 """
 from __future__ import annotations
 
@@ -53,6 +61,9 @@ truly silent)",
           "sound": "specific transient sound at that moment"
         }}
       ],
+      "score_direction": "the BACKGROUND SCORE/MUSIC for this scene — instrumentation, \
+mood, presence — separate from ambient_bed (environmental sound) and sound_events (SFX); \
+empty string for a scene that should carry no score at all",
       "transition_to_next": "how the audio evolves or carries over into the next scene",
       "silence": false,
       "emotional_function": "what this soundscape does for the audience emotionally"

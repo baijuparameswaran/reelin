@@ -339,6 +339,14 @@ class TestSoundscapePrompt(SandwichAssertionsMixin, unittest.TestCase):
             logline="L", genre="G", tone="T", themes="x", scenes="[]")
         self.assertIn("share the same base ambient_bed", rendered)
 
+    def test_score_direction_field_in_schema(self):
+        # Regression guard for a real pre-existing bug: storyboard.py has
+        # always read bundle.audio.score_direction, but this schema never
+        # asked the model to produce it, so it was silently always empty.
+        rendered = soundscape.PROMPT.format(
+            logline="L", genre="G", tone="T", themes="x", scenes="[]")
+        self.assertIn('"score_direction":', rendered)
+
 
 class TestVisualsPrompt(SandwichAssertionsMixin, unittest.TestCase):
     def test_sandwiched(self):
