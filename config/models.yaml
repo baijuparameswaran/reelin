@@ -176,6 +176,18 @@ moodboard:
 revision:
   identity_drift_threshold: 0.55
 
+# Target total runtime for the rendered movie. Engine-independent planning
+# guidance (see reel/duration_budget.py) fed to the scenes/cinematography
+# prompts as an explicit budget hint — scene/shot counts stay a creative
+# judgment call, not forced arithmetic — AND drives the requested
+# duration_seconds of each individual rendered clip, translated by each video
+# backend's own adaptor (e.g. Veo only accepts 4/6/8s exactly, forced to 8
+# outside 720p — see i2v.py's `_gen_gemini`; other backends honor the
+# request as a frame count with no particular constraint asserted). Override
+# with --target-duration.
+duration:
+  target_seconds: 45
+
 # Runtime behavior.
 runtime:
   # How many agents may call models concurrently. On CPU-only / low-RAM hosts a

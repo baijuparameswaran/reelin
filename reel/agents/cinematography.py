@@ -83,7 +83,7 @@ smash-cut | wipe | jump-cut (empty string for final scene)"
 }}
 
 Rules:
-- Each scene should have at least 2 shots; aim for a realistic coverage plan
+- Each scene should have at least 2 shots; aim for a realistic coverage plan{duration_rule}
 - Shot types and movement should reflect the genre \
 (thriller → tight, handheld; drama → measured, Steadicam; horror → Dutch tilts, \
 low angles; romance → soft telephoto, slow dolly)
@@ -106,6 +106,7 @@ def plan_cinematography(
     feedback: str | None = None,
     existing: dict | None = None,
     revise_keys: set | None = None,
+    shots_guidance: str = "",
 ) -> dict:
     """`existing` + `revise_keys` (a set of `scene_number`s) support a scoped
     revision — see `reel.agents.soundscape.design_soundscape`'s docstring for
@@ -113,7 +114,13 @@ def plan_cinematography(
     `scene_number`. A revised scene's `shots` list is replaced wholesale
     (not independently merge-spliced per `shot_number`) — no downstream
     consumer needs shot-level granularity the way video needs panel-level
-    granularity, so the extra merge complexity has no payoff yet."""
+    granularity, so the extra merge complexity has no payoff yet.
+
+    `shots_guidance` (optional, from `reel.duration_budget.suggest_shots_per_scene`)
+    is a budget hint tying shot coverage to the pipeline's target total
+    runtime — engine-independent (it's about story/shot COUNT, not any video
+    backend's own duration capability); empty string is a no-op (today's
+    unguided behavior, "aim for a realistic coverage plan")."""
     profile = profile or llm.agent_profile("cinematography")
     scene_list = json.dumps(
         [
@@ -131,6 +138,7 @@ def plan_cinematography(
             genre=structure.get("genre", "drama"),
             tone=structure.get("tone", ""),
             themes=", ".join(structure.get("themes", [])),
+            duration_rule=(f" — {shots_guidance}" if shots_guidance else ""),
             scenes=scene_list,
         ),
         feedback,

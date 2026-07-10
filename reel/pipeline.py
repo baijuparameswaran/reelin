@@ -69,6 +69,7 @@ from . import i2v
 from . import veo_guide
 from . import gemini
 from . import session
+from . import duration_budget
 from .revision_merge import merge_by_key
 
 
@@ -202,8 +203,14 @@ def _summarize_cinematography(r: dict) -> str:
     return "\n".join(rows)
 
 
-def _summarize_storyboard(r: dict) -> str:
+def _summarize_storyboard(r: dict, target_seconds: int | None = None) -> str:
     rows = [f"Board style: {r.get('storyboard_style', '?')}"]
+    if target_seconds:
+        est = duration_budget.estimated_total_seconds(r)
+        delta = est - target_seconds
+        flag = "" if abs(delta) <= max(5, round(target_seconds * 0.15)) else "  ⚠ off target"
+        rows.append(f"Estimated total runtime: {duration_budget.format_seconds(est)} "
+                    f"(target: ~{target_seconds}s){flag}")
     for s in r.get("storyboard", []):
         panels = s.get("panels") or s.get("frames", [])
         hdr = s.get("header", {})
@@ -714,21 +721,32 @@ def _render_one_panel(fr: dict, snum, sdir: Path, seed: Path | None,
                                  voice_index=voice_index,
                                  no_bg_music=no_bg_music, room_tone=room_tone,
                                  no_subtitles=no_subtitles)
+    # This panel's own requested clip length, from the storyboard's already-
+    # estimated `duration` field (see storyboard._estimate_duration) — each
+    # video backend is its own adaptor for what to actually do with the
+    # request (Veo rounds to its 3 valid values; others honor it as a frame
+    # count) — see reel.i2v.generate_clip's docstring. None (unparseable/
+    # absent) lets the backend fall back to its own default.
+    requested_seconds = duration_budget.parse_duration_seconds(fr.get("duration")) or None
     tag = f"{int(fnum):02d}" if isinstance(fnum, int) else str(fnum)
     clip = sdir / f"frame_{tag}.mp4"
     tail_img = sdir / f"frame_{tag}_tail.png"
     hash_path = sdir / f"frame_{tag}.hash"
-    # Hash covers both the prompt AND the seed image bytes: a feedback/
-    # revision to an earlier frame changes its tail frame, which changes
-    # this frame's seed, which — even with an unchanged prompt — must still
-    # invalidate this clip so continuity re-chains correctly.
-    current_hash = _content_hash(prompt, seed, prev_clip_path)
+    # Hash covers the prompt, the seed image bytes, AND the requested
+    # duration: a feedback/revision to an earlier frame changes its tail
+    # frame, which changes this frame's seed, which — even with an unchanged
+    # prompt — must still invalidate this clip so continuity re-chains
+    # correctly; a duration-only change (e.g. after a revision shifts the
+    # panel's estimated screen time) must invalidate it too, since neither
+    # the prompt text nor the seed reflects that on their own.
+    current_hash = _content_hash(prompt, seed, prev_clip_path, requested_seconds)
     rendered = False
     failed = False
     if force or _stale(clip, hash_path, current_hash):
         if clip.exists():
             _log(f"      scene {snum} frame {tag} — prompt/seed revised, re-rendering …")
-        if i2v.generate_clip([seed] if seed else [], prompt, clip, prev_clip=prev_clip_path):
+        if i2v.generate_clip([seed] if seed else [], prompt, clip, prev_clip=prev_clip_path,
+                             duration_seconds=requested_seconds):
             rendered = True
             # Burn subtitle + shot-label overlays onto the clip (in-place)
             # when the operator enables them in config video.overlays.
@@ -1408,12 +1426,21 @@ def run(
     profile_override: str | None = None,
     resume: bool = False,
     genre: str | None = None,
+    target_duration_seconds: int | None = None,
 ) -> dict:
     """Run the full screenplay-material phase and write artifacts to `out_dir`.
 
     Pause anytime by typing 'stop' at a review gate (or Ctrl-C); every stage
     already approved stays on disk. Re-run with `resume=True` to load those
     checkpoints and continue from the first stage that hasn't been completed.
+
+    `target_duration_seconds` (default: config `duration.target_seconds`,
+    itself defaulting to `reel.duration_budget.DEFAULT_TARGET_SECONDS`, 45) —
+    the target total runtime of the rendered movie. Engine-independent
+    planning guidance for scenes/cinematography (a budget hint, not forced
+    arithmetic — see `reel.duration_budget`) AND the basis for each rendered
+    clip's requested duration, translated by whichever video backend is
+    configured (see `reel.i2v.generate_clip`).
     """
     # On a fresh run, clear any direction left over from a previous run that may
     # have crashed before reaching the llm.set_direction(None) at the end.
@@ -1429,6 +1456,10 @@ def run(
     session_id = session.start(out, source=input_path, fresh=not resume)
     _log(f"session {session_id} → {out}/session.json")
     gemini.set_log_dir(out)
+
+    target_seconds = target_duration_seconds or \
+        llm.config().get("duration", {}).get("target_seconds", duration_budget.DEFAULT_TARGET_SECONDS)
+    _log(f"      target runtime: ~{target_seconds}s")
 
     # Persist each stage as soon as it's approved, so a failure, timeout, or pause
     # in a later (slow) stage never discards completed work.
@@ -1677,11 +1708,14 @@ def run(
         apply_direction()   # fold the moodboard into the steering for every stage below
 
     # ── 3/10  scenes (scenes←structure) ────────────────────────────────────────
+    scene_target = duration_budget.suggest_scene_target(target_seconds)
     g = run_group("3/10", "scenes", [
         _spec("scenes",
-              lambda: segment_scenes(source, structure, profile=profile_override, characters=characters),
+              lambda: segment_scenes(source, structure, target=scene_target,
+                                     profile=profile_override, characters=characters),
               _summarize_scenes,
-              lambda fb, p=None: segment_scenes(source, structure, profile=p or profile_override,
+              lambda fb, p=None: segment_scenes(source, structure, target=scene_target,
+                                                profile=p or profile_override,
                                                 feedback=fb, characters=characters)),
     ])
     scenes = g["scenes"]
@@ -1718,6 +1752,7 @@ def run(
             _log(f"      portraits → {out}/casting/")
 
     # ── 5–7/10  soundscape + visuals + cinematography ────────────────────────
+    shots_guidance = duration_budget.suggest_shots_per_scene(target_seconds, len(scenes.get("scenes", [])))
     g = run_group("5/10", "soundscape ‖ visuals ‖ cinematography", [
         _spec("soundscape",
               lambda: design_soundscape(structure, scenes, profile_override),
@@ -1732,11 +1767,13 @@ def run(
               realign=lambda result, keys: design_visuals(structure, scenes, profile_override,
                                                            existing=result, revise_keys=keys)),
         _spec("cinematography",
-              lambda: plan_cinematography(structure, scenes, profile_override),
+              lambda: plan_cinematography(structure, scenes, profile_override, shots_guidance=shots_guidance),
               _summarize_cinematography,
-              lambda fb, p=None: plan_cinematography(structure, scenes, p or profile_override, feedback=fb),
+              lambda fb, p=None: plan_cinematography(structure, scenes, p or profile_override, feedback=fb,
+                                                      shots_guidance=shots_guidance),
               realign=lambda result, keys: plan_cinematography(structure, scenes, profile_override,
-                                                                existing=result, revise_keys=keys)),
+                                                                existing=result, revise_keys=keys,
+                                                                shots_guidance=shots_guidance)),
     ])
     soundscape, visuals, cinematography = g["soundscape"], g["visuals"], g["cinematography"]
 
@@ -1784,7 +1821,8 @@ def run(
             existing=result, revise_keys=keys,
         )
     g = run_group("9/10", "storyboard", [
-        _spec("storyboard", lambda: _board(), _summarize_storyboard, _board, realign=_board_realign),
+        _spec("storyboard", lambda: _board(),
+              lambda r: _summarize_storyboard(r, target_seconds), _board, realign=_board_realign),
     ])
     storyboard = g["storyboard"]
 

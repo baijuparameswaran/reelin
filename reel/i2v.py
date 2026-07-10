@@ -116,16 +116,52 @@ def _full_prompt(prompt: str) -> str:
     return p or suffix
 
 
-def _frames(c: dict) -> int:
-    return int(round(float(c.get("seconds", 4)) * float(c.get("fps", 24))))
+def _frames(c: dict, duration_seconds: float | None = None) -> int:
+    """Frame count for the diffusers/http backends' own duration handling —
+    their adaptor logic, distinct from Veo's discrete-value constraint (see
+    `_veo_nearest_valid_duration`, used only by `_gen_gemini`). `duration_seconds`
+    (the caller's requested clip length, e.g. from the storyboard panel's own
+    estimate) overrides config `video.seconds` when given; neither backend
+    asserts any particular valid range today (unverified for either), so this
+    just honors whatever's requested rather than silently ignoring it."""
+    seconds = duration_seconds if duration_seconds else float(c.get("seconds", 4))
+    return int(round(seconds * float(c.get("fps", 24))))
 
 
 # ── backends ─────────────────────────────────────────────────────────────────
 
+# Veo 3.1's `duration_seconds` only accepts these three values — not a
+# continuous range (verified live against the official guide at
+# ai.google.dev/gemini-api/docs/veo). Deliberately scoped to THIS backend
+# function, not a shared/generic constant — `reel.duration_budget`'s scene/
+# shot COUNT planning stays engine-independent (Veo is only one of several
+# supported image-to-video backends; see i2v.py's module docstring), and
+# the other backends (_gen_diffusers, _gen_http) have their own duration
+# handling (frame-count based, via `_frames`/config `video.seconds`) that
+# this constraint has no bearing on.
+_VEO_VALID_DURATIONS = (4, 6, 8)
+
+
+def _veo_nearest_valid_duration(seconds: float, *, force_max: bool = False) -> int:
+    """Round `seconds` to the nearest Veo-valid duration. `force_max=True` —
+    extend-mode continuity, reference images, or a resolution other than
+    720p — always returns 8, Veo's only valid value in those cases."""
+    if force_max:
+        return 8
+    return min(_VEO_VALID_DURATIONS, key=lambda v: abs(v - seconds))
+
+
 def _gen_gemini(images: list[Path], prompt: str, out_path: Path, *,
-                prev_clip: Path | None = None) -> bool:
+                prev_clip: Path | None = None, duration_seconds: float | None = None) -> bool:
     """Veo image-to-video via the Gemini API. Seeds from the last keyframe (the
     reference image produced by the image stage); text-to-video if none given.
+
+    `duration_seconds` — the caller's REQUESTED clip length (e.g. from the
+    storyboard panel's own duration estimate); rounded to whichever of Veo's
+    3 valid values (4/6/8) is nearest, or forced to 8 when Veo requires it
+    (extend continuity, reference images, non-720p resolution). `None`
+    (caller has no specific request, e.g. the standalone `gen-video` CLI)
+    keeps today's behavior — Veo's own SDK/API default (8s).
 
     prev_clip — the previous clip's mp4 (same scene), used when
     `video.continuity_mode: extend` to request Veo's native video-to-video
@@ -155,6 +191,12 @@ def _gen_gemini(images: list[Path], prompt: str, out_path: Path, *,
     resolution = c.get("resolution", "720p")
     poll_seconds = c.get("poll_seconds", 10)
     timeout_seconds = c.get("timeout_seconds", 1200) or 1200
+    # Veo requires exactly 8s at any resolution other than 720p — the config
+    # default (and this codebase's recommended setting) is 720p specifically
+    # so the 4/6/8s duration flexibility below actually applies; see
+    # config/models.yaml's `video.resolution` comment.
+    dur = (_veo_nearest_valid_duration(duration_seconds, force_max=(resolution != "720p"))
+          if duration_seconds else 8)
 
     want_extend = c.get("continuity_mode", "seed") == "extend" and prev_clip and Path(prev_clip).exists()
     if want_extend and resolution != "720p":
@@ -183,6 +225,7 @@ def _gen_gemini(images: list[Path], prompt: str, out_path: Path, *,
         model=model,
         aspect_ratio=aspect_ratio,
         resolution=resolution,
+        duration_seconds=dur,
         poll_seconds=poll_seconds,
         timeout_seconds=timeout_seconds,
     )
@@ -191,8 +234,13 @@ def _gen_gemini(images: list[Path], prompt: str, out_path: Path, *,
 _PIPE = None  # diffusers i2v pipeline, cached (load is very expensive)
 
 
-def _gen_diffusers(images: list[Path], prompt: str, out_path: Path) -> bool:
-    """Local image-to-video on a GPU host. Model-agnostic via `video.pipeline_class`."""
+def _gen_diffusers(images: list[Path], prompt: str, out_path: Path, *,
+                   duration_seconds: float | None = None) -> bool:
+    """Local image-to-video on a GPU host. Model-agnostic via `video.pipeline_class`.
+    This backend's own adaptor for a requested duration is frame-count based
+    (`_frames`) — no discrete-value constraint like Veo's is asserted here
+    (unverified for any of the supported pipelines), so the request is
+    honored directly rather than rounded."""
     global _PIPE
     c = _cfg()
     model = c.get("model", "Lightricks/LTX-Video")
@@ -209,7 +257,7 @@ def _gen_diffusers(images: list[Path], prompt: str, out_path: Path) -> bool:
     init = Image.open(images[-1]).convert("RGB")  # last keyframe drives the start
     size = int(c.get("size", 768))
     kwargs = dict(prompt=_full_prompt(prompt), image=init,
-                  num_frames=_frames(c), width=size, height=size)
+                  num_frames=_frames(c, duration_seconds), width=size, height=size)
     # first+last-frame conditioning when two keyframes are supplied and supported
     if len(images) >= 2 and "last_image" in getattr(_PIPE, "__call__").__doc__ or "":
         kwargs["last_image"] = Image.open(images[0]).convert("RGB")
@@ -218,15 +266,19 @@ def _gen_diffusers(images: list[Path], prompt: str, out_path: Path) -> bool:
     return True
 
 
-def _gen_http(images: list[Path], prompt: str, out_path: Path) -> bool:
+def _gen_http(images: list[Path], prompt: str, out_path: Path, *,
+              duration_seconds: float | None = None) -> bool:
     """Offload to a remote GPU endpoint (ComfyUI / custom). Sends prompt + base64
-    keyframe image(s); expects JSON {"video": "<base64 mp4>"} or raw video bytes."""
+    keyframe image(s); expects JSON {"video": "<base64 mp4>"} or raw video bytes.
+    `num_frames` reflects the caller's requested duration when given, same as
+    the diffusers backend — but what the remote endpoint actually does with
+    it is that endpoint's own adaptor logic, not something asserted here."""
     c = _cfg()
     host = c.get("host", "")
     payload = {
         "prompt": _full_prompt(prompt),
         "images": [base64.b64encode(Path(p).read_bytes()).decode() for p in images],
-        "num_frames": _frames(c),
+        "num_frames": _frames(c, duration_seconds),
         "fps": int(c.get("fps", 24)),
         "size": int(c.get("size", 768)),
         "params": c.get("params", {}),
@@ -253,12 +305,24 @@ def _gen_http(images: list[Path], prompt: str, out_path: Path) -> bool:
 
 # ── public API ───────────────────────────────────────────────────────────────
 
-def generate_clip(images, prompt: str, out_path: Path, *, prev_clip: Path | None = None) -> bool:
+def generate_clip(images, prompt: str, out_path: Path, *, prev_clip: Path | None = None,
+                  duration_seconds: float | None = None) -> bool:
     """Render a clip to `out_path` (mp4) conditioned on one or more keyframe
     `images` (a Path or list — last is the start frame; a leading second image is
     used as the prior/last-frame anchor for continuity when the model supports it).
     `prev_clip` — the previous clip's mp4, used for Veo's native scene-extend
     continuity mode (gemini/veo backend only; ignored otherwise).
+
+    `duration_seconds` — the caller's requested clip length (e.g. from the
+    storyboard panel's own duration estimate). Each backend is its own
+    adaptor for what to actually do with the request: gemini/veo
+    (`_gen_gemini`) rounds it to Veo's 3 valid discrete values (4/6/8);
+    diffusers/comfyui-http (`_frames`) honor it directly as a frame count,
+    with no particular valid range asserted (unverified for either). See
+    `reel.duration_budget`'s module docstring for why scene/shot COUNT
+    planning stays engine-independent even though per-clip duration
+    translation is backend-specific.
+
     Returns success; never raises fatally."""
     imgs = [Path(p) for p in ([images] if isinstance(images, (str, Path)) else images) if p]
     imgs = [p for p in imgs if p.exists()]
@@ -269,11 +333,12 @@ def generate_clip(images, prompt: str, out_path: Path, *, prev_clip: Path | None
         return False
     try:
         if b in ("gemini", "veo"):
-            return _gen_gemini(imgs, prompt, out_path, prev_clip=prev_clip)
+            return _gen_gemini(imgs, prompt, out_path, prev_clip=prev_clip,
+                               duration_seconds=duration_seconds)
         if b == "diffusers":
-            return _gen_diffusers(imgs, prompt, out_path)
+            return _gen_diffusers(imgs, prompt, out_path, duration_seconds=duration_seconds)
         if b in ("comfyui", "http"):
-            return _gen_http(imgs, prompt, out_path)
+            return _gen_http(imgs, prompt, out_path, duration_seconds=duration_seconds)
         _log(f"      ⚠ clip skipped — unknown video backend {b!r}")
         return False
     except (urllib.error.URLError, socket.timeout, TimeoutError) as e:

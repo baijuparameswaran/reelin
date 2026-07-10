@@ -240,6 +240,44 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
   scene — and an empty response is recorded in `dropped_scenes`, surfaced at
   the gate via `_summarize_storyboard`, mirroring `scenes.py`'s own
   `dropped_scenes`) rather than trusting its echo blindly.
+- **Target total runtime (`--target-duration N`, default 45s — `reel/duration_budget.py`):**
+  an engine-independent budget for the rendered movie's total length, threaded
+  through scene/shot COUNT planning and each clip's requested render duration.
+  Deliberately has NO knowledge of which video backend is configured — Veo is
+  only one of several supported image-to-video engines (`i2v.py` also supports
+  diffusers-based LTX/Wan/CogVideoX and a remote comfyui/http endpoint), so
+  `duration_budget.py` only computes GUIDANCE TEXT (`suggest_scene_target`,
+  `suggest_shots_per_scene` — "aim for about N scenes"/"about M shots per
+  scene", assuming ~6s/shot for planning purposes only) fed into
+  `scenes.py`'s existing `target` param and a new `cinematography.py`
+  `shots_guidance` param — scene/shot counts stay each agent's own creative
+  judgment call, never forced arithmetic. The actual per-clip render duration
+  is a SEPARATE concern, translated by each backend's own adaptor: Veo 3.1's
+  `duration_seconds` only accepts **4, 6, or 8** exactly — not a continuous
+  range — and MUST be 8 outside 720p resolution or with extend-mode
+  continuity (verified live against the official guide at
+  ai.google.dev/gemini-api/docs/veo, not guessed) — so `i2v.py`'s
+  `_veo_nearest_valid_duration`/`_gen_gemini` (Veo-specific, NOT in
+  `duration_budget.py`) round the caller's requested duration to the nearest
+  valid value, forced to 8 when required; the diffusers/comfyui-http backends
+  (`_frames`) honor the same request directly as a frame count instead, with
+  no particular constraint asserted (unverified for either). The requested
+  duration itself comes from the storyboard panel's own already-computed
+  `duration` estimate (`storyboard._estimate_duration`, deterministic — see
+  the entry above) — parsed back to seconds by `duration_budget.
+  parse_duration_seconds`, included in `_render_one_panel`'s `_content_hash`
+  (so a duration-only change from a revision correctly invalidates a stale
+  clip), and passed to `i2v.generate_clip(..., duration_seconds=...)`, newly
+  threaded through `_gen_gemini`/`_gen_diffusers`/`_gen_http`'s signatures
+  (previously Veo always got the SDK default of 8s, unconditionally, since
+  nothing in the codebase ever passed a value). `_summarize_storyboard`
+  gained a target-vs-estimated-total readout at the gate (`duration_budget.
+  estimated_total_seconds`, summing every scene's own duration estimate) —
+  informational, flags "⚠ off target" past a ±15% (min 5s) tolerance, never
+  blocks. `--target-duration` follows the same inherit-across-`--resume`
+  treatment `--max-scenes`/`--profile` already have (`cli.py`'s
+  `_save_run_params`/`_load_run_params`, `output/run_params.json`) — an
+  unfinished run resumed bare doesn't silently revert to the 45s default.
 - **Standalone video render (`python -m reel.cli render [--fresh]`):** builds a
   camera-directed render plan from `screenplay.fountain`+`cinematography.json` (every
   drafted scene, every shot — NO caps by default) via `fountain.to_storyboard`
@@ -647,6 +685,62 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
   / final cut phase.
 
 ## Session log
+- 2026-07-09 (later 5) — **Added a target-total-runtime parameter (`--target-duration`,
+  default 45s) threaded through scene/shot planning AND each rendered
+  clip's actual requested duration.** User asked for this to influence
+  "scenes/shots and all things that follow." First traced what actually
+  determines a real rendered video's length today — found `i2v.generate_clip`
+  had NO `duration_seconds` parameter at all, so every Veo call fell through
+  to `gemini.generate_video`'s bare SDK default of 8s, unconditionally; the
+  real lever was purely panel/shot COUNT. Rather than guess at Veo's valid
+  duration values, verified them live via WebFetch against the official
+  ai.google.dev Veo 3.1 guide: exactly **4, 6, or 8** seconds, not a
+  continuous range, and MUST be 8 outside 720p resolution or with extend-mode
+  continuity — this project's established practice of confirming external API
+  constraints rather than guessing (see the extend-mode session log entry
+  from 2026-07-08 for the same pattern). **Mid-implementation, user corrected
+  the architecture twice**: (1) "this scene definition may be independent of
+  VEO which is one of the supported video generation engines" — caught that
+  the first draft of `duration_budget.py` baked Veo's specific 4/6/8
+  constraint into what should be engine-agnostic scene/shot-count planning
+  guidance; restructured so `duration_budget.py` has zero knowledge of any
+  video backend (pure "how many scenes/shots fit a target runtime" math), and
+  moved the Veo-specific rounding (`_veo_nearest_valid_duration`) into
+  `i2v.py` itself, scoped to only `_gen_gemini`. (2) "the specific video
+  generator may align to its own limitation... translated by its own
+  adaptor" (clarified as "or agent" — kept this codebase's existing
+  "backend" terminology rather than overloading "agent", which already means
+  something specific here — the LLM-based `reel/agents/*.py` modules) —
+  extended the same per-backend-adaptor treatment to `_gen_diffusers`/
+  `_gen_http` (previously would have silently ignored a duration request
+  entirely): both now honor a requested duration as a frame count via
+  `_frames`, with no particular valid range asserted for either (unverified,
+  unlike Veo's confirmed constraint) — honest rather than presumptuous about
+  capabilities not actually confirmed. Final architecture: `duration_budget.
+  suggest_scene_target`/`suggest_shots_per_scene` (engine-independent
+  planning guidance, ~6s/shot assumption) feed `scenes.py`'s existing
+  `target` param and a new `cinematography.py` `shots_guidance` param;
+  `_render_one_panel` parses each storyboard panel's OWN already-computed
+  duration estimate (`storyboard._estimate_duration`, deterministic per the
+  entry below) back to seconds and passes it to `i2v.generate_clip`, which
+  each backend's own adaptor translates however is appropriate for that
+  engine. Also added to `_content_hash` (a duration-only change from a
+  revision must invalidate a stale clip) and a target-vs-estimated readout
+  at the storyboard gate (`_summarize_storyboard`, flags "⚠ off target"
+  past ±15%/min 5s tolerance, informational only). `--target-duration`
+  follows the same inherit-across-`--resume` treatment `--max-scenes`/
+  `--profile` already got in an earlier session (`_save_run_params`/
+  `_load_run_params`). Verified extensively offline: `_veo_nearest_valid_duration`
+  rounding + force-8 cases; `_frames`' generic frame-count adaptor;
+  `duration_budget` confirmed to have zero Veo-specific symbols; a full
+  stubbed end-to-end `pipeline.run()` confirming the target actually reaches
+  the scenes/cinematography prompts AND that each panel's own estimated
+  duration reaches `i2v.generate_clip`; `_gen_gemini`'s real rounding/
+  force-8 logic exercised directly (5s→4s, 7s→6s, non-720p→forced 8s,
+  no-request→unchanged default of 8s); the existing `rerender_panels`
+  one-hop-cascade regression test re-run clean (needed only a scratchpad
+  stub-signature update, not a real code fix). *(Uncommitted at time of
+  writing.)*
 - 2026-07-09 (later 4) — **Fidelity agent gained a deterministic, self-healing
   scene-structure alignment check, wired to automatically reiterate any
   scene-keyed stage that drifts from scenes.json — before the operator ever

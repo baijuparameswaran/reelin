@@ -319,6 +319,24 @@ stages (image/video API calls) restrict themselves to `max_scenes`. Within a
 rendered scene, **every shot is always rendered** (the storyboard emits one
 frame per camera shot; the renderer never caps shots).
 
+**`--target-duration N`** (default 45 seconds) sets a target total runtime for
+the rendered movie. It's engine-independent guidance — Veo is only one of
+several supported video backends (`reel/i2v.py` also supports diffusers-based
+LTX/Wan/CogVideoX and a remote comfyui/http endpoint) — so it never forces an
+exact scene/shot count; `reel/duration_budget.py` converts it into planning
+text ("aim for about N scenes", "about M shots per scene") fed to the scenes
+and cinematography stages, which still make the actual creative call. The
+storyboard's own per-panel duration estimate then becomes each rendered
+clip's *requested* length, translated by whichever backend is configured:
+Veo 3.1 only accepts exactly 4, 6, or 8 seconds (not a continuous range, and
+must be 8 outside 720p resolution), so the gemini/veo backend rounds to the
+nearest valid value; other backends honor the request directly as a frame
+count. The gate for the storyboard stage shows the plan's estimated total
+runtime against the target, flagging when they're more than ~15% apart —
+informational only, it never blocks. Omitted on `--resume`, it inherits
+whatever the run being resumed actually used, same as `--max-scenes`/
+`--profile`.
+
 **Every prompt actually sent to Veo follows a fixed five-part formula, always
 in this order** (per Google's official Veo 3.1 prompting guide —
 [cloud.google.com/blog/.../ultimate-prompting-guide-for-veo-3-1](https://cloud.google.com/blog/products/ai-machine-learning/ultimate-prompting-guide-for-veo-3-1)):

@@ -1,7 +1,8 @@
 """Command-line entry point for the reel screenplay-material pipeline.
 
 Usage:
-    python -m reel.cli SOURCE.txt [--out DIR] [--max-scenes N] [--profile NAME] [--resume]
+    python -m reel.cli SOURCE.txt [--out DIR] [--max-scenes N] [--profile NAME]
+        [--target-duration N] [--resume]
     python -m reel.cli --list-models             # show local model status
     python -m reel.cli stages                    # list pipeline stages + their inputs
     python -m reel.cli stage NAME [SOURCE.txt]   # run ONE stage independently
@@ -95,21 +96,23 @@ def _load_run_params(out) -> dict:
         return {}
 
 
-def _save_run_params(out, *, max_scenes, profile, genre) -> None:
+def _save_run_params(out, *, max_scenes, profile, genre, target_duration=None) -> None:
     """Persist the EFFECTIVE (already-resolved, post-inheritance) knobs a
     full-pipeline run used, so a later `--resume` that omits `--max-scenes`/
-    `--profile` inherits the same values instead of silently falling back to
-    argparse's own defaults (1 scene, no profile override) — which would
-    otherwise be a correctness gap, not just a UX one: an unfinished
-    `--max-scenes all` run resumed bare would only render scene 1's worth of
-    casting images/video from then on. Re-written on every run (fresh or
-    resumed) with whatever was actually used THIS time, so the stored value
-    stays current across any number of resumes and an explicit override on
-    one resume becomes the new inherited default for the next."""
+    `--profile`/`--target-duration` inherits the same values instead of
+    silently falling back to argparse's own defaults (1 scene, no profile
+    override, config's default target runtime) — which would otherwise be a
+    correctness gap, not just a UX one: an unfinished `--max-scenes all` run
+    resumed bare would only render scene 1's worth of casting images/video
+    from then on. Re-written on every run (fresh or resumed) with whatever
+    was actually used THIS time, so the stored value stays current across
+    any number of resumes and an explicit override on one resume becomes the
+    new inherited default for the next."""
     import json
     p = _run_params_path(out)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps({"max_scenes": max_scenes, "profile": profile, "genre": genre},
+    p.write_text(json.dumps({"max_scenes": max_scenes, "profile": profile, "genre": genre,
+                            "target_duration": target_duration},
                             ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -831,6 +834,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--genre", default=None,
                     help="force the adaptation's genre (e.g. 'noir thriller'); "
                          "overrides config genre.value. Omit to use config / auto-detect")
+    ap.add_argument("--target-duration", type=int, default=None, dest="target_duration",
+                    help="target total runtime of the rendered movie, in seconds "
+                         "(default: config duration.target_seconds, currently 45) — "
+                         "engine-independent guidance for scene/shot-count planning, "
+                         "and the basis for each clip's requested render duration. "
+                         "Omitted on a --resume run: inherits whatever the run being "
+                         "resumed actually used")
     ap.add_argument("--resume", action="store_true",
                     help="reuse completed stages in --out and continue from the "
                          "first unfinished one (pair with a prior paused run)")
@@ -863,12 +873,19 @@ def main(argv: list[str] | None = None) -> int:
     if profile is None and args.resume and prev_params.get("profile"):
         profile = prev_params["profile"]
         print(f"[reel] --profile not given — inheriting {profile!r} from the run being resumed")
+    target_duration = args.target_duration
+    if target_duration is None and args.resume and prev_params.get("target_duration"):
+        target_duration = prev_params["target_duration"]
+        print(f"[reel] --target-duration not given — inheriting {target_duration}s "
+             "from the run being resumed")
 
-    _save_run_params(args.out, max_scenes=max_scenes, profile=profile, genre=args.genre)
+    _save_run_params(args.out, max_scenes=max_scenes, profile=profile, genre=args.genre,
+                     target_duration=target_duration)
 
     try:
         run(args.source, out_dir=args.out, max_scenes=max_scenes,
-            profile_override=profile, resume=args.resume, genre=args.genre)
+            profile_override=profile, resume=args.resume, genre=args.genre,
+            target_duration_seconds=target_duration)
     except PipelineStopped as e:
         session.finish(args.out, "paused")
         print(f"\n[reel] paused at '{e.stage}'. Completed stages saved in {args.out}/.")
@@ -876,6 +893,8 @@ def main(argv: list[str] | None = None) -> int:
                      f"--max-scenes {_scenes_label(max_scenes)}")
         if profile:
             resume_cmd += f" --profile {profile}"
+        if target_duration:
+            resume_cmd += f" --target-duration {target_duration}"
         print(f"[reel] resume:  {resume_cmd}")
         return 0
     except KeyboardInterrupt:
