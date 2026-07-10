@@ -479,6 +479,14 @@ A few things this is deliberately careful about:
   existing `output/session.json` (see [Session tracking](#session-tracking)
   above) and keeps it `running` across every round; it's only marked
   `complete`/`paused` when you type `quit`/`exit` or `pause` (or Ctrl-C).
+- **The original run's attributes carry over automatically.** `--profile`,
+  `--max-scenes`, `--target-duration`, and the genre/moodboard creative
+  direction are all reloaded from the completed run before any stage
+  regenerates — a revision doesn't silently drop back to slower/default
+  models, lose the genre steering that shaped the rest of the film, or
+  re-cap a `--max-scenes all` run down to one scene. (Screenplay is the one
+  intentional exception: it's never capped by `--max-scenes` even in the
+  original run, so a revision keeps that policy too.)
 
 ## Story fidelity (consistency scoring)
 

@@ -465,6 +465,43 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
   ("source", "ingest")` to the same `_revise_source` handler, and the
   interactive menu skips listing `ingest` at all to avoid showing two
   entries for the same underlying artifact).
+- **`revise` inherits the original run's attributes** — profile, max_scenes,
+  target_duration, and genre/moodboard creative-direction steering —
+  instead of silently reverting to bare defaults. `revise` is a SEPARATE
+  process invocation from the `pipeline.run()` that produced the checkpoints
+  it's editing, so none of these carried over automatically before this fix:
+  `llm.set_direction`'s process-wide directive started unset in the new
+  process (losing genre/moodboard steering on every regenerated stage even
+  though genre.json/moodboard.json exist on disk); `stages.run_stage`'s
+  calls never passed `profile=` (silently reverting each stage to its own
+  config default instead of e.g. a `--profile fast` override); `max_scenes`
+  wasn't threaded through at all (re-capping a completed `--max-scenes all`
+  run back down to `run_stage`'s own default of 1 the moment anything
+  downstream got regenerated); and `--target-duration`'s scene/shot-count
+  guidance had no pathway into `revise`'s calls whatsoever. Fixed via:
+  `pipeline.compose_direction(genre_spec, moodboard_spec)` — the genre+
+  moodboard guidance composition `run()`'s local `apply_direction()` used
+  inline, extracted to module level so `cli._restore_direction(out)` (new,
+  called once at the top of `_revise_loop`) can reload genre.json/
+  moodboard.json from `out/` and re-apply the exact same steering before any
+  stage regenerates. `cli._load_run_params(out)` (already existed, for
+  `--resume` inheritance) is reused here too — `_revise_loop` loads
+  `profile`/`max_scenes`/`target_duration` once and threads them through
+  every `_revise_one`/`_revise_source` call, which pass `profile=`
+  explicitly into every `stages.run_stage(...)` call site. `max_scenes`
+  needed one deliberate exception, `cli._effective_max_scenes(stage_name,
+  max_scenes)`: `screenplay` always gets `None` (uncapped) regardless of the
+  inherited value, matching the established "`--max-scenes` only restricts
+  actual media-rendering stages, screenplay always drafts everything" policy
+  — passing the inherited value uniformly would have reintroduced the exact
+  cap that policy deliberately removed. `target_duration` needed new
+  plumbing: `stages.py`'s `_scenes`/`_cinematography` wrappers gained
+  `target`/`shots_guidance` params (both default to falsy = "no override,
+  use this stage's own default", so every pre-existing call site is
+  unaffected), and `cli._duration_kwargs(stage_name, out, target_duration)`
+  computes the right one from `reel.duration_budget` — `cinematography`'s
+  needs the CURRENT scene count, reloaded fresh from disk since `scenes` may
+  have just been regenerated earlier in the same revision round.
 - **Casting data model:** each character entry has an `actor` block (performer's
   own features) and a `character` block (that actor aged/costumed into the role).
   **Image generation renders the character only** — exactly one image per

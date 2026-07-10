@@ -116,6 +116,62 @@ def _save_run_params(out, *, max_scenes, profile, genre, target_duration=None) -
                             ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _restore_direction(out) -> None:
+    """Reload genre.json/moodboard.json (if present) and re-apply the exact
+    same creative-direction steering `pipeline.run()` set up for the
+    original run, via the shared `pipeline.compose_direction`. `revise` is a
+    separate process invocation — `llm.set_direction`'s process-wide
+    directive is unset by default in a fresh process, so without this every
+    stage regenerated through `revise` would silently lose genre/moodboard
+    steering even though the original run's choices are sitting right there
+    on disk. Best-effort: missing genre.json/moodboard.json (a run that
+    disabled one, or never got that far) just means that part of the
+    direction is empty — never raises."""
+    from .stages import _load
+    from .pipeline import compose_direction
+    genre_spec = _load(out, "genre") or {}
+    moodboard_spec = _load(out, "moodboard") or {}
+    llm.set_direction(compose_direction(genre_spec, moodboard_spec))
+
+
+def _effective_max_scenes(stage_name: str, max_scenes: int | None) -> int | None:
+    """`--max-scenes` ONLY restricts actual media-rendering stages in a full
+    pipeline run (casting-image generation, scene_render's video generation,
+    and moodboard's render-ready tiles) — every design/planning stage,
+    screenplay included, always drafts every scene regardless (see
+    PROGRESS.md's "Current state" — `pipeline.run()` deliberately never
+    passes its render-scoped `max_scenes` into the screenplay call). `revise`
+    must match that policy rather than silently reintroducing a cap via
+    `run_stage`'s own non-None default: `screenplay` always gets `None`
+    (uncapped) here regardless of the inherited value; every other stage
+    gets the inherited value as-is (harmless for stages that ignore it)."""
+    return None if stage_name == "screenplay" else max_scenes
+
+
+def _duration_kwargs(stage_name: str, out, target_duration: int | None) -> dict:
+    """`target`/`shots_guidance` kwargs for `stages.run_stage`, restoring the
+    ORIGINAL run's `--target-duration` planning guidance for the two stages
+    that actually consume it — `scenes` (scene-count budget) and
+    `cinematography` (shots-per-scene budget, which additionally needs the
+    CURRENT scene count, reloaded fresh since `scenes` may have just been
+    regenerated earlier in the same revision). Empty dict for every other
+    stage — nothing meaningful to compute, and every other stage's `**_`
+    catch-all would ignore these anyway. `target_duration=None` (no prior
+    record, or the original run used the config default) falls back to
+    `duration_budget.DEFAULT_TARGET_SECONDS`, matching what a fresh
+    `pipeline.run()` does when `--target-duration` is omitted."""
+    if stage_name not in ("scenes", "cinematography"):
+        return {}
+    from . import duration_budget
+    from .stages import _load
+    target_seconds = target_duration or duration_budget.DEFAULT_TARGET_SECONDS
+    if stage_name == "scenes":
+        return {"target": duration_budget.suggest_scene_target(target_seconds)}
+    scenes_doc = _load(out, "scenes") or {}
+    scene_count = len(scenes_doc.get("scenes", []))
+    return {"shots_guidance": duration_budget.suggest_shots_per_scene(target_seconds, scene_count)}
+
+
 def _list_models() -> int:
     cfg = llm.config()
     have = llm.installed_models()
@@ -515,7 +571,9 @@ def _apply_scene_render_revision(out, source_stage: str, revise_keys, panel_targ
                              existing_manifest=_load_manifest(), characters=characters)
 
 
-def _revise_source(out, *, edited_override: dict | None = None, auto_confirm: bool = False) -> bool:
+def _revise_source(out, *, edited_override: dict | None = None, auto_confirm: bool = False,
+                   profile: str | None = None, max_scenes: int | None = 1,
+                   target_duration: int | None = None) -> bool:
     """Revise the raw ingested story text. A source-text edit is ALWAYS
     treated as drastic — every downstream stage's `chunk_indices`/
     `source_line` anchors are keyed to the exact prior text, and fine-
@@ -524,7 +582,15 @@ def _revise_source(out, *, edited_override: dict | None = None, auto_confirm: bo
     falls back to a full regen of every stage, replayed via `run_stage` in
     registry order (each stage reloads its inputs fresh from disk, so the
     edited `source.json` — and each newly regenerated artifact after it —
-    is what every subsequent stage actually sees)."""
+    is what every subsequent stage actually sees).
+
+    `profile`/`max_scenes`/`target_duration` are the original run's
+    inherited attributes (see `_revise_loop`'s docstring) — threaded into
+    every `run_stage` call here so a full source-text regen doesn't
+    silently revert to `run_stage`'s own bare defaults (notably
+    `max_scenes=1`, which would otherwise quietly re-cap casting-image/video
+    rendering back down to one scene even after an original `--max-scenes
+    all` run)."""
     from .stages import STAGES, _load, _save_artifact, run_stage
     from .agents.ingest import chunk_text
     from .gate import edit_in_editor
@@ -562,13 +628,16 @@ def _revise_source(out, *, edited_override: dict | None = None, auto_confirm: bo
     for s in STAGES:
         if s.name == "ingest":
             continue
-        run_stage(s.name, out=out)
+        run_stage(s.name, out=out, profile=profile,
+                 max_scenes=_effective_max_scenes(s.name, max_scenes),
+                 **_duration_kwargs(s.name, out, target_duration))
     print("[reel] source revision applied — every downstream stage regenerated")
     return True
 
 
 def _revise_one(stage_name: str, out, *, edited_override: dict | None = None,
-                auto_confirm: bool = False) -> bool:
+                auto_confirm: bool = False, profile: str | None = None,
+                max_scenes: int | None = 1, target_duration: int | None = None) -> bool:
     """One revision round: edit `stage_name`'s current artifact via $EDITOR
     (or the raw source text if `stage_name == "source"`), figure out what
     actually changed, propose a downstream re-run plan (falling back to a
@@ -579,13 +648,19 @@ def _revise_one(stage_name: str, out, *, edited_override: dict | None = None,
     `edited_override`/`auto_confirm` are testing hooks — bypass the
     interactive $EDITOR / confirm prompt with a canned value, so this
     function (and thus the whole revise flow) can be driven directly without
-    a TTY."""
+    a TTY.
+
+    `profile`/`max_scenes`/`target_duration` are the original run's
+    inherited attributes (see `_revise_loop`'s docstring), threaded into
+    every downstream `run_stage` call below via `_duration_kwargs` for the
+    two stages that consume target_duration."""
     if stage_name in ("source", "ingest"):
         # "ingest" is the stage that PRODUCES source.json (Stage.produces=
         # "source") — routed to the same special handling as "source" itself
         # (chunk_indices/word_count/char_count recomputation) rather than the
         # generic path below, which has no idea those derived fields exist.
-        return _revise_source(out, edited_override=edited_override, auto_confirm=auto_confirm)
+        return _revise_source(out, edited_override=edited_override, auto_confirm=auto_confirm,
+                              profile=profile, max_scenes=max_scenes, target_duration=target_duration)
 
     from .stages import REGISTRY, _load, _save_artifact, run_stage, downstream_of
     from .gate import edit_in_editor
@@ -690,11 +765,14 @@ def _revise_one(stage_name: str, out, *, edited_override: dict | None = None,
             _apply_scene_render_revision(out, stage_name, render_keys, panel_targets)
             continue
         if dname in ("casting_images", "moodboard_tiles"):
-            run_stage(dname, out=out)
+            run_stage(dname, out=out, profile=profile, max_scenes=max_scenes)
             continue
         d_existing = _load(out, REGISTRY[dname].artifact())
         d_keys = _translate_revise_keys(stage_name, dname, revise_keys, edited)
-        run_stage(dname, out=out, existing=d_existing, revise_keys=d_keys)
+        run_stage(dname, out=out, profile=profile,
+                 max_scenes=_effective_max_scenes(dname, max_scenes),
+                 existing=d_existing, revise_keys=d_keys,
+                 **_duration_kwargs(dname, out, target_duration))
 
     print(f"[reel] revision applied — {artifact_name}.json"
          + (f" and {len(downstream)} downstream stage(s)" if downstream else "") + " updated")
@@ -710,9 +788,25 @@ def _revise_loop(out) -> None:
     (see `_offer_revise`) — both just need to have already called
     `session.start(out, fresh=False)` before entering this loop, so it stays
     'running' across every round; it's only marked 'complete'/'paused' here
-    when you type 'quit'/'exit' or 'pause' (or Ctrl-C)."""
+    when you type 'quit'/'exit' or 'pause' (or Ctrl-C).
+
+    Restores the ORIGINAL run's attributes before any regeneration happens:
+    `_restore_direction` re-applies the genre/moodboard creative-direction
+    steering (a separate process invocation otherwise starts with none at
+    all), and `_load_run_params` recovers the `--profile`/`--max-scenes`/
+    `--target-duration` this `--out` was actually run with, threaded into
+    every `_revise_one` call below — without this, a revision silently
+    reverted to each stage's own bare defaults (e.g. dropping a `--profile
+    fast` override, or losing a `--target-duration` scene-count budget)
+    instead of continuing to honor what the operator originally chose."""
     from . import session
     from .stages import STAGES, names, _load
+
+    _restore_direction(out)
+    run_params = _load_run_params(out)
+    profile = run_params.get("profile")
+    max_scenes = run_params.get("max_scenes", 1)
+    target_duration = run_params.get("target_duration")
 
     try:
         while True:
@@ -739,7 +833,8 @@ def _revise_loop(out) -> None:
             if choice != "source" and choice not in names():
                 print(f"[reel] unknown stage {choice!r}")
                 continue
-            _revise_one(choice, out)
+            _revise_one(choice, out, profile=profile, max_scenes=max_scenes,
+                       target_duration=target_duration)
     except KeyboardInterrupt:
         session.finish(out, "paused")
         print("\n[reel] revision loop paused.")

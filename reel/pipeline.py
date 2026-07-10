@@ -1451,6 +1451,28 @@ def _gated(
         result = rerun_fn(decision.feedback, current_profile)
 
 
+def compose_direction(genre_spec: dict | None, moodboard_spec: dict | None) -> str | None:
+    """Compose the shared creative-direction string from genre + moodboard
+    guidance, honoring each's own config `steer` flag — the same composition
+    `run()`'s local `apply_direction()` uses at pipeline startup, extracted
+    to module level so `cli.py`'s `revise` flow can restore the SAME
+    steering a completed run used before regenerating any stage. `revise` is
+    a separate process invocation from the original `pipeline.run()` call,
+    so `llm.set_direction`'s process-wide directive starts unset there —
+    without this, every stage regenerated via `revise` would silently lose
+    genre/moodboard steering even though genre.json/moodboard.json are
+    sitting right there on disk from the original run."""
+    cfg = llm.config()
+    gen_steer = bool(cfg.get("genre", {}).get("steer", True))
+    mood_steer = bool(cfg.get("moodboard", {}).get("steer", True))
+    parts = []
+    if gen_steer and genre_spec:
+        parts.append(genre_agent.guidance(genre_spec))
+    if mood_steer and moodboard_spec:
+        parts.append(moodboard_guidance(moodboard_spec))
+    return "\n\n".join(p for p in parts if p) or None
+
+
 # ── main pipeline ─────────────────────────────────────────────────────────────
 
 def run(
@@ -1552,19 +1574,15 @@ def run(
     # into the steering direction so every creative stage composes toward one look.
     mood_cfg = llm.config().get("moodboard", {})
     mood_on = bool(mood_cfg.get("enabled", True))
-    mood_steer = bool(mood_cfg.get("steer", True))
     moodboard: dict = {}
     _GENRE_STAGES = _FID_STAGES | {"moodboard"}
 
     def apply_direction() -> None:
         """Compose the shared creative direction from genre + moodboard and steer
-        all subsequent creative generations with it (graders stay neutral)."""
-        parts = []
-        if gen_steer and genre_spec:
-            parts.append(genre_agent.guidance(genre_spec))
-        if mood_steer and moodboard:
-            parts.append(moodboard_guidance(moodboard))
-        llm.set_direction("\n\n".join(p for p in parts if p) or None)
+        all subsequent creative generations with it (graders stay neutral).
+        Delegates to the module-level `compose_direction` (see its docstring)
+        so `cli.py`'s `revise` flow can reuse the exact same composition."""
+        llm.set_direction(compose_direction(genre_spec, moodboard))
 
     def genre_report(name: str, result: dict) -> dict | None:
         """Score this stage's output against the chosen genre (open model, neutral).

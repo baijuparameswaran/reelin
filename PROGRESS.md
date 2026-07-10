@@ -186,6 +186,79 @@
   / final cut phase.
 
 ## Session log
+- 2026-07-10 (later 6) — **`revise` now inherits the original run's
+  attributes (profile, max_scenes, target_duration, genre/moodboard
+  steering) instead of silently reverting to bare defaults.** User asked
+  directly to "make sure the revise inherit all attributes from original
+  run." Investigated by reading `cli.py`'s `_revise_one`/`_revise_source`/
+  `_revise_loop` and every `stages.run_stage(...)` call site within them —
+  found FOUR distinct, real gaps, all stemming from the same root cause:
+  `revise` is a separate process invocation from the `pipeline.run()` that
+  produced the checkpoints it edits, so nothing about that original run's
+  configuration carries over automatically unless explicitly reloaded and
+  threaded through. (1) **Steering was completely absent**: `llm.
+  set_direction`'s process-wide directive starts unset in a fresh process —
+  `revise` never called it at all, so every regenerated stage during a
+  revision session ran with NO genre/moodboard creative direction, even
+  though genre.json/moodboard.json exist on disk from the original run.
+  This was the most consequential gap, silently undermining the whole
+  "genre and moodboard STEER every stage" architecture for any revised
+  content. (2) **`profile` was never passed** to any `run_stage(...)` call
+  in the revise flow, so a stage regenerated via `revise` always fell back
+  to its own config default tier rather than honoring e.g. a `--profile
+  fast` override the original run used. (3) **`max_scenes` wasn't threaded
+  through at all** — `run_stage`'s own default is `1` (intentional for
+  standalone single-stage testing, per an earlier session's design), so any
+  revise-triggered downstream regeneration would have silently re-capped
+  casting-image/video rendering back down to 1 scene, even after a
+  completed `--max-scenes all` run. (4) **`--target-duration`'s scene/shot-
+  count guidance had no pathway into `revise` at all** — `stages.py`'s
+  `_scenes`/`_cinematography` wrappers didn't even expose params for it.
+  Fixed all four: extracted `pipeline.compose_direction(genre_spec,
+  moodboard_spec)` from `run()`'s previously-inline `apply_direction()`
+  closure (a pure refactor, verified behavior-identical via a dedicated
+  test) so `cli.py` can reuse the exact same composition; new
+  `cli._restore_direction(out)`, called once at the top of `_revise_loop`
+  (covering both the standalone `revise` command and the post-run "revise
+  now?" offer, since both funnel through that one function), reloads
+  genre.json/moodboard.json and re-applies the steering before any stage
+  regenerates. Reused the EXISTING `cli._load_run_params(out)` (already
+  built for `--resume` inheritance in an earlier session) to recover
+  `profile`/`max_scenes`/`target_duration`, threaded through every
+  `run_stage(...)` call in `_revise_one` and `_revise_source`. `max_scenes`
+  needed one deliberate exception — new `cli._effective_max_scenes
+  (stage_name, max_scenes)` forces `screenplay` to always get `None`
+  (uncapped) regardless of the inherited value, since a uniform pass-through
+  would have reintroduced the exact cap the "screenplay always drafts
+  everything, only rendering stages are capped" policy (fixed in an earlier
+  session) deliberately removed — caught by directly re-reading that
+  policy's own PROGRESS.md entry before writing the fix, not from memory.
+  `target_duration` needed new plumbing: `stages.py`'s `_scenes`/
+  `_cinematography` wrappers gained `target`/`shots_guidance` params
+  (falsy-default, so every pre-existing call site — including a fresh
+  `pipeline.run()`, which computes and passes these itself — is
+  unaffected), fed by new `cli._duration_kwargs(stage_name, out,
+  target_duration)`, which reloads the CURRENT scene count from disk for
+  cinematography's guidance (since `scenes` may have just been regenerated
+  earlier in the same revision round, and the guidance needs the up-to-date
+  count, not the original run's). Added a new, separate test file (distinct
+  from `test_prompt_rules.py`, which is scoped to prompt text — this is
+  about CLI/orchestration attribute threading): `tests/
+  test_revise_inheritance.py`, 13 tests — `compose_direction`'s composition
+  logic in isolation, `_restore_direction` actually changing `llm.
+  direction()`'s process-wide state (and degrading gracefully when
+  genre.json/moodboard.json are absent), `_effective_max_scenes`'s
+  screenplay exception, `_duration_kwargs`'s per-stage guidance (including
+  the current-scene-count reload), and two end-to-end tests
+  (`_revise_one`/`_revise_source` driven via their existing `edited_override`/
+  `auto_confirm` testing hooks, with `stages.run_stage` mocked to a call
+  recorder) confirming the inherited profile/max_scenes genuinely reach
+  every downstream stage — including the screenplay exception holding even
+  when every OTHER stage correctly receives the real inherited value. Full
+  suite now 76 tests (was 63), still comfortably under a second, still zero
+  LLM/API calls. All passed on the first run after implementation — no bugs
+  found by the new tests themselves this time, unlike the prompt-rules
+  suite's own first draft earlier today.
 - 2026-07-10 (later 5) — **Fixed a real, reported bug: a JSON-schema
   EXAMPLE in casting.py's prompt leaked into actual model output.** User
   reported "Marcel's pocket watch" — the illustrative example casting.py's

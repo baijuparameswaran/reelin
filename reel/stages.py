@@ -72,10 +72,18 @@ def _moodboard(ctx, *, profile=None, feedback=None, max_scenes=1, **_):
     return design_moodboard(ctx["structure"], src.get("text", ""), ctx.get("genre"),
                             max_scenes=max_scenes, profile=profile, feedback=feedback)
 
-def _scenes(ctx, *, profile=None, feedback=None, existing=None, revise_keys=None, **_):
+def _scenes(ctx, *, profile=None, feedback=None, existing=None, revise_keys=None,
+           target=None, **_):
+    # `target` (from reel.duration_budget.suggest_scene_target, given the
+    # run's --target-duration) only overrides segment_scenes' own default
+    # scene-count guidance when the caller actually has one to give (e.g.
+    # cli.py's `revise`, restoring the original run's target) — None leaves
+    # segment_scenes' own default in place, unchanged from before this param
+    # existed.
+    kwargs = {"target": target} if target else {}
     return segment_scenes(ctx["source"], ctx["structure"], profile=profile, feedback=feedback,
                           existing=existing, revise_keys=revise_keys,
-                          characters=ctx.get("characters"))
+                          characters=ctx.get("characters"), **kwargs)
 
 def _casting(ctx, *, profile=None, feedback=None, existing=None, revise_keys=None, **_):
     return cast_characters(ctx["structure"], ctx["characters"], profile, feedback=feedback,
@@ -89,9 +97,11 @@ def _visuals(ctx, *, profile=None, feedback=None, existing=None, revise_keys=Non
     return design_visuals(ctx["structure"], ctx["scenes"], profile, feedback=feedback,
                           existing=existing, revise_keys=revise_keys)
 
-def _cinematography(ctx, *, profile=None, feedback=None, existing=None, revise_keys=None, **_):
+def _cinematography(ctx, *, profile=None, feedback=None, existing=None, revise_keys=None,
+                    shots_guidance="", **_):
     return plan_cinematography(ctx["structure"], ctx["scenes"], profile, feedback=feedback,
-                               existing=existing, revise_keys=revise_keys)
+                               existing=existing, revise_keys=revise_keys,
+                               shots_guidance=shots_guidance)
 
 def _screenplay(ctx, *, profile=None, feedback=None, max_scenes=1, existing=None, revise_keys=None, **_):
     return draft_screenplay(
@@ -257,7 +267,8 @@ def _save_artifact(out: Path, name: str, data) -> None:
 def run_stage(name: str, out: str | Path = "output", *, input_path: str | None = None,
               profile: str | None = None, feedback: str | None = None,
               max_scenes: int | None = 1, save: bool = True,
-              existing: dict | None = None, revise_keys: set | None = None) -> dict:
+              existing: dict | None = None, revise_keys: set | None = None,
+              target: str | None = None, shots_guidance: str = "") -> dict:
     """Invoke a single stage independently. Loads each required input from its
     checkpoint in `out` (ingesting the source on demand), runs the stage, and
     writes its artifact. Returns the stage result.
@@ -271,7 +282,15 @@ def run_stage(name: str, out: str | Path = "output", *, input_path: str | None =
     actually change; every other key comes back byte-identical. Both default
     to `None`, fully backward compatible with every existing call site —
     stages whose agent doesn't accept the two kwargs simply ignore them via
-    their `**_` catch-all."""
+    their `**_` catch-all.
+
+    `target`/`shots_guidance` (only consumed by the "scenes"/"cinematography"
+    stages respectively, ignored by every other stage's `**_` catch-all) let
+    a caller restore the SAME `--target-duration`-derived planning guidance
+    the original run used — `cli.py`'s `revise` command computes these from
+    `reel.duration_budget` given the inherited target before calling here;
+    both default to falsy, meaning "no override, use this stage's own
+    default", identical to every call site that predates these params."""
     if name not in REGISTRY:
         raise KeyError(f"unknown stage '{name}'. Known: {', '.join(names())}")
     stage = REGISTRY[name]
@@ -286,7 +305,8 @@ def run_stage(name: str, out: str | Path = "output", *, input_path: str | None =
         if data is not None:
             ctx[dep] = data
     result = stage.run(ctx, out=outp, profile=profile, feedback=feedback, max_scenes=max_scenes,
-                       existing=existing, revise_keys=revise_keys)
+                       existing=existing, revise_keys=revise_keys,
+                       target=target, shots_guidance=shots_guidance)
     if save and isinstance(result, dict):
         _save_artifact(outp, stage.artifact(), result)
         if name == "screenplay":
