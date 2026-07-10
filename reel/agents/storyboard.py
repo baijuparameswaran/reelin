@@ -94,7 +94,9 @@ narrative purpose, characters present, estimated screen duration (e.g. "1m 45s")
 
 2. visual_overview — color_palette for this scene, lighting_setup (rig or natural \
 light description), visual_filter (lens/grading style, e.g. "desaturated, cool blue \
-cast, soft grain"), mood (one line)
+cast, soft grain"), mood (one line), key_props (list of prop NAMES only, copied from \
+bundle.art.key_props — this is what actually reaches the render prompt, see MERGE \
+SOURCE below)
 
 3. audio_overview — score_cue (music/score description), ambient (ambient bed), \
 key_sounds (list of "moment: sound" strings)
@@ -168,6 +170,11 @@ SEPARATE field from dialogue; never drop it or substitute your own narration
 - panel.composition / image_prompt                        <- incorporate \
 bundle.art.visual_moments (beat-keyed visual specifics) and bundle.art.key_props \
 where they apply to this panel's beat, rather than inventing unrelated detail
+- visual_overview.key_props                               <- prop NAMES only \
+(drop the .function commentary) from bundle.art.key_props, copied as a plain list — \
+this is what actually reaches the Veo render prompt for every panel in the scene, \
+not just the panel where the prop is most relevant, so list every key prop that \
+belongs anywhere in this scene
 - the LAST panel's transition                             <- bundle.camera.transition_to_next \
 when present, used as-is rather than an invented scene-ending transition
 
@@ -191,7 +198,8 @@ if present (use it verbatim — do not rephrase), otherwise from the slugline",
         "color_palette": "describe the dominant colors and contrast for this scene",
         "lighting_setup": "describe the light source(s) and quality",
         "visual_filter": "lens/grading style from the scene bundle's art.visual_filter",
-        "mood": "one line capturing the emotional atmosphere"
+        "mood": "one line capturing the emotional atmosphere",
+        "key_props": ["prop name from bundle.art.key_props, copied verbatim", "..."]
       }},
       "audio_overview": {{
         "score_cue": "describe the music/score for this scene",
@@ -703,6 +711,12 @@ def _build_scene_board(bundle: dict) -> dict:
         "lighting_setup": art.get("lighting", ""),
         "visual_filter": art.get("visual_filter", ""),
         "mood": art.get("emotional_function", ""),
+        # Copied straight from bundle.art.key_props (visuals.json), not
+        # invented here — this is what actually lets a prop with real
+        # dramatic weight reach the Veo render prompt's Context section
+        # (pipeline._panel_context); previously key_props existed only in
+        # visuals.json and never reached a rendered frame at all.
+        "key_props": [p.get("prop", "") for p in art.get("key_props", []) if p.get("prop")],
     }
     audio_overview = {
         "score_cue": audio.get("score_direction", ""),

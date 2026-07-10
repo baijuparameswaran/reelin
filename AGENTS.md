@@ -92,7 +92,11 @@ provider-policy bullet.
   `storyboard.py` ground their per-scene prompts in the precise passage
   rather than an approximate chunk. `_reconcile_character_names` is a
   deterministic safety net on top of the prompt instruction to reuse
-  `characters.json`'s settled names.
+  `characters.json`'s settled names. Every scene also carries `props`
+  (rule 10) — notable physical objects the source text explicitly mentions
+  for that scene — the earliest, source-grounded point a prop enters the
+  pipeline; see `casting.py` and `visuals.py` below for how it's used
+  downstream.
 - **`casting.py`** — locks each character's on-screen visual form: an
   `actor` block (the performer's own intrinsic look) plus a `character`
   block (that actor aged/costumed into the role). Also casts every distinct
@@ -101,6 +105,24 @@ provider-policy bullet.
   `character.visual_prompt` is the identity seed image generation renders
   and Veo anchors to — its ISOLATION rule (no scene/prop/location baked in)
   is the single most load-bearing rule in this codebase's prompts.
+  `_location_entries` aggregates every scene's `props` per location into
+  `recurring_props` — a prop mentioned in more than one scene at that place
+  (or the only scene, if it never recurs) is a plausible FIXED fixture
+  (a bar's brass mirror), unlike a single-scene-only prop at a
+  multi-scene location, which is presumed transient/action-specific and
+  deliberately excluded so it doesn't get wrongly baked into a reference
+  image reused by every OTHER scene at that place. The PROMPT still tells
+  the model to treat `recurring_props` as candidates, not a mandate — only
+  genuinely architectural items should make it into the rendered
+  `visual_prompt`. Also casts recurring PROPS in their own right
+  (`kind: "prop"`, `_prop_entries` — any prop appearing in 2+ scenes
+  ANYWHERE in the story, not scoped to one location, since a portable prop
+  like a character's watch travels): a VERY DESCRIPTIVE, isolation-strict
+  `visual_prompt` (exact material/color/size/condition/marks) is the
+  text-only substitute for Veo's lack of cross-generation memory — without
+  a locked description, the same named prop can render as a visibly
+  different object every time it recurs. Gets a rendered reference image
+  too, for free, via the already kind-agnostic `pipeline._render_casting_images`.
 - **`soundscape.py` / `visuals.py` / `cinematography.py`** — the three
   per-scene "design" agents (score/ambient, color/lighting/props, camera
   coverage respectively), each processing every scene in one call for
@@ -108,7 +130,15 @@ provider-policy bullet.
   rule (scenes sharing a `location` share its base look/sound; only
   mood/specific events vary) — `cinematography.py`'s version has an explicit
   TIE-BREAKER against its own motif-development rule (see the audit entry
-  in PROGRESS.md).
+  in PROGRESS.md). `visuals.py`'s `key_props` (props with genuine dramatic/
+  thematic weight, each with a `function`) is now grounded by `scenes.py`'s
+  plain `props` inventory when present, rather than invented from nothing —
+  and, as of 2026-07-10, actually reaches the rendered video: `storyboard.py`
+  copies prop NAMES into `visual_overview.key_props`, which
+  `pipeline._panel_context` resolves against `casting.py`'s cast prop
+  entries (falling back to the bare name for an uncast, single-scene prop)
+  and folds into every panel's Veo Context section. Before that wiring, a
+  prop identified here never left `visuals.json` at all.
 - **`screenplay.py`** — drafts Fountain-formatted shots + fully attributed
   dialogue, one LLM call **per scene** (not all-scenes-in-one-call like the
   three above), favoring voice-over over on-screen dialogue economy. Takes

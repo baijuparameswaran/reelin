@@ -634,16 +634,49 @@ def _panel_subject(panel: dict, casting_lookup: dict[str, dict]) -> str:
     return " and ".join(subjects)
 
 
-def _panel_context(panel: dict, location_desc: str) -> str:
+def _panel_context(panel: dict, location_desc: str, key_props: list | None = None,
+                   casting_lookup: dict[str, dict] | None = None) -> str:
     """[Context] — environment and background elements: the scene's locked
-    location (from casting.json's location entry) plus this panel's own
-    composition note (who/what is where in frame, depth layers)."""
+    location (from casting.json's location entry), this panel's own
+    composition note (who/what is where in frame, depth layers), and the
+    scene's key props (visuals.json's key_props, carried here via
+    storyboard.py's `visual_overview.key_props` — see that module's
+    docstring). Props are part of the environment a Veo prompt has to assert
+    explicitly, since nothing else in the five-part formula mentions them;
+    without this, a prop identified as dramatically significant by
+    visuals.py never actually reached a rendered frame at all. Applied
+    scene-wide (every panel in the scene gets the same prop list) rather
+    than attributed to one specific panel, since no upstream artifact
+    currently says which panel a given prop appears in.
+
+    Each prop name is resolved against `casting_lookup` (same dict
+    `_panel_subject` already uses for characters) for a locked, very
+    descriptive `visual_prompt` when one exists — a prop cast by
+    `casting.py` (kind: "prop", recurring across 2+ scenes — see
+    `casting._prop_entries`). This is what makes a recurring prop render as
+    the SAME object across separately-generated clips, the same consistency
+    mechanism casting already gives characters/locations. A prop mentioned
+    only once in the story was never cast, so it falls back to its bare
+    name here — no locked description exists for it."""
     bits = []
     if location_desc:
         bits.append(location_desc.rstrip("."))
     composition = (panel.get("composition") or "").strip()
     if composition:
         bits.append(composition.rstrip("."))
+    casting_lookup = casting_lookup or {}
+    prop_descs = []
+    for p in (key_props or []):
+        if not isinstance(p, str) or not p.strip():
+            continue
+        name = p.strip()
+        entry = casting_lookup.get(name)
+        desc = ""
+        if entry and entry.get("kind") == "prop":
+            desc = (entry.get("character", entry).get("visual_prompt") or "").strip()
+        prop_descs.append(desc.rstrip(".") if desc else name)
+    if prop_descs:
+        bits.append("visible in the scene: " + "; ".join(prop_descs))
     return "; ".join(bits)
 
 
@@ -673,7 +706,8 @@ def _five_part_veo_prompt(panel: dict, *, casting_lookup: dict[str, dict],
         "cinematography": _panel_cinematography(panel),
         "subject": _panel_subject(panel, casting_lookup),
         "action": (panel.get("action") or panel.get("moment") or "").strip(),
-        "context": _panel_context(panel, location_desc),
+        "context": _panel_context(panel, location_desc, (visual_overview or {}).get("key_props"),
+                                  casting_lookup),
         "style_ambiance": _panel_style_ambiance(visual_overview),
     }
     return " ".join(f"{v.rstrip('.')}." for v in parts.values() if v.strip())
@@ -1745,7 +1779,10 @@ def run(
                 active_names.add(nm)
             if sc.get("location"):
                 active_names.add(sc["location"])
-        _log(f"      rendering character/location portraits for {len(active_names)} "
+            for p in (sc.get("props") or []):
+                if p:
+                    active_names.add(p.strip())
+        _log(f"      rendering character/location/prop portraits for {len(active_names)} "
              f"name(s) in scene(s) 1..{_scenes_label(max_scenes)} …")
         if _render_casting_images(casting, out, active_names=active_names or None):
             save("casting", casting)

@@ -43,6 +43,20 @@ against — `ingest.scene_source_context` prefers it over the older, coarser
 chunk-based join (which only approximates scene boundaries at ~3000-char
 chunk granularity and can pull in neighboring scenes' text) whenever it's
 present.
+
+Each scene also carries `props` — notable physical objects the source text
+explicitly mentions for that scene (rule 10), source-grounded the same way
+`characters` is. This is the earliest, most-authoritative point in the
+pipeline a prop can be identified, and it seeds two downstream uses: (1)
+`casting.py`'s `_location_entries` aggregates every scene's `props` per
+`location` so a location's rendered reference can incorporate genuinely
+fixed/recurring decor (not every scene's props — see that function's
+docstring for the fixed-vs-transient distinction); (2) `visuals.py`'s
+per-scene art design gets them as grounding context for its own `key_props`
+(which, unlike this field, is a creative judgment of DRAMATIC weight, not a
+plain inventory — see `visuals.py`'s docstring). Without a source-grounded
+starting point, both of those downstream steps had no better option than
+inventing props from scratch, which had no fidelity anchor at all.
 """
 from __future__ import annotations
 
@@ -106,6 +120,15 @@ STRICT RULES:
    does not license dropping or compressing away real events (rules 1-2 above
    still apply in full) — it only means telling everything that happens in one
    place at one time as a single scene instead of several redundant ones.
+10. `props` lists notable PHYSICAL OBJECTS explicitly present or mentioned in
+    the source text for this scene (e.g. "a brass diving bell", "Marcel's
+    pocket watch", "an unopened letter") — grounded the same way `characters`
+    is: only objects the source text actually mentions, never invented set
+    dressing. Empty list if the source names nothing worth rendering. A prop
+    that's a fixed, recurring part of the location itself (always there,
+    regardless of scene) vs. one a character carries or that's specific to
+    this scene's action are BOTH valid — don't filter either out; a later
+    stage decides which is which.
 
 Respond with JSON in exactly this shape (no extra keys, no commentary):
 {{
@@ -117,7 +140,8 @@ Respond with JSON in exactly this shape (no extra keys, no commentary):
       "source_line": "short verbatim phrase from the source text that this scene covers",
       "summary": "one or two sentences of what actually happens in the source",
       "characters": ["EXACT NAME as in source, or the matching CANONICAL name below", "..."],
-      "purpose": "why this scene exists dramatically"
+      "purpose": "why this scene exists dramatically",
+      "props": ["notable physical object explicitly present or mentioned in the source for this scene", "..."]
     }}
   ]
 }}
@@ -143,6 +167,8 @@ just read, not just what you remember from the rules list):
 - No two adjacent scenes share the same `location` AND continuous time without
   a real reason they're split (MINIMIZE SCENE COUNT, rule 9) — if you find one,
   merge them before responding.
+- Every entry in `props` is an object the source material above actually names
+  — not one you inferred would look good on screen.
 """
 
 

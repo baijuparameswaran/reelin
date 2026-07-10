@@ -179,6 +179,113 @@
   / final cut phase.
 
 ## Session log
+- 2026-07-10 (later 2) — **Recurring props now get a locked, very
+  descriptive `visual_prompt` — the same identity-consistency treatment
+  characters and locations already have — so the same object renders
+  consistently across every scene it appears in, in both the casting image
+  render and the actual Veo video prompt.** Direct follow-up to the prop
+  wiring in the entry just below: that fix got a prop's plain NAME into the
+  Veo Context section, but a bare name repeated across separately-generated
+  clips still isn't enough for visual consistency — Veo has no cross-
+  generation memory, so "a brass mirror" mentioned in three different scene
+  renders could plausibly come out as three different-looking mirrors,
+  exactly the failure mode already solved for characters/locations via a
+  locked casting `visual_prompt`. Extended `casting.py` with the same
+  mechanism for props: new `_prop_entries(scenes)` finds every prop name
+  (exact-match — same known limitation as `_map_chunks`'s source_line
+  matching, not solved here) appearing in 2+ DISTINCT scenes ANYWHERE in
+  the story (deliberately not scoped to one location, unlike
+  `_location_entries`'s existing `recurring_props` — a portable prop like a
+  character's watch travels across locations, so location-scoping would
+  miss it entirely); a single-scene prop isn't cast, since there's no
+  repetition to keep consistent and casting every one-off object would be
+  excessive cost/clutter. New `kind: "prop"` casting entries (no `actor`
+  layer, same as locations) with a `character.visual_prompt` PROMPT rule
+  demanding real prop-master specificity — exact material, color/finish,
+  size, condition, distinguishing marks/engravings — under the same strict
+  ISOLATION discipline as a character portrait (no scene/hands/other-
+  objects baked in), extended the ISOLATION rule's own stated scope to
+  cover props explicitly (previously scoped to "person/animal/bird/
+  creature/group entries only"). Because `pipeline._render_casting_images`
+  was already fully kind-agnostic (confirmed by reading it directly before
+  writing any code — it just reads `character.visual_prompt` off any
+  entry), a cast prop gets an actual rendered reference PNG for free, with
+  zero changes to that function; the pipeline's active-names computation
+  (which caps portrait rendering to `--max-scenes`) gained prop names
+  alongside characters/locations so capped runs don't skip them. The
+  deliberate scope boundary: a prop's rendered PNG is NOT wired into Veo's
+  `reference_images`/seed-image mechanism the way a character's portrait
+  is — only the prop's TEXT description reaches the render prompt, per
+  what was actually asked (a textual definition "embedded in video or
+  image prompts"), not a new identity-seeding channel. On the render side:
+  `pipeline._panel_context` (already carrying the prop NAME from the prior
+  fix) now resolves each name against `casting_lookup` — the exact same
+  dict `_panel_subject` already uses for characters — swapping in the
+  prop's locked, richly descriptive `visual_prompt` when a cast entry
+  exists (kind == "prop"), falling back to the bare name for an uncast
+  single-scene prop. Verified via direct unit tests: `_prop_entries`
+  correctly found only the one prop recurring across two DIFFERENT
+  locations (proving the deliberately-global, not-location-scoped
+  aggregation works) while ignoring a single-scene prop entirely; a full
+  stubbed `cast_characters()` call confirmed the real prompt actually
+  contains "PROPS INPUT" with only the qualifying prop, and the parsed
+  result carries the prop's cast entry through; `_panel_context` correctly
+  swaps in the rich description for a cast prop, falls back to the bare
+  name for an uncast one, and degrades gracefully (bare name, no crash) for
+  a cast-but-visual_prompt-missing edge case; a full `_five_part_veo_prompt`
+  assembly confirmed the rich description — not just the name — lands in
+  the final Veo prompt string.
+- 2026-07-10 (later) — **Added the concept of a scene-level `prop`, and fixed
+  a real, previously-invisible gap: `visuals.py`'s `key_props` never actually
+  reached a rendered video frame.** User asked for props to be added at the
+  scene level, with the prop threaded into the location "in some form" so it
+  gets used during rendering. Traced the existing prop-adjacent machinery
+  first: `visuals.py` already had a `key_props` field (prop + dramatic
+  `function`), but following it all the way to the real Veo render path
+  (`pipeline._five_part_veo_prompt` → `_panel_context`) showed it was NEVER
+  read there — `_panel_context` only ever built Context from the location's
+  cast `visual_prompt` plus the panel's `composition` note; `key_props` (and
+  `visual_moments`) were only ever referenced by storyboard's rarely-used
+  LLM-feedback path's free-text `image_prompt`, not the structured render
+  path every real render actually takes. So a prop visuals.py flagged as
+  dramatically significant had, in practice, zero effect on any rendered
+  clip. Fixed with three coordinated changes, in pipeline order: (1)
+  `scenes.py` gained a new source-grounded `props` field (STRICT RULE 10,
+  parallel to `characters`/`location`) — the earliest, most-authoritative
+  point a prop can be identified, grounded in the actual source text rather
+  than invented later; (2) `casting.py`'s `_location_entries` aggregates
+  every scene's `props` per `location` into `recurring_props` — a prop
+  appearing in MORE THAN ONE scene sharing that location (or the location's
+  only scene, if it never recurs) is a plausible fixed fixture, deliberately
+  excluding a single-scene-only prop at a multi-scene location, since baking
+  a transient/action prop into a location's reused reference image would
+  wrongly force it into every OTHER scene there too — the PROMPT still tells
+  the model to treat these as candidates, keeping only genuinely
+  architectural ones; (3) `visuals.py`'s scene list now includes each
+  scene's `props` as grounding context for its own `key_props` judgment
+  (still a creative "which props carry real dramatic weight" call, just no
+  longer invented from nothing). The actual render-path fix:
+  `storyboard.py`'s `_build_scene_board` (deterministic path) now copies
+  prop NAMES from `bundle.art.key_props` into a new
+  `visual_overview.key_props` field (also added to the PROMPT schema +
+  MERGE SOURCE block for the LLM-feedback path); `pipeline._panel_context`
+  gained a `key_props` param and folds them into the Context section
+  ("visible in the scene: ..."), applied scene-wide (every panel in the
+  scene gets the same list) since no artifact attributes a prop to one
+  specific panel. Because `visual_overview` already flowed unchanged from
+  `_render_scene_frames` down to `_five_part_veo_prompt`, only
+  `_panel_context` and its one caller needed the actual code change — no
+  signature changes needed anywhere else in the render chain. Verified via
+  direct unit tests at every layer: `_location_entries`'s recurring-vs-
+  transient heuristic (a prop in both of a 2-scene location's scenes
+  survives, a prop in only one of them doesn't; a 1-scene location's props
+  all survive since there's nothing to compare against), `_panel_context`'s
+  junk-filtering (empty/None entries dropped) and correct Context-string
+  assembly, `_build_scene_board`'s key_props copy (drops the `function`
+  commentary, filters empty prop names), a full `_five_part_veo_prompt`
+  assembly confirming a prop genuinely appears in the final assembled Veo
+  prompt string, and a stubbed `segment_scenes()` round-trip confirming
+  `props` survives alongside the existing `source_excerpt` machinery.
 - 2026-07-10 — **Scene segmentation now actively minimizes scene count (fewer
   scenes → fewer rendered video clips downstream), and every scene captures
   its own precise source-text excerpt + word-count metadata.** User framed

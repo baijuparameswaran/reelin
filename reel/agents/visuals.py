@@ -14,6 +14,15 @@ Each scene gets:
   emotional_function — what the visual design communicates to the audience
 
 Genre and tone from the structure agent seed the overall visual palette.
+
+`key_props` is grounded by scenes.py's own `props` field (a plain,
+source-mentioned inventory, rule 10 there) when present in the scene list —
+this agent's job is still the creative one (which props actually carry
+dramatic/thematic weight, and why), but it no longer has to invent candidate
+objects from nothing. `key_props` reaches the actual Veo render prompt via
+`storyboard.py`'s `visual_overview.key_props` and `pipeline._panel_context`
+(see those modules) — see the 2026-07-10 PROGRESS.md session log entry for
+why that wiring was needed (key_props previously never left visuals.json).
 """
 from __future__ import annotations
 
@@ -74,7 +83,11 @@ the next scene",
 
 Rules:
 - key_props should only list props with genuine visual or thematic weight, not \
-set dressing
+set dressing. A scene's `props` field (if present below) is a plain, \
+source-grounded inventory of objects actually mentioned in the story — a \
+starting point, not the answer: promote the ones with real dramatic or \
+thematic weight into `key_props` with a `function`; leave out mere set \
+dressing from that list even if it's in `props`
 - visual_moments should capture beats where the image itself carries meaning
 - visual_filter may be 'none' if the scene calls for flat naturalism
 - transition_to_next should be empty string for the final scene
@@ -114,7 +127,7 @@ def design_visuals(
     scene_list = json.dumps(
         [
             {k: s[k] for k in ("number", "slugline", "location", "summary", "purpose",
-                                "source_line", "chunk_indices")
+                                "source_line", "chunk_indices", "props")
              if k in s}
             for s in scenes.get("scenes", [])
         ],

@@ -40,6 +40,25 @@ and any one scene's specific mood/weather/time-of-day, since it's a background
 reference reused across every scene set there). Requires `scenes` be passed to
 `cast_characters` — the pipeline runs `casting` after `scenes` for this reason
 (previously they ran concurrently).
+
+Also casts recurring PROPS (kind: "prop") — a physical object from scenes.py's
+`props` field (its rule 10) that appears in 2+ distinct scenes anywhere in the
+story (`_prop_entries`; a single-scene prop isn't cast — no repetition to keep
+consistent). Same rationale as locations: Veo has no memory across separately
+generated clips, so a named prop with no locked identity can render as a
+visibly different object every time it appears — a very descriptive,
+consistent `character.visual_prompt` (material, color/finish, size, condition,
+distinguishing marks), reused verbatim, is the text-only substitute for that
+missing cross-generation memory. Like a location, a prop carries no `actor`
+layer, and — unlike a location — a prop's own reference gets an actual
+rendered image too via the same kind-agnostic `pipeline._render_casting_images`
+(no code change needed there), which then feeds identically into every panel's
+Veo Context section via `pipeline._panel_context`'s casting_lookup resolution.
+Note the deliberate scope boundary: a cast prop's rendered PNG is NOT wired
+into Veo's `reference_images`/seed-image mechanism the way a character's
+portrait is (that mechanism is reserved, per the multi-reference-image
+investigation noted elsewhere in this project, for the in-frame character
+identity anchor) — only the prop's TEXT description reaches the render prompt.
 """
 from __future__ import annotations
 
@@ -126,6 +145,21 @@ a background/set reference reused across every scene set in this place, so it \
 must show the place plainly without any scene's specific mood, weather, or \
 population baked in."
       }}
+    }},
+    {{
+      "name": "Marcel's pocket watch (example — PROP entries only, see PROPS rule)",
+      "kind": "prop",
+      "character": {{
+        "visual_prompt": "a VERY DESCRIPTIVE text-to-image prompt naming the \
+object's exact material, color/finish, size/scale, condition or wear, and any \
+distinguishing mark or engraving — specific enough that this exact object reads \
+as the SAME object every time it's mentioned again, ending with the fixed clause \
+'plain neutral background, no hands, no scene, no other objects, even studio \
+lighting'. This is a bare identity reference reused verbatim across every scene \
+the prop appears in, so anything scene-shaped baked in here (who's holding it, \
+where it is, what's happening) would leak into and bias every one of those \
+otherwise-unrelated scenes."
+      }}
     }}
   ]
 }}
@@ -136,14 +170,35 @@ they carry no `actor` block at all (omit `actor` entirely for these), just the
 portrait, a location reference SHOULD show the place's own defining
 architecture/decor — that's the point — but must still exclude people, action,
 and any single scene's specific weather/mood/time-of-day, since it is reused
-as a background plate for every scene set there.
+as a background plate for every scene set there. If a LOCATIONS INPUT entry
+below has a `recurring_props` list, treat it as CANDIDATES, not a mandate:
+weave in only the ones that read as a FIXED, permanent part of the space
+itself (a mounted trophy, a built-in bar, a standing lamp) — leave out
+anything that sounds like it's tied to one scene's specific action or is
+carried/held by a character (that stays scene-specific, handled elsewhere,
+not baked into this reused reference).
+
+PROPS: entries with "kind": "prop" (see PROPS INPUT below, if provided) are
+individual objects, not people or places — they carry no `actor` block at all
+(omit `actor` entirely), just the `character.visual_prompt` shown in the
+example above. This is the SAME isolation discipline as a character portrait
+(strict, see the ISOLATION rule below — it applies to props too, not just
+person/animal/bird/creature/group entries) but the payoff is different: the
+description must be VERY DESCRIPTIVE and SPECIFIC — exact material, color,
+size, condition, engravings or wear marks — precise enough that the object
+renders identically every time it recurs across separate scenes and separate
+video-generation calls, which have no memory of each other. A vague
+description ("an old watch") defeats the entire purpose of casting it; be as
+concrete as a prop master's own spec sheet.
 
 Rules:
 - Exactly one casting entry per input character PLUS exactly one entry per
-  distinct entry in LOCATIONS INPUT below (if provided) — names and kinds
+  distinct entry in LOCATIONS INPUT below (if provided) PLUS exactly one entry
+  per distinct entry in PROPS INPUT below (if provided) — names and kinds
   matching exactly. This includes every animal, bird, and creature, each cast
-  individually, and every distinct location, each cast once regardless of how
-  many scenes share it.
+  individually, every distinct location, each cast once regardless of how
+  many scenes share it, and every distinct recurring prop, each cast once
+  regardless of how many scenes it appears in.
 - For a "group" input, cast it as one entry describing the ensemble and a
   representative member (do not invent individuals the breakdown didn't name).
 - The actor's `features` carry the actor (face/build), NOT the role — keep age,
@@ -161,16 +216,20 @@ Rules:
   their costume/mannerism. It differs from `visual_prompt` only in being a
   descriptive field rather than an image-generation prompt; the ISOLATION
   rule below applies equally to both.
-- ISOLATION (strict, person/animal/bird/creature/group entries only —
+- ISOLATION (strict, person/animal/bird/creature/group AND prop entries —
   LOCATIONS invert this, see the LOCATIONS rule above): `character.visual_prompt`
   (like `actor.visual_prompt`) describes ONLY the person/creature and their
-  costume — end it with the fixed backdrop clause given above, verbatim. Never
-  mention a scene, location, prop, other character, time of day, or mood
-  lighting — not even the character's own signature location from the story (a
-  bar, a boat, a workshop). This image seeds video identity for every scene the
-  character appears in, so anything scene-shaped baked in here would leak into
-  and bias every one of those otherwise-unrelated scenes. If you catch yourself
-  naming a place or an object that isn't worn on the character's body, cut it.
+  costume — or, for a prop, ONLY the object itself — end it with the fixed
+  backdrop clause given above (its own version for props, see the PROPS
+  example), verbatim. Never mention a scene, location, another prop, a
+  character, time of day, or mood lighting — not even the character's own
+  signature location from the story (a bar, a boat, a workshop), and for a
+  prop, not who holds it or where it normally sits. This image seeds video
+  identity for every scene the character (or prop) appears in, so anything
+  scene-shaped baked in here would leak into and bias every one of those
+  otherwise-unrelated scenes. If you catch yourself naming a place or another
+  object that isn't worn on the character's body (or, for a prop, isn't the
+  prop itself), cut it.
 - genre and tone should color the casting itself (silhouette, costume era, bearing)
   — gritty drama vs. heightened fantasy — never the backdrop/lighting of the render.
 - STORY FIDELITY: Do NOT add physical attributes (face shape, eye colour, hair
@@ -188,20 +247,24 @@ Rules:
 
 CHARACTER BREAKDOWN:
 {characters}
-{locations_block}
+{locations_block}{props_block}
 Before you respond, re-check against the breakdown above (long input pushes
 early rules out of recent context — re-verify against what you just read, not
 just what you remember from the rules list):
-- ISOLATION: every person/animal/bird/creature/group `character.visual_prompt`
-  (and `physical_form`) names ONLY the body and costume, ends with the fixed
-  backdrop clause verbatim, and contains no scene/location/prop/other-character/
-  lighting/time-of-day word — not even the character's own signature location.
+- ISOLATION: every person/animal/bird/creature/group/prop `character.visual_prompt`
+  (and `physical_form`) names ONLY the body/object and costume, ends with the fixed
+  backdrop clause verbatim, and contains no scene/location/other-prop/other-character/
+  lighting/time-of-day word — not even the character's own signature location, and
+  for a prop, not who holds it or where it normally sits.
 - STORY FIDELITY: no physical attribute (face shape, eye colour, hair texture,
   body proportions, skin tone) beyond what the breakdown above actually states
   or clearly implies.
 - GENDER: pronouns/gender-marked nouns match the breakdown above exactly, held
   consistent across `actor.features`, `actor.visual_prompt`, `physical_form`,
   and `character.visual_prompt` — never defaulted or guessed.
+- PROPS: every prop's `visual_prompt` is specific enough (material, color, size,
+  condition, marks) to render as the SAME object every time it recurs — not a
+  generic description.
 """
 
 
@@ -210,7 +273,19 @@ def _location_entries(scenes: dict) -> list[dict]:
     of how many scenes share it. No LLM call — pure dedup, grounded by
     aggregating the sluglines/summaries of every scene set there so the casting
     call has something concrete to work from (scenes.py already ensures the
-    same real place always uses the identical `location` string)."""
+    same real place always uses the identical `location` string).
+
+    Also aggregates every scene's `props` (scenes.py rule 10 — source-grounded
+    physical objects) into a `recurring_props` list: an object that shows up
+    in MORE THAN ONE scene set at this location is plausibly a fixed part of
+    the place itself (a bar's brass mirror, a lighthouse's lamp) rather than
+    something tied to one scene's specific action — a single-scene prop (a
+    letter someone is holding) is deliberately excluded here, since baking a
+    transient/action prop into the location's own reused reference image
+    would wrongly force it into every OTHER scene at that place too. This is
+    a heuristic (recurrence across scenes), not certainty — the PROMPT below
+    still tells the model to only keep genuinely fixed/architectural items
+    from this list, not just echo it wholesale."""
     by_name: dict[str, list[dict]] = {}
     for sc in scenes.get("scenes", []):
         loc = (sc.get("location") or "").strip()
@@ -222,13 +297,49 @@ def _location_entries(scenes: dict) -> list[dict]:
     for name, scs in by_name.items():
         sluglines = sorted({s.get("slugline", "") for s in scs if s.get("slugline")})
         summaries = " ".join(s.get("summary", "") for s in scs if s.get("summary"))
-        entries.append({
+        prop_counts: dict[str, int] = {}
+        for sc in scs:
+            for p in sc.get("props") or []:
+                p = (p or "").strip()
+                if p:
+                    prop_counts[p] = prop_counts.get(p, 0) + 1
+        recurring = sorted((p for p, n in prop_counts.items() if n > 1 or len(scs) == 1),
+                           key=lambda p: -prop_counts[p])
+        entry = {
             "name": name,
             "kind": "location",
             "appearance": "; ".join(sluglines),
             "description": summaries[:400],
-        })
+        }
+        if recurring:
+            entry["recurring_props"] = recurring
+        entries.append(entry)
     return entries
+
+
+def _prop_entries(scenes: dict) -> list[dict]:
+    """Distinct props worth casting their own locked identity: a prop name
+    (exact string match — scenes.py rule 10 asks the model to reuse the same
+    string for the same recurring object, the same consistency treatment
+    `location` already gets in rule 8; a near-miss like "the watch" vs
+    "Marcel's pocket watch" isn't caught here, a known limitation shared with
+    `_map_chunks`'s identical source_line-matching approach) that appears in
+    2 OR MORE distinct scenes ANYWHERE in the story — not scoped to one
+    location, since a portable prop (a character's watch, a letter) can
+    travel across locations the way a location-fixed prop (a bar's mirror)
+    can't. A prop mentioned in only one scene isn't cast: no repetition
+    means no consistency problem to solve, and casting every single-scene
+    object would be excessive both in render cost and screen clutter. No LLM
+    call — pure aggregation over scenes.json, the same shape as
+    `_location_entries`."""
+    counts: dict[str, int] = {}
+    for sc in scenes.get("scenes", []):
+        for p in sc.get("props") or []:
+            p = (p or "").strip()
+            if p:
+                counts[p] = counts.get(p, 0) + 1
+    return [{"name": p, "kind": "prop", "scene_count": n}
+            for p, n in sorted(counts.items(), key=lambda kv: -kv[1]) if n > 1]
 
 
 def cast_characters(
@@ -268,6 +379,11 @@ def cast_characters(
         f"\nLOCATIONS INPUT — one casting entry per distinct location (kind: \"location\"):\n"
         f"{json.dumps(locations, ensure_ascii=False, indent=2)}\n"
     ) if locations else ""
+    props = _prop_entries(scenes) if scenes else []
+    props_block = (
+        f"\nPROPS INPUT — one casting entry per distinct recurring prop (kind: \"prop\"):\n"
+        f"{json.dumps(props, ensure_ascii=False, indent=2)}\n"
+    ) if props else ""
     prompt = llm.with_feedback(
         PROMPT.format(
             logline=structure.get("logline", ""),
@@ -275,6 +391,7 @@ def cast_characters(
             tone=structure.get("tone", ""),
             characters=cast_input,
             locations_block=locations_block,
+            props_block=props_block,
         ),
         feedback,
     )
