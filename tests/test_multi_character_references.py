@@ -282,6 +282,81 @@ class TestGenerateVideoWithReferencesSdkShape(unittest.TestCase):
             self.assertEqual(len(config.reference_images), 3)
 
 
+class TestCharSetChanged(unittest.TestCase):
+    def test_scene_start_is_a_boundary(self):
+        self.assertTrue(pipeline._char_set_changed({"characters_in_frame": ["Alice"]}, None))
+
+    def test_same_cast_is_not_a_boundary(self):
+        key = frozenset({"Alice", "Bob"})
+        fr = {"characters_in_frame": ["Bob", "Alice"]}   # order-independent
+        self.assertFalse(pipeline._char_set_changed(fr, key))
+
+    def test_different_cast_is_a_boundary(self):
+        key = frozenset({"Alice"})
+        fr = {"characters_in_frame": ["Alice", "Bob"]}
+        self.assertTrue(pipeline._char_set_changed(fr, key))
+
+    def test_no_characters_listed_is_never_a_boundary(self):
+        key = frozenset({"Alice"})
+        self.assertFalse(pipeline._char_set_changed({"characters_in_frame": []}, key))
+        self.assertFalse(pipeline._char_set_changed({}, key))
+
+
+class TestRenderSceneFramesOnlyExtendsWhenCastUnchanged(unittest.TestCase):
+    """End-to-end (mocked i2v): `continuity_mode: extend` must only be
+    attempted (via a non-None `prev_clip` reaching `i2v.generate_clip`) when
+    a panel's in-frame characters match the immediately preceding panel's —
+    a cast change should null it out, falling back to seed/reference-image
+    grounding instead, even though a previous clip genuinely exists."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.out = Path(self.tmp.name)
+        _touch(self.out / "casting" / "alice.png")
+        _touch(self.out / "casting" / "bob.png")
+        self.storyboard = {"storyboard": [{
+            "scene_number": 1, "header": {"location": ""}, "audio_overview": {},
+            "visual_overview": {},
+            "panels": [
+                {"panel": 1, "characters_in_frame": ["Alice"], "action": "a"},
+                {"panel": 2, "characters_in_frame": ["Alice"], "action": "b"},
+                {"panel": 3, "characters_in_frame": ["Alice", "Bob"], "action": "c"},
+            ],
+        }]}
+        self.casting = {"casting": [
+            {"name": "Alice", "character": {"image_path": "casting/alice.png"}},
+            {"name": "Bob", "character": {"image_path": "casting/bob.png"}},
+        ]}
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_unchanged_cast_extends_changed_cast_does_not(self):
+        prev_clips = {}
+
+        def fake_generate_clip(images, prompt, clip, *, prev_clip=None,
+                               duration_seconds=None, reference_images=None):
+            prev_clips[clip.name] = prev_clip
+            clip.write_bytes(b"clip")
+            return True
+
+        with mock.patch.object(i2v, "enabled", return_value=True), \
+             mock.patch.object(i2v, "available", return_value=True), \
+             mock.patch.object(i2v, "_cfg", return_value={"continuity_mode": "seed",
+                                                          "multi_character_references": True}), \
+             mock.patch.object(i2v, "generate_clip", side_effect=fake_generate_clip), \
+             mock.patch.object(i2v, "overlays_enabled", return_value=False), \
+             mock.patch.object(i2v, "last_frame", return_value=None), \
+             mock.patch.object(i2v, "stitch", return_value=True):
+            pipeline._render_scene_frames(self.storyboard, self.casting, self.out)
+
+        # panel 2: same cast as panel 1 -> eligible to extend from panel 1's clip
+        self.assertIsNotNone(prev_clips.get("frame_02.mp4"))
+        # panel 3: Bob joins -> a character boundary -> must NOT extend,
+        # even though panel 2's clip genuinely exists on disk by then
+        self.assertIsNone(prev_clips.get("frame_03.mp4"))
+
+
 class TestRerenderPanelsUsesReferencesAtABoundary(unittest.TestCase):
     """End-to-end (mocked i2v): `rerender_panels`' targeted re-render must
     compute the SAME boundary/reference decision `_render_scene_frames`'
