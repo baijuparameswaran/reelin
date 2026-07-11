@@ -465,6 +465,24 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
   ("source", "ingest")` to the same `_revise_source` handler, and the
   interactive menu skips listing `ingest` at all to avoid showing two
   entries for the same underlying artifact).
+- **`revise` skips casting + all image/video rendering by default** —
+  `cli.RENDER_SKIP_STAGES = {"casting", "casting_images", "moodboard_tiles",
+  "scene_render"}` — since those are the only stages `revise` can trigger
+  that cost real Gemini/Veo API spend; every other stage is local-LLM-only
+  and free. Both `_revise_one`'s scoped downstream regen and
+  `_revise_source`'s full regen check this set before calling `run_stage`/
+  `_apply_scene_render_revision`, printing a one-line skip notice per stage
+  rather than silently doing nothing. A skipped stage's existing checkpoint
+  is left untouched (never deleted), so anything downstream that REQUIRES
+  it (e.g. `storyboard` requires `casting`) still resolves — just against
+  the last rendered/cast state, not a fresh one; that staleness is the
+  accepted tradeoff for free text-only iteration. Opt in three ways: the
+  standalone command's `--render` flag (sets the default for the whole
+  session), typing `render on`/`render off` inside the interactive loop at
+  any point (no restart needed — the menu header always echoes the current
+  setting), or directly picking `casting` from the menu to hand-edit it
+  yourself (that edit always happens regardless of the flag — only its OWN
+  downstream `casting_images`/`scene_render` respect it).
 - **`revise` inherits the original run's attributes** — profile, max_scenes,
   target_duration, and genre/moodboard creative-direction steering —
   instead of silently reverting to bare defaults. `revise` is a SEPARATE

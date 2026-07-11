@@ -186,6 +186,48 @@
   / final cut phase.
 
 ## Session log
+- 2026-07-10 (later 8) — **`revise` now skips casting regeneration and all
+  image/video rendering by default, with `--render`/`render on`/`render
+  off` to opt in.** User asked for this directly, framed as a cost-control
+  measure: casting-image (Gemini) and scene-video (Veo) rendering are the
+  ONLY stages a revision round can trigger that cost real API spend —
+  every other stage (structure/characters/scenes/soundscape/visuals/
+  cinematography/screenplay/storyboard/fidelity) runs on the local, free
+  Ollama models. Iterating on text content shouldn't have to pay for a
+  re-render every single round. New `cli.RENDER_SKIP_STAGES = {"casting",
+  "casting_images", "moodboard_tiles", "scene_render"}`, checked at the top
+  of both regeneration paths: `_revise_one`'s scoped downstream loop (over
+  `downstream_of(stage_name)`) and `_revise_source`'s full `STAGES` replay
+  loop for a drastic source-text edit — each now prints a one-line skip
+  notice per skipped stage rather than silently doing nothing, so it's
+  clear from the output what didn't run and why. A skipped stage's on-disk
+  checkpoint is deliberately left untouched (not deleted) — anything
+  downstream that REQUIRES it (`storyboard` requires `casting`, for
+  instance) still resolves correctly against the last rendered/cast state;
+  that staleness is the accepted cost of free iteration, caught up whenever
+  rendering is turned back on. Three ways to opt in, all threading a single
+  `render: bool` parameter through `_revise_loop`/`_revise_one`/
+  `_revise_source`: the standalone command's new `--render` flag (sets the
+  session default); typing `render on`/`render off` at the interactive
+  stage-picker prompt at any point, no restart needed (the menu header now
+  echoes the live setting, e.g. "[render: off — casting/rendering skipped
+  (type 'render on' to include them)]"); or directly picking `casting`
+  itself from the menu to hand-edit it — that edit always happens
+  regardless of the flag (it's an explicit, deliberate choice, not an
+  incidental downstream cascade), only ITS OWN downstream
+  `casting_images`/`scene_render` still respect the setting. Added
+  `tests/test_revise_render_skip.py` (5 tests): confirms the exact stage
+  set, that `_revise_one` selectively skips only the rendering stages while
+  still regenerating non-rendering downstream stages (screenplay/
+  storyboard/fidelity) under the default, that `render=True` correctly
+  includes `casting_images`/`_apply_scene_render_revision`, and the same
+  pair of checks for `_revise_source`'s full-regen path. Full suite now 82
+  tests (was 77), still comfortably under a second, still zero LLM/API
+  calls; the two existing `test_revise_inheritance.py` end-to-end tests
+  (which exercise `_revise_one`/`_revise_source` without passing `render=`,
+  so now implicitly exercise the new default-skip behavior too) continued
+  passing unchanged, confirming no regression to the attribute-inheritance
+  work from the entry below.
 - 2026-07-10 (later 7) — **`soundscape.json` gained a `score_direction`
   field, fixing a real pre-existing bug: `storyboard.py`'s `_build_scene_board`
   has always read `bundle.audio.score_direction` into `audio_overview.

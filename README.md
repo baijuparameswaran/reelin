@@ -487,6 +487,15 @@ A few things this is deliberately careful about:
   re-cap a `--max-scenes all` run down to one scene. (Screenplay is the one
   intentional exception: it's never capped by `--max-scenes` even in the
   original run, so a revision keeps that policy too.)
+- **Casting + all image/video rendering are skipped by default.** Those are
+  the only stages a revision can trigger that cost real API spend (Gemini
+  image, Veo video) — every other stage is local-LLM-only and free, so
+  iterating on text content doesn't pay for a re-render on every round.
+  Enable it with `revise --render`, or type `render on` / `render off`
+  inside the loop at any point to toggle it mid-session (the menu header
+  always shows the current setting). A skipped stage's existing output is
+  left as-is, not deleted, so anything downstream that needs it still works
+  — just against the last rendered state until you turn rendering back on.
 
 ## Story fidelity (consistency scoring)
 
