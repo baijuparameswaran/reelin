@@ -53,7 +53,15 @@ class TestMainNoRenderFlag(unittest.TestCase):
             captured.update(kwargs)
             return {}
 
-        with mock.patch("reel.cli.run", side_effect=fake_run):
+        # main() calls _offer_revise() after a successful run, which calls
+        # input() for real — under a NON-interactive test runner that's
+        # harmless (input() raises EOFError, caught, returns immediately),
+        # but under a real interactive terminal (e.g. `make demo` run by a
+        # human directly) it actually BLOCKS waiting for keyboard input.
+        # Mock it out entirely — these tests are about main()'s flag/
+        # inheritance resolution, not the post-run revise offer.
+        with mock.patch("reel.cli.run", side_effect=fake_run), \
+             mock.patch("reel.cli._offer_revise"):
             cli.main(argv + ["--out", str(out)])
         return captured
 
