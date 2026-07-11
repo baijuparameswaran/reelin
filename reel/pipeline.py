@@ -722,21 +722,47 @@ def _frame_char_anchor(frame: dict, cast_index: dict, out: Path) -> Path | None:
     return None
 
 
+def _char_set_changed(fr: dict, prev_char_key) -> bool:
+    """True if THIS panel is a character "shot boundary" relative to
+    `prev_char_key` — the immediately preceding panel's in-frame character
+    SET (a `frozenset`, or `None` for a scene's first panel, meaning
+    "nothing to compare against yet", which itself counts as a boundary).
+    A panel with no listed characters at all is never a boundary (nothing
+    to compare) — it's treated as a continuation of whatever came before.
+
+    Shared by `_resolve_panel_references` (decides whether to use
+    multi-character `reference_images` instead of a single seed) AND by
+    every caller that decides whether Veo's `continuity_mode: extend` is
+    even eligible for this panel (`_render_scene_frames`/`rerender_panels`
+    null out `prev_clip_path` when this is True) — extending the PREVIOUS
+    clip only makes sense when this panel is showing the same subject(s)
+    that clip was; carrying it forward across a cast change would extend
+    the wrong characters' continuity (and audio) into a shot that doesn't
+    feature them. Scene-level PROPS (`visual_overview.key_props`) don't
+    need an equivalent check here — they're attributed scene-wide, not
+    per-panel, in this codebase's data model (no artifact currently says
+    which panel a given prop appears in — see `_panel_context`), so they
+    can only ever change at a SCENE boundary, which already resets
+    `prev_clip_path`/`prev_tail` to `None` unconditionally between scenes."""
+    names = fr.get("characters_in_frame") or []
+    if not names:
+        return False
+    return prev_char_key is None or frozenset(names) != prev_char_key
+
+
 def _resolve_panel_references(fr: dict, prev_char_key, cast_index: dict, out: Path):
     """Multi-character Veo `reference_images` for THIS panel, at a "shot
-    boundary" — the scene's first panel (`prev_char_key is None`) or any
-    panel whose in-frame character SET differs from the immediately
-    preceding panel's — and only when 2+ of those characters have a
-    resolvable casting portrait. A boundary panel with 0-1 resolvable
-    portraits returns no references at all: the caller keeps using its
-    existing single-`seed` path (`_frame_char_anchor`/`prev_tail`), since
-    Veo's `image=` conditioning is a stronger, more literal grounding for a
-    lone subject than a loose identity reference, and there's nothing
-    "multi" about a single character anyway. This is the fix for a real
-    pipeline gap: `_frame_char_anchor` above only ever anchors the FIRST
-    name in `characters_in_frame`, so a boundary panel with two or more
-    characters previously gave every character AFTER the first one zero
-    identity grounding.
+    boundary" (see `_char_set_changed`) — and only when 2+ of the in-frame
+    characters have a resolvable casting portrait. A boundary panel with
+    0-1 resolvable portraits returns no references at all: the caller keeps
+    using its existing single-`seed` path (`_frame_char_anchor`/
+    `prev_tail`), since Veo's `image=` conditioning is a stronger, more
+    literal grounding for a lone subject than a loose identity reference,
+    and there's nothing "multi" about a single character anyway. This is
+    the fix for a real pipeline gap: `_frame_char_anchor` above only ever
+    anchors the FIRST name in `characters_in_frame`, so a boundary panel
+    with two or more characters previously gave every character AFTER the
+    first one zero identity grounding.
 
     Returns `(reference_image_paths, this_panel's_char_key)` — the caller
     threads the second value back in as `prev_char_key` for its NEXT call
@@ -745,8 +771,7 @@ def _resolve_panel_references(fr: dict, prev_char_key, cast_index: dict, out: Pa
     update boundary tracking with, and nothing to reference either)."""
     names = list(dict.fromkeys(fr.get("characters_in_frame") or []))
     char_key = frozenset(names) if names else prev_char_key
-    is_boundary = prev_char_key is None or (names and frozenset(names) != prev_char_key)
-    if not is_boundary or not names:
+    if not _char_set_changed(fr, prev_char_key) or not names:
         return [], char_key
     refs = []
     for name in names[:3]:                # Veo 3.1 accepts at most 3 reference images
@@ -996,15 +1021,27 @@ def _render_scene_frames(storyboard: dict, casting: dict, out: Path,
             # forward); the first frame of a scene seeds from the in-frame
             # character's representation image (identity reference).
             seed = prev_tail if (prev_tail and continuity) else _frame_char_anchor(fr, cast_index, out)
-            # Multi-character identity lock at a "shot boundary" (scene start,
-            # or the in-frame cast changing from the previous panel) — see
-            # _resolve_panel_references. Computed alongside `seed`, not
+            # Extend-mode continuity (config `continuity_mode: extend`) may
+            # only continue from the previous CLIP when this panel's
+            # in-frame characters are the SAME as that clip's — extending a
+            # clip across a cast change would carry the wrong subject's
+            # continuity/audio into a shot that doesn't feature them. Props
+            # (visual_overview.key_props) need no separate check: they're
+            # scene-wide, not per-panel, in this codebase's data model, so
+            # they can only change at a SCENE boundary — already covered by
+            # `prev_clip_path`'s per-scene reset above. Nulled here (per
+            # call, not the loop variable itself) rather than in i2v, so
+            # `_gen_gemini`'s extend branch is never even attempted for a
+            # boundary panel.
+            effective_prev_clip = None if _char_set_changed(fr, prev_char_key) else prev_clip_path
+            # Multi-character identity lock at the SAME "shot boundary" —
+            # see _resolve_panel_references. Computed alongside `seed`, not
             # instead of it: `i2v._gen_gemini` decides which actually gets
             # used, falling back to `seed` on its own if this is
             # disabled/unavailable/fails.
             reference_images, prev_char_key = _resolve_panel_references(
                 fr, prev_char_key, cast_index, out)
-            res = _render_one_panel(fr, snum, sdir, seed, prev_clip_path, out,
+            res = _render_one_panel(fr, snum, sdir, seed, effective_prev_clip, out,
                                     casting_lookup=casting_lookup, location_desc=location_desc,
                                     visual_overview=visual_overview, voice_index=voice_index,
                                     audio_overview=audio_overview,
@@ -1206,8 +1243,13 @@ def rerender_panels(storyboard: dict, casting: dict, out: Path, *,
     def _render(pnum):
         fr = panels_by_num[pnum]
         seed = _resolve_start_frame(pnum)
-        prev_clip_path = _resolve_prev_clip_path(pnum)
-        reference_images, _ = _resolve_panel_references(fr, _prev_char_key(pnum), cast_index, out)
+        prev_key = _prev_char_key(pnum)
+        # Same extend-eligibility rule as _render_scene_frames' own walk —
+        # see _char_set_changed's docstring — kept consistent between the
+        # two entry points for the same hash-mismatch reason
+        # _resolve_prev_clip_path itself already documents.
+        prev_clip_path = None if _char_set_changed(fr, prev_key) else _resolve_prev_clip_path(pnum)
+        reference_images, _ = _resolve_panel_references(fr, prev_key, cast_index, out)
         res = _render_one_panel(fr, snum, sdir, seed, prev_clip_path, out,
                                 casting_lookup=casting_lookup, location_desc=location_desc,
                                 visual_overview=visual_overview, voice_index=voice_index,
@@ -1278,7 +1320,13 @@ def rerender_panels(storyboard: dict, casting: dict, out: Path, *,
                 next_names = list(dict.fromkeys(next_fr.get("characters_in_frame") or []))
                 next_char_key = frozenset(next_names) if next_names else _prev_char_key(next_panel_num)
                 after_refs, _ = _resolve_panel_references(after_fr, next_char_key, cast_index, out)
-                accepted_hash = _content_hash(after_prompt, new_end_path, new_clip_path,
+                # Same extend-eligibility rule as elsewhere: if after_num's
+                # own cast differs from next_panel_num's, a full re-chain
+                # would NOT have extended from new_clip_path either — must
+                # match here too, or this bookkeeping hash would disagree
+                # with _render_one_panel's real formula for after_num.
+                accepted_prev_clip = None if _char_set_changed(after_fr, next_char_key) else new_clip_path
+                accepted_hash = _content_hash(after_prompt, new_end_path, accepted_prev_clip,
                                               *(after_refs or []))
                 after_hash_path.write_text(accepted_hash)
 
