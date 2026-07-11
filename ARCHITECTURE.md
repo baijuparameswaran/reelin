@@ -571,6 +571,29 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
   computes the right one from `reel.duration_budget` — `cinematography`'s
   needs the CURRENT scene count, reloaded fresh from disk since `scenes` may
   have just been regenerated earlier in the same revision round.
+- **`revise` no longer INHERITS `max_scenes` — it always operates as if
+  `--max-scenes all` had been given**, regardless of what the original run
+  actually used. A later, deliberate refinement of the inheritance work
+  directly above: `_revise_loop` now hardcodes `max_scenes = None` instead
+  of reading it from `run_params.json`, since a revision's whole point is
+  to selectively regenerate exactly the scenes a diff identifies as
+  affected — an unrelated cap inherited from a prototype-scale original
+  `--max-scenes N` run could otherwise make a diff-identified scene
+  invisible to the render stages for no reason a revision should ever
+  need. Scoping is unaffected — `revise_keys`, not `max_scenes`, is what
+  actually controls which scenes get regenerated; this only removes a
+  second, redundant restriction on top of it. `profile`/`target_duration`
+  are still inherited exactly as before. Paired with two new operator-
+  facing printouts, both in `cli.py`: `_revise_one`/`_revise_source` now
+  print an "evaluation" line (`changed=[...] added=[...] removed=[...]`,
+  or the scoped-source-analysis summary) immediately after the diff/LLM-
+  confirmation identifies the affected scope — before any ripple-
+  suggestion prompts or the final "plan:" confirm — and
+  `_run_downstream_revision` prints one line per downstream stage right
+  before it runs (`regenerating [...]`, `full regen`, `nothing to
+  regenerate`, or a render-skip notice), so the operator sees both WHAT
+  was identified and WHAT each stage is actually doing about it, not just
+  silence while `run_stage` executes.
 - **A source-TEXT edit is now SCOPED to the scenes it actually affects,
   instead of always falling back to a full downstream regen.** Previously
   `source` (in `artifact_diff.WHOLE_FILE_ARTIFACTS`) meant "no natural

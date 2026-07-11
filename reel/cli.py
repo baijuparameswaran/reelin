@@ -27,6 +27,12 @@ Usage:
                                                  # by default (cheap text-only iteration); pass
                                                  # --render to include them, or type 'render on'/
                                                  # 'render off' inside the loop to toggle anytime.
+                                                 # Always operates as if --max-scenes all had been
+                                                 # used, regardless of the original run's cap —
+                                                 # only the diff-identified scenes actually get
+                                                 # regenerated either way. Prints the identified
+                                                 # scope as soon as it's known, and what each
+                                                 # downstream stage is doing as it runs.
     python -m reel.cli veo-sync                  # refresh Veo prompt guide snapshot
         [--status]                               #   print cache status only (no fetch)
 
@@ -620,7 +626,23 @@ def _run_downstream_revision(out, stage_name: str, downstream: list[str], revise
     `_names_to_scene_numbers`), and translates `revise_keys`'s key type per
     downstream stage via `_translate_revise_keys` — the same three pieces
     of logic `_revise_one`'s downstream loop always had, just no longer
-    only reachable from there."""
+    only reachable from there.
+
+    Prints a one-line indication of what's actually changing for EACH
+    downstream stage right before it runs (`regenerating [...]` for a
+    scoped subset, `full regen` when no scoped translation applies,
+    `nothing to regenerate` for an empty-but-known scope, or a skip notice
+    for a render stage while `render=False`) — a companion to the
+    "evaluation" printout `_revise_one`/`_revise_source` already print as
+    soon as the affected scenes/names are identified, so the operator sees
+    both WHAT was identified and WHAT each downstream stage is actually
+    going to do about it, not just silence while `run_stage` executes.
+
+    `max_scenes` is always `None` ("all") when called via the normal
+    `revise` flow — `_revise_loop` never inherits the original run's
+    `--max-scenes`, since a revision should never re-cap rendering to a
+    prototype-scale value just because that's what the original full-
+    pipeline run happened to use (see `_revise_loop`'s own docstring)."""
     from .stages import REGISTRY, _load, run_stage
 
     for dname in downstream:
@@ -638,6 +660,7 @@ def _run_downstream_revision(out, stage_name: str, downstream: list[str], revise
             _apply_scene_render_revision(out, stage_name, render_keys, panel_targets)
             continue
         if dname in ("casting_images", "moodboard_tiles"):
+            print(f"[reel]   {dname}: re-rendering (image provider)")
             run_stage(dname, out=out, profile=profile, max_scenes=max_scenes)
             continue
         d_existing = _load(out, REGISTRY[dname].artifact())
@@ -652,6 +675,14 @@ def _run_downstream_revision(out, stage_name: str, downstream: list[str], revise
             # gets entirely discarded by `merge_by_key`.
             print(f"[reel]   {dname}: nothing to regenerate (already up to date)")
             continue
+        # Indicate what's actually changing for this stage BEFORE running
+        # it — `d_keys is None` covers both an upstream drastic edit and a
+        # cross-type translation with no known mapping, both of which mean
+        # "full regen" for this one downstream stage regardless of cause.
+        if d_keys is None:
+            print(f"[reel]   {dname}: full regen (no scoped subset applies)")
+        else:
+            print(f"[reel]   {dname}: regenerating {sorted(d_keys, key=str)}")
         run_stage(dname, out=out, profile=profile,
                  max_scenes=_effective_max_scenes(dname, max_scenes),
                  existing=d_existing, revise_keys=d_keys,
@@ -765,12 +796,14 @@ def _revise_source(out, *, edited_override: dict | None = None, auto_confirm: bo
     scene-keyed artifact's diff, is that scene count/order stays stable
     across a scoped revision).
 
-    `profile`/`max_scenes`/`target_duration` are the original run's
-    inherited attributes (see `_revise_loop`'s docstring) — threaded into
-    every `run_stage` call so a regen doesn't silently revert to
-    `run_stage`'s own bare defaults (notably `max_scenes=1`, which would
-    otherwise quietly re-cap casting-image/video rendering back down to
-    one scene even after an original `--max-scenes all` run).
+    `profile`/`target_duration` are the original run's inherited attributes
+    (see `_revise_loop`'s docstring); `max_scenes` is deliberately NOT
+    inherited from the original run — `_revise_loop` always passes `None`
+    ("all") here, since a revision should never re-cap casting-image/video
+    rendering to a prototype-scale `--max-scenes N` just because that's
+    what the original run happened to use. All threaded into every
+    `run_stage` call so a regen doesn't silently revert to `run_stage`'s
+    own bare default of `max_scenes=1` either.
 
     `render` (default `False`) gates `RENDER_SKIP_STAGES` (casting +
     every image/video render stage) — see that constant's docstring."""
@@ -815,7 +848,7 @@ def _revise_source(out, *, edited_override: dict | None = None, auto_confirm: bo
 
     if analysis and not analysis.get("drastic") and analysis.get("changed_scene_numbers"):
         changed_scene_numbers = set(analysis["changed_scene_numbers"])
-        print(f"[reel] scoped: scene(s) {sorted(changed_scene_numbers)} affected"
+        print(f"[reel] evaluation — source text: scene(s) {sorted(changed_scene_numbers)} affected"
              + (f" — {analysis['summary']}" if analysis.get("summary") else ""))
         if render:
             print("[reel]   casting + all image/video rendering will be re-invoked "
@@ -952,11 +985,21 @@ def _revise_one(stage_name: str, out, *, edited_override: dict | None = None,
     whole_file = stage_name in artifact_diff.WHOLE_FILE_ARTIFACTS
     if whole_file:
         drastic, reason, revise_keys = True, f"'{stage_name}' has no scene/name-keyed structure to scope by", None
+        # Evaluation printed immediately — before any ripple-suggestion/
+        # identity-check LLM calls below, and well before the final "plan:"
+        # confirm prompt — so the operator sees WHAT was identified as soon
+        # as it's known, not buried after other side effects.
+        print(f"[reel] evaluation — {artifact_name}.json: whole-file artifact, no "
+             "scene/name-keyed structure to scope by — always a full downstream regen")
     else:
         diff = artifact_diff.diff_artifact(stage_name, current, edited)
         drastic, reason = diff.drastic, diff.drastic_reason
         revise_keys = set(diff.changed) | set(diff.added)
         removed_keys = set(diff.removed)
+        print(f"[reel] evaluation — {artifact_name}.json: "
+             f"changed={sorted(diff.changed, key=str)}  "
+             f"added={sorted(diff.added, key=str)}  "
+             f"removed={sorted(diff.removed, key=str)}")
         if stage_name == "storyboard" and not drastic and revise_keys:
             nested = artifact_diff.diff_nested("storyboard", current, edited)
             for snum in revise_keys:
@@ -1066,19 +1109,32 @@ def _revise_loop(out, *, render: bool = False) -> None:
     Restores the ORIGINAL run's attributes before any regeneration happens:
     `_restore_direction` re-applies the genre/moodboard creative-direction
     steering (a separate process invocation otherwise starts with none at
-    all), and `_load_run_params` recovers the `--profile`/`--max-scenes`/
-    `--target-duration` this `--out` was actually run with, threaded into
-    every `_revise_one` call below — without this, a revision silently
-    reverted to each stage's own bare defaults (e.g. dropping a `--profile
-    fast` override, or losing a `--target-duration` scene-count budget)
-    instead of continuing to honor what the operator originally chose."""
+    all), and `_load_run_params` recovers the `--profile`/`--target-duration`
+    this `--out` was actually run with, threaded into every `_revise_one`
+    call below — without this, a revision silently reverted to each stage's
+    own bare defaults (e.g. dropping a `--profile fast` override, or losing
+    a `--target-duration` scene-count budget) instead of continuing to
+    honor what the operator originally chose.
+
+    `max_scenes` is the ONE inherited attribute deliberately NOT restored
+    from `run_params.json` — `revise` always operates as if `--max-scenes
+    all` (`None`) had been used, regardless of what the original run's
+    `--max-scenes` was. A revision's whole point is to selectively update
+    exactly the scenes a diff identifies as affected (see `_revise_one`'s
+    evaluation printout); silently re-capping casting-image/video
+    rendering to the original run's prototype-scale `--max-scenes N` would
+    make an identified-as-affected scene beyond that cap invisible to the
+    render stages for no reason a revision should ever need. Scoping still
+    happens — via `revise_keys`, not `max_scenes` — so this doesn't widen
+    what actually gets regenerated, only removes an unrelated, accidental
+    cap on what CAN be."""
     from . import session
     from .stages import STAGES, names, _load
 
     _restore_direction(out)
     run_params = _load_run_params(out)
     profile = run_params.get("profile")
-    max_scenes = run_params.get("max_scenes", 1)
+    max_scenes = None                      # always "all" — see docstring above
     target_duration = run_params.get("target_duration")
 
     try:

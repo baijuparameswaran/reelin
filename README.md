@@ -517,14 +517,30 @@ A few things this is deliberately careful about:
   existing `output/session.json` (see [Session tracking](#session-tracking)
   above) and keeps it `running` across every round; it's only marked
   `complete`/`paused` when you type `quit`/`exit` or `pause` (or Ctrl-C).
-- **The original run's attributes carry over automatically.** `--profile`,
-  `--max-scenes`, `--target-duration`, and the genre/moodboard creative
-  direction are all reloaded from the completed run before any stage
-  regenerates — a revision doesn't silently drop back to slower/default
-  models, lose the genre steering that shaped the rest of the film, or
-  re-cap a `--max-scenes all` run down to one scene. (Screenplay is the one
-  intentional exception: it's never capped by `--max-scenes` even in the
-  original run, so a revision keeps that policy too.)
+- **The original run's attributes carry over automatically** — `--profile`,
+  `--target-duration`, and the genre/moodboard creative direction are all
+  reloaded from the completed run before any stage regenerates, so a
+  revision doesn't silently drop back to slower/default models or lose the
+  genre steering that shaped the rest of the film.
+- **A revision always operates as if `--max-scenes all` had been used**,
+  regardless of what the original run's `--max-scenes` actually was — it's
+  the one attribute deliberately NOT inherited. Which scenes actually get
+  regenerated is still controlled entirely by the diff-based scoping above
+  (`revise_keys`), not by `--max-scenes`; this just removes an unrelated
+  cap that would otherwise make a scene the diff correctly identifies as
+  affected invisible to rendering just because the original run used a
+  smaller prototype-scale `--max-scenes N`. (Screenplay was already never
+  capped by `--max-scenes`, in a fresh run or a revision either way.)
+- **The scope evaluation prints as soon as it's known, and each downstream
+  stage says what it's doing.** Right after a diff (or, for a source-text
+  edit, the LLM confirmation pass) identifies which scenes/names are
+  affected, that's printed immediately — before any ripple-suggestion
+  prompts or the final confirm — so you see the scope up front, not just
+  at the very end. Then, as each downstream stage runs, it prints a line
+  saying what it's about to do: `regenerating [...]` for a scoped subset,
+  `full regen` when no scoped translation applies, `nothing to
+  regenerate` when a stage has nothing left to do (e.g. only scenes were
+  deleted), or a skip notice for a rendering stage while `render` is off.
 - **Casting + all image/video rendering are skipped by default.** Those are
   the only stages a revision can trigger that cost real API spend (Gemini
   image, Veo video) — every other stage is local-LLM-only and free, so

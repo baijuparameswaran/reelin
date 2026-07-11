@@ -200,6 +200,71 @@
   final cut phase.
 
 ## Session log
+- 2026-07-11 — **`revise` now always operates as if `--max-scenes all` had
+  been used, and prints its scoping evaluation up front plus a per-
+  downstream-stage indication of what's changing.** Three related requests
+  in one message: (1) "revise options should always run with
+  max-scenes=all", (2) "only modify relevant scenes after comparing the
+  diff of what has changed" (already the core design — confirmed still
+  intact, not a regression to guard against), (3) "print the evaluation of
+  changed scenes as soon as the scenes are identified during revise and as
+  well indicate what is changing in each downstream stage."
+
+  (1): `_revise_loop` previously inherited `max_scenes` from
+  `run_params.json` (the 2026-07-10 (later 6) fix — see that entry) —
+  correct for `--resume`, but wrong for `revise`: an original run's
+  `--max-scenes` reflects a PROTOTYPE-SCALE choice made at the time (often
+  the default of 1), and re-capping every subsequent revision to that same
+  small number means a scene the diff correctly identifies as affected can
+  still be invisible to casting-image/video rendering for no reason a
+  revision should ever need. Changed `_revise_loop` to hardcode
+  `max_scenes = None` unconditionally, no longer reading it from
+  `run_params.json` at all — `profile`/`target_duration` are still
+  inherited exactly as before, only `max_scenes` changed. Scoping itself
+  is untouched: `revise_keys` (not `max_scenes`) is what actually
+  determines which scenes get regenerated, so this only removes a second,
+  redundant, accidental cap sitting on top of that — the LLM/image/video
+  calls a revision makes are exactly the same set either way, just no
+  longer silently excluded from a scene the diff already said needed
+  regenerating.
+
+  (3): Previously the only "what's happening" signal was the final
+  `[reel] plan: save X.json (revising: [...]), then re-run: ...` line,
+  printed just before the confirm prompt — after any ripple-suggestion
+  LLM call and casting identity-drift check had already run silently.
+  Added a `[reel] evaluation — X.json: changed=[...] added=[...]
+  removed=[...]` line printed IMMEDIATELY after the diff is computed in
+  `_revise_one` (or, for `_revise_source`'s scoped path, relabeled the
+  existing early "scoped: scene(s) [...] affected" print to the same
+  "evaluation —" wording for consistency) — before any of those later
+  side effects, so the operator sees what was identified as soon as it's
+  known. Then `_run_downstream_revision` gained a one-line indication
+  printed right before EACH downstream stage actually runs:
+  `regenerating [...]` for a scoped subset, `full regen (no scoped subset
+  applies)` when `_translate_revise_keys` returned `None` (covers both an
+  upstream drastic edit and an untranslatable cross-type scope — same
+  message either way, since both mean "full regen" for that one stage
+  regardless of cause), and `re-rendering (image provider)` for
+  `casting_images`/`moodboard_tiles` (previously silent). The existing
+  `nothing to regenerate (already up to date)` (empty-scope skip) and the
+  `RENDER_SKIP_STAGES` skip notice were already present and needed no
+  change — this just fills in the two cases that were previously silent.
+
+  Added `tests/test_revise_inheritance.py::TestReviseLoopAlwaysUsesMaxScenesAll`
+  (3 tests, driving `_revise_loop` via mocked `input()` — pick one stage,
+  then `quit` — and a mocked `cli._revise_one` call-recorder): an
+  original run that used `--max-scenes 1` does NOT reach `_revise_one` as
+  `1`; an original run that already used `all` stays `all`; and a
+  completely missing `run_params.json` (pre-existing `--out`, or one only
+  ever touched by standalone `stage`/`revise` commands) still resolves to
+  `all` rather than crashing or defaulting to `1`. Added
+  `tests/test_revise_scene_delete_add.py::test_evaluation_and_per_stage_printouts`
+  (captures stdout via `contextlib.redirect_stdout`): confirms the
+  evaluation line appears with the correct added/changed/removed content
+  AND appears textually before the final `plan:` line, and that both new
+  per-stage messages (`soundscape: regenerating [4]`,
+  `casting_images: re-rendering (image provider)`) are present. Full suite
+  now 132 tests (was 128), still fully offline, `py_compile` clean.
 - 2026-07-10 (later 12) — **`continuity_mode: extend` now only fires when a
   panel's in-frame characters match the immediately preceding panel's** —
   direct follow-up request ("use extend video as long as the

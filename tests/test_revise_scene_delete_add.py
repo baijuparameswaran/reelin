@@ -233,6 +233,43 @@ class TestReviseOneScenesDeletion(unittest.TestCase):
             manifest = json.loads((out / "video" / "manifest.json").read_text())
             self.assertEqual([s["scene_number"] for s in manifest["scenes"]], [1, 2, 3])
 
+    def test_evaluation_and_per_stage_printouts(self):
+        """The scene-scope evaluation must print as soon as the diff is
+        computed, and each downstream stage must announce what it's about
+        to do — both requested directly so an operator can see the plan
+        without waiting for every stage to finish."""
+        import io
+        from contextlib import redirect_stdout
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir)
+            self._setup_run(out)
+            current_scenes = json.loads((out / "scenes.json").read_text())
+            edited_scenes = {"scenes": current_scenes["scenes"] + [
+                {"number": 4, "location": "Cafe", "characters": ["Marcel"], "summary": "s4"},
+            ]}
+
+            buf = io.StringIO()
+            with mock.patch("reel.stages.run_stage", return_value={}), \
+                 mock.patch("reel.pipeline._assemble_movie", return_value=None), \
+                 redirect_stdout(buf):
+                applied = cli._revise_one("scenes", out, edited_override=edited_scenes,
+                                          auto_confirm=True, render=True)
+            self.assertTrue(applied)
+            output = buf.getvalue()
+
+            eval_line = next((ln for ln in output.splitlines()
+                             if ln.startswith("[reel] evaluation")), None)
+            self.assertIsNotNone(eval_line, "no evaluation line printed")
+            self.assertIn("added=[4]", eval_line)
+            self.assertIn("changed=[]", eval_line)
+            self.assertIn("removed=[]", eval_line)
+            # printed BEFORE the final "plan:" confirm line
+            self.assertLess(output.index("evaluation"), output.index("[reel] plan:"))
+
+            self.assertIn("[reel]   soundscape: regenerating [4]", output)
+            self.assertIn("[reel]   casting_images: re-rendering (image provider)", output)
+
 
 if __name__ == "__main__":
     unittest.main()

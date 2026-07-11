@@ -1,18 +1,25 @@
 """Validates that the `revise` command (reel.cli's standalone `revise`
 subcommand and the auto-offered post-run loop) inherits the ORIGINAL
-pipeline run's attributes — profile, max_scenes, target_duration, and the
-genre/moodboard creative-direction steering — rather than silently
-reverting to bare defaults.
+pipeline run's attributes — profile, target_duration, and the genre/
+moodboard creative-direction steering — rather than silently reverting to
+bare defaults, and that `max_scenes` is the ONE attribute deliberately NOT
+inherited (see `TestReviseLoopAlwaysUsesMaxScenesAll` below).
 
 `revise` is a separate process invocation from `pipeline.run()`, so none of
-these carried over automatically before this fix: `llm.set_direction`'s
+these carried over automatically before an earlier fix: `llm.set_direction`'s
 process-wide directive started unset (losing genre/moodboard steering on
 every revised stage); `stages.run_stage`'s calls never passed `profile=`
 (reverting to each stage's own default model tier); `max_scenes` wasn't
 threaded through at all (silently re-capping a `--max-scenes all` run back
 down to `run_stage`'s own default of 1); and `--target-duration`'s
 scene/shot-count guidance had no pathway into `revise`'s calls whatsoever.
-See PROGRESS.md's session log for the investigation that found this.
+A LATER change went further for `max_scenes` specifically: rather than just
+inheriting the original run's value, `_revise_loop` now always passes
+`None` ("all") regardless of what that value was — a revision should never
+re-cap rendering to a prototype-scale `--max-scenes N` just because that's
+what the original full-pipeline run happened to use; the diff-based
+`revise_keys` scoping (not `max_scenes`) is what actually controls which
+scenes get regenerated. See PROGRESS.md's session log for both changes.
 
 Pure logic checks with mocked I/O — no LLM/API calls, no real $EDITOR, no
 Ollama. Run with: python -m unittest tests.test_revise_inheritance -v
@@ -221,6 +228,77 @@ class TestReviseThreadsInheritedAttributes(unittest.TestCase):
                         self.assertIsNone(kwargs.get("max_scenes"))
                     else:
                         self.assertEqual(kwargs.get("max_scenes"), 2)
+
+
+class TestReviseLoopAlwaysUsesMaxScenesAll(unittest.TestCase):
+    """`_revise_loop` must always pass `max_scenes=None` ("all") to
+    `_revise_one`, regardless of what the original run's `--max-scenes`
+    (persisted to run_params.json) actually was — a revision should never
+    silently re-cap rendering to a prototype-scale value. Drives the loop
+    via mocked `input()` (pick one stage, then 'quit') and a mocked
+    `cli._revise_one` call-recorder — no real $EDITOR, no LLM/API calls."""
+
+    def _setup_run(self, tmp: Path, *, max_scenes) -> None:
+        (tmp / "casting.json").write_text(json.dumps({"casting": []}))
+        cli._save_run_params(tmp, max_scenes=max_scenes, profile="fast",
+                             genre=None, target_duration=30)
+
+    def test_a_small_inherited_max_scenes_does_not_reach_revise_one(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir)
+            # The original run explicitly used --max-scenes 1 (the
+            # prototype default) — revise must NOT inherit that.
+            self._setup_run(out, max_scenes=1)
+
+            calls = []
+
+            def fake_revise_one(stage_name, out, **kwargs):
+                calls.append((stage_name, kwargs.get("max_scenes")))
+                return True
+
+            with mock.patch("reel.cli._revise_one", side_effect=fake_revise_one), \
+                 mock.patch("reel.cli._restore_direction"), \
+                 mock.patch("builtins.input", side_effect=["casting", "quit"]):
+                cli._revise_loop(out)
+
+            self.assertEqual(calls, [("casting", None)])
+
+    def test_all_already_inherited_stays_all(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir)
+            self._setup_run(out, max_scenes=None)
+
+            calls = []
+
+            def fake_revise_one(stage_name, out, **kwargs):
+                calls.append(kwargs.get("max_scenes"))
+                return True
+
+            with mock.patch("reel.cli._revise_one", side_effect=fake_revise_one), \
+                 mock.patch("reel.cli._restore_direction"), \
+                 mock.patch("builtins.input", side_effect=["casting", "quit"]):
+                cli._revise_loop(out)
+
+            self.assertEqual(calls, [None])
+
+    def test_no_run_params_at_all_still_uses_all(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir)
+            (out / "casting.json").write_text(json.dumps({"casting": []}))
+            # No run_params.json written at all this time.
+
+            calls = []
+
+            def fake_revise_one(stage_name, out, **kwargs):
+                calls.append(kwargs.get("max_scenes"))
+                return True
+
+            with mock.patch("reel.cli._revise_one", side_effect=fake_revise_one), \
+                 mock.patch("reel.cli._restore_direction"), \
+                 mock.patch("builtins.input", side_effect=["casting", "quit"]):
+                cli._revise_loop(out)
+
+            self.assertEqual(calls, [None])
 
 
 if __name__ == "__main__":
