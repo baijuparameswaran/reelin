@@ -650,7 +650,15 @@ def _run_downstream_revision(out, stage_name: str, downstream: list[str], revise
     `revise` flow — `_revise_loop` never inherits the original run's
     `--max-scenes`, since a revision should never re-cap rendering to a
     prototype-scale value just because that's what the original full-
-    pipeline run happened to use (see `_revise_loop`'s own docstring)."""
+    pipeline run happened to use (see `_revise_loop`'s own docstring).
+
+    Deliberately does NOT itself guarantee every scene-keyed stage stays
+    aligned with scenes.json — this only touches `downstream` (whatever
+    `stages.downstream_of(stage_name)` says is reachable from THIS edit).
+    That guarantee is `_align_scene_keyed_stages`'s job, called once,
+    unconditionally, by both `_revise_one` and `_revise_source` after this
+    function returns — see its docstring for why an edit-scoped cascade
+    alone isn't a strong enough guarantee."""
     from .stages import REGISTRY, _load, run_stage
 
     for dname in downstream:
@@ -694,6 +702,60 @@ def _run_downstream_revision(out, stage_name: str, downstream: list[str], revise
         run_stage(dname, out=out, profile=profile,
                  max_scenes=_effective_max_scenes(dname, max_scenes),
                  existing=d_existing, revise_keys=d_keys,
+                 **_duration_kwargs(dname, out, target_duration))
+
+
+def _align_scene_keyed_stages(out, *, profile: str | None, max_scenes: int | None,
+                              target_duration: int | None) -> None:
+    """Unconditional guarantee, called once after EVERY revision round
+    (`_revise_one` and `_revise_source` both call this after their own
+    scoped/full regen completes): every scene-keyed artifact already on disk
+    (soundscape/visuals/cinematography/screenplay/storyboard) is re-checked
+    against the CURRENT scenes.json and healed if it's drifted — regardless
+    of which stage the operator actually edited this round, and regardless
+    of whether `stages.downstream_of` for that one edit happened to reach
+    it. scenes.json is the single source of truth every one of these stages
+    is declared to depend on, so there is no legitimate scenario where one
+    of them should ever disagree with it — this makes that an invariant
+    that's re-verified every round, not something that only gets fixed if
+    the specific edit's own cascade happens to touch it.
+
+    Reuses the exact same deterministic (no LLM) primitives a fresh
+    `pipeline.run()` already self-heals with inside `run_group` —
+    `fidelity.strip_orphan_scenes` (drops a stale scene entry scenes.json
+    no longer has) then `fidelity.check_scene_alignment` (finds any scene
+    scenes.json has that this stage's data doesn't) — reiterated via the
+    same scoped `existing=`/`revise_keys=` mechanism a direct hand-edit
+    already uses, not a second, parallel implementation. A stage with no
+    on-disk artifact yet is left alone: it has nothing to be misaligned
+    FROM, and will get full, unscoped coverage the first time it actually
+    runs (see `draft_screenplay`/`plan_storyboard`'s own `scoped =
+    revise_keys is not None and existing` check)."""
+    from .stages import REGISTRY, _load, _save_artifact, run_stage
+    from .agents import fidelity
+
+    current_scenes = _load(out, "scenes")
+    if not current_scenes:
+        return
+    for dname in sorted(_SCENE_KEYED_STAGES - {"scenes"}):
+        artifact_name = REGISTRY[dname].artifact()
+        existing = _load(out, artifact_name)
+        if not existing:
+            continue
+        stripped = fidelity.strip_orphan_scenes(dname, existing, current_scenes)
+        if stripped is not existing:
+            print(f"[reel]   {dname}: stripped orphan scene(s) no longer in scenes.json")
+            _save_artifact(out, artifact_name, stripped)
+            existing = stripped
+        align = fidelity.check_scene_alignment(dname, existing, current_scenes)
+        missing = {k for k in align["missing_scenes"] if isinstance(k, int)}
+        if not missing:
+            continue
+        print(f"[reel]   {dname}: aligning to scenes.json — this stage was missing scene(s) "
+             f"{sorted(missing)}, regenerating just those now")
+        run_stage(dname, out=out, profile=profile,
+                 max_scenes=_effective_max_scenes(dname, max_scenes),
+                 existing=existing, revise_keys=missing,
                  **_duration_kwargs(dname, out, target_duration))
 
 
@@ -878,6 +940,8 @@ def _revise_source(out, *, edited_override: dict | None = None, auto_confirm: bo
         _run_downstream_revision(out, "scenes", downstream, changed_scene_numbers, new_scenes, {},
                                  profile=profile, max_scenes=max_scenes,
                                  target_duration=target_duration, render=render)
+        _align_scene_keyed_stages(out, profile=profile, max_scenes=max_scenes,
+                                  target_duration=target_duration)
         print(f"[reel] source revision applied — scoped to scene(s) "
              f"{sorted(changed_scene_numbers)}"
              + ("" if render else " (casting/rendering stages skipped — see above)"))
@@ -911,6 +975,8 @@ def _revise_source(out, *, edited_override: dict | None = None, auto_confirm: bo
         run_stage(s.name, out=out, profile=profile,
                  max_scenes=_effective_max_scenes(s.name, max_scenes),
                  **_duration_kwargs(s.name, out, target_duration))
+    _align_scene_keyed_stages(out, profile=profile, max_scenes=max_scenes,
+                              target_duration=target_duration)
     print("[reel] source revision applied — every downstream stage regenerated"
          + ("" if render else " (casting/rendering stages skipped — see above)"))
     return True
@@ -1091,6 +1157,8 @@ def _revise_one(stage_name: str, out, *, edited_override: dict | None = None,
     _run_downstream_revision(out, stage_name, downstream, revise_keys, edited, panel_targets,
                              profile=profile, max_scenes=max_scenes,
                              target_duration=target_duration, render=render)
+    _align_scene_keyed_stages(out, profile=profile, max_scenes=max_scenes,
+                              target_duration=target_duration)
 
     print(f"[reel] revision applied — {artifact_name}.json"
          + (f" and {len(downstream)} downstream stage(s)" if downstream else "") + " updated")

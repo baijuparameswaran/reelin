@@ -241,6 +241,68 @@
   IS explicitly in `keys_to_replace` (the legitimate add-a-scene/name case)
   still gets added; and the discard prints a notice naming the dropped key.
   Full suite now 161 tests (was 158), still fully offline, `py_compile` clean.
+- 2026-07-11 (later 4) — **`revise` now GUARANTEES every scene-keyed
+  artifact (soundscape/visuals/cinematography/screenplay/storyboard) stays
+  aligned with scenes.json after every single revision round — unconditionally,
+  not just when the edited stage's own downstream cascade happens to reach
+  it.** Direct follow-up to the entry just below, after the user pushed back
+  that the first fix's framing was wrong: "the issue was more like
+  screenplay and storyboard did not honor scenes.json during revise ..
+  there is no reason this should have happened." That's the correct framing
+  — scenes.json is the one declared source of truth every one of these
+  stages depends on, so there's no scenario where they should legitimately
+  disagree with it, and a fix that only patches the gap when it happens to
+  be reachable from whatever the operator edited THIS round (the entry
+  below) is a reactive patch, not the guarantee the situation calls for.
+
+  Reverted the inline backfill added to `_run_downstream_revision` (which
+  only fired for a scene-keyed stage that was actually IN `stages.
+  downstream_of(stage_name)` for the specific stage just edited) and
+  replaced it with a new `cli._align_scene_keyed_stages(out, ...)`, called
+  UNCONDITIONALLY once at the end of every `_revise_one` and `_revise_source`
+  round — regardless of which stage was edited, regardless of whether that
+  edit's own cascade reaches a given scene-keyed stage at all. For every
+  scene-keyed artifact already on disk, it applies the exact same two
+  deterministic (no LLM) primitives a fresh `pipeline.run()` already
+  self-heals with inside `run_group` (`fidelity.strip_orphan_scenes` then
+  `fidelity.check_scene_alignment` against the CURRENT scenes.json), and
+  reiterates anything found missing via the same scoped `existing=`/
+  `revise_keys=` mechanism a direct hand-edit already uses — not a second,
+  parallel implementation. A stage with no on-disk artifact yet is
+  correctly left alone (nothing to be misaligned FROM; it gets full,
+  unscoped coverage the first time it actually runs).
+
+  Rewrote `tests/test_revise_scene_alignment_backfill.py` (5 tests, offline,
+  `run_stage` mocked as a call-recorder) to match: `_align_scene_keyed_stages`
+  directly — backfills a screenplay.json missing scene 3, no-ops when
+  already aligned, leaves a never-generated stage alone, strips a genuine
+  orphan scene without calling `run_stage` at all — plus the test that
+  actually proves the point of this fix: `test_fires_regardless_of_which_
+  stage_was_edited` drives a full `_revise_one("characters", ...)` round
+  with `stages.downstream_of` mocked to return `[]` (simulating an edit
+  whose own cascade reaches nothing) and confirms `screenplay` still gets
+  backfilled for its missing scene — proving the guarantee doesn't depend
+  on the edited stage's downstream closure. Full suite now 158 tests (was
+  153), still fully offline, `py_compile` clean.
+- 2026-07-11 (later 3) — **First pass at the same bug (superseded by the
+  entry above): `revise` could leave screenplay.json/storyboard.json (and
+  any other scene-keyed downstream artifact) permanently stuck covering
+  only a subset of scenes — e.g. "only scene 1" — no matter how many later
+  revision rounds ran.** User reported this directly. Root cause:
+  `_run_downstream_revision`'s scoped cascade only ever passes `revise_keys`
+  = the scene numbers the OPERATOR'S edit actually touched (via
+  `artifact_diff`'s diff) into `run_stage(..., existing=, revise_keys=)`;
+  `revision_merge.merge_by_key` (what every scoped agent call uses) only
+  ever ADDS or REPLACES those specific keys, carrying every OTHER existing
+  entry over byte-identical — so if a downstream artifact's `existing` data
+  was already missing a scene, nothing about a later, unrelated scoped
+  revision would ever notice or backfill it. Initial fix inlined a
+  `fidelity.check_scene_alignment` check into `_run_downstream_revision`
+  itself, unioning any `missing_scenes` into that round's `d_keys` — but
+  this only fired for a stage that was actually `IN downstream` for the
+  SPECIFIC stage being edited that round, which the user correctly pointed
+  out doesn't actually deliver on "there is no reason this should have
+  happened" — see the entry above for the unconditional replacement.
 - 2026-07-11 (later 2) — **Scoped revisions now merge FIELD BY FIELD within
   a targeted entry, not just entry-by-entry across the whole artifact.**
   User asked directly: "with the response received compare each value in
