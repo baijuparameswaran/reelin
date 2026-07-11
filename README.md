@@ -323,7 +323,16 @@ For each storyboard frame it generates a short **clip** (image-to-video):
 - the **first frame of a scene** is seeded from the in-frame character's
   representation image (`output/casting/<name>.png`) — the identity reference;
 - **later frames** are seeded from the **previous frame's last image**, so motion
-  is continuous within the scene. A scene boundary resets the chain (a cut).
+  is continuous within the scene. A scene boundary resets the chain (a cut);
+- a "shot boundary" frame with **more than one character in it** (a scene's
+  opening frame, or any frame whose in-frame cast changes from the one
+  before it) instead uses Veo's `reference_images` — up to 3 identity-lock
+  portraits, one per character — so every character gets grounded, not just
+  whichever one a single seed image can carry. This trades away frame-to-
+  frame continuity for that one frame (Veo can't do both in the same call),
+  falls back to the normal single-seed path automatically if it's disabled
+  or fails, and leaves every other frame unaffected. Toggle with config
+  `video.multi_character_references` (default on).
 
 `--max-scenes` (default 1, prototype; pass `all` for every scene) limits how
 many scenes get **rendered** — casting-image generation and this video render

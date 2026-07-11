@@ -641,7 +641,23 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
   `output/casting/<name>.png` (identity anchor); later panels use the previous
   clip's last frame for **continuity** (scene boundary = cut); idempotent by a
   content hash of prompt+seed (`pipeline._stale`), so a HITL-feedback-revised
-  prompt re-renders instead of silently staying stale. **Every Veo prompt is
+  prompt re-renders instead of silently staying stale. **A "shot boundary"
+  panel with 2+ in-frame characters uses Veo's `reference_images` instead of
+  a single seed** (`pipeline._resolve_panel_references` decides — the scene's
+  first panel, or any panel whose character SET changes from the one before
+  it, AND at least 2 of those characters have a resolvable casting portrait):
+  every character in frame gets its own identity-lock reference (up to 3,
+  Veo's max), not just whichever one a single seed image could carry —
+  `gemini.generate_video_with_references`, config `video.
+  multi_character_references` (default on). MUTUALLY EXCLUSIVE with
+  seed/extend continuity for that one call (a genuine Veo API constraint),
+  so it trades away frame-to-frame visual continuity for multi-character
+  identity-lock at exactly that boundary panel; every other panel is
+  unaffected, still chaining from the previous clip's tail frame as always.
+  Falls back to the normal seed path automatically on any failure (disabled,
+  SDK unavailable, API error) — `pipeline.py` always computes the normal
+  single-image seed too, regardless, so nothing is lost on fallback.
+  **Every Veo prompt is
   verified** against the guide before submission (`veo_guide.verify_prompt` —
   checks the five required elements + audio cue formatting; issues logged as
   warnings, never blocking); audio cues themselves (ambient/SFX labels,

@@ -722,11 +722,46 @@ def _frame_char_anchor(frame: dict, cast_index: dict, out: Path) -> Path | None:
     return None
 
 
+def _resolve_panel_references(fr: dict, prev_char_key, cast_index: dict, out: Path):
+    """Multi-character Veo `reference_images` for THIS panel, at a "shot
+    boundary" — the scene's first panel (`prev_char_key is None`) or any
+    panel whose in-frame character SET differs from the immediately
+    preceding panel's — and only when 2+ of those characters have a
+    resolvable casting portrait. A boundary panel with 0-1 resolvable
+    portraits returns no references at all: the caller keeps using its
+    existing single-`seed` path (`_frame_char_anchor`/`prev_tail`), since
+    Veo's `image=` conditioning is a stronger, more literal grounding for a
+    lone subject than a loose identity reference, and there's nothing
+    "multi" about a single character anyway. This is the fix for a real
+    pipeline gap: `_frame_char_anchor` above only ever anchors the FIRST
+    name in `characters_in_frame`, so a boundary panel with two or more
+    characters previously gave every character AFTER the first one zero
+    identity grounding.
+
+    Returns `(reference_image_paths, this_panel's_char_key)` — the caller
+    threads the second value back in as `prev_char_key` for its NEXT call
+    (walking a scene panel-by-panel). A panel with no listed characters at
+    all returns the caller's OWN `prev_char_key` unchanged (nothing here to
+    update boundary tracking with, and nothing to reference either)."""
+    names = list(dict.fromkeys(fr.get("characters_in_frame") or []))
+    char_key = frozenset(names) if names else prev_char_key
+    is_boundary = prev_char_key is None or (names and frozenset(names) != prev_char_key)
+    if not is_boundary or not names:
+        return [], char_key
+    refs = []
+    for name in names[:3]:                # Veo 3.1 accepts at most 3 reference images
+        rel = cast_index.get(name)
+        if rel and (out / rel).exists():
+            refs.append(out / rel)
+    return (refs if len(refs) >= 2 else []), char_key
+
+
 def _render_one_panel(fr: dict, snum, sdir: Path, seed: Path | None,
                       prev_clip_path: Path | None, out: Path, *,
                       casting_lookup: dict, location_desc: str, visual_overview: dict,
                       voice_index: dict, audio_overview: dict,
                       no_bg_music: bool, room_tone: bool, no_subtitles: bool,
+                      reference_images: list[Path] | None = None,
                       force: bool = False) -> dict:
     """Render (or skip, if unchanged) exactly ONE storyboard panel's video
     clip. Shared by `_render_scene_frames`'s per-scene loop and
@@ -739,6 +774,15 @@ def _render_one_panel(fr: dict, snum, sdir: Path, seed: Path | None,
     panel(s), since a caller re-rendering a specific panel on purpose wants
     that panel rebuilt even in the rare case its prompt+seed happen to hash
     identically to before.
+
+    `reference_images` — see `_resolve_panel_references` (both call sites
+    compute it the same way, given to this function pre-computed so the
+    boundary-detection logic lives in exactly one place too). Passed
+    through to `i2v.generate_clip` ALONGSIDE `seed` (not instead of it) —
+    `i2v._gen_gemini` is the one that decides which actually gets used,
+    falling back to `seed` on its own if the reference-image call is
+    disabled/unavailable/fails, so this function doesn't need to know
+    which path was actually taken.
 
     Returns a dict: `frame_record` (the frames_out-shaped manifest entry —
     including the `start_frame`/`end_frame` fields), `prompt` (the exact Veo
@@ -766,21 +810,26 @@ def _render_one_panel(fr: dict, snum, sdir: Path, seed: Path | None,
     clip = sdir / f"frame_{tag}.mp4"
     tail_img = sdir / f"frame_{tag}_tail.png"
     hash_path = sdir / f"frame_{tag}.hash"
-    # Hash covers the prompt, the seed image bytes, AND the requested
-    # duration: a feedback/revision to an earlier frame changes its tail
-    # frame, which changes this frame's seed, which — even with an unchanged
-    # prompt — must still invalidate this clip so continuity re-chains
-    # correctly; a duration-only change (e.g. after a revision shifts the
-    # panel's estimated screen time) must invalidate it too, since neither
-    # the prompt text nor the seed reflects that on their own.
-    current_hash = _content_hash(prompt, seed, prev_clip_path, requested_seconds)
+    # Hash covers the prompt, the seed image bytes, the requested duration,
+    # AND every reference image's bytes (a casting portrait re-rendered via
+    # a revision must invalidate a boundary panel that references it, same
+    # as it already invalidates a panel that SEEDS from it): a feedback/
+    # revision to an earlier frame changes its tail frame, which changes
+    # this frame's seed, which — even with an unchanged prompt — must still
+    # invalidate this clip so continuity re-chains correctly; a duration-
+    # only change (e.g. after a revision shifts the panel's estimated
+    # screen time) must invalidate it too, since neither the prompt text
+    # nor the seed reflects that on their own.
+    current_hash = _content_hash(prompt, seed, prev_clip_path, requested_seconds,
+                                 *(reference_images or []))
     rendered = False
     failed = False
     if force or _stale(clip, hash_path, current_hash):
         if clip.exists():
             _log(f"      scene {snum} frame {tag} — prompt/seed revised, re-rendering …")
         if i2v.generate_clip([seed] if seed else [], prompt, clip, prev_clip=prev_clip_path,
-                             duration_seconds=requested_seconds):
+                             duration_seconds=requested_seconds,
+                             reference_images=reference_images):
             rendered = True
             # Burn subtitle + shot-label overlays onto the clip (in-place)
             # when the operator enables them in config video.overlays.
@@ -811,6 +860,11 @@ def _render_one_panel(fr: dict, snum, sdir: Path, seed: Path | None,
         "start_frame": str(Path(seed).relative_to(out)) if seed and Path(seed).exists() else None,
         "end_frame": str(tail_img.relative_to(out)) if tail_img.exists() else None,
         "clip": str(clip.relative_to(out)) if clip.exists() else None,
+        # Recorded for traceability even though _gen_gemini decides at
+        # render time whether the reference-image call was actually used
+        # (vs. falling back to `seed`) — lets an operator see WHICH
+        # characters this "shot boundary" panel was asked to identity-lock.
+        "reference_images": [str(p.relative_to(out)) for p in reference_images] if reference_images else None,
     }
     return {
         "frame_record": frame_record,
@@ -919,6 +973,7 @@ def _render_scene_frames(storyboard: dict, casting: dict, out: Path,
         sdir.mkdir(exist_ok=True)
         prev_tail = None                        # reset each scene → hard cut between scenes
         prev_clip_path = None                   # previous clip mp4 — for continuity_mode: extend
+        prev_char_key = None                    # reset each scene — see _resolve_panel_references
         frames_out = []
         prompt_log: list[dict] = []
         # scene-level audio overview for panels that have no explicit sound field
@@ -941,12 +996,21 @@ def _render_scene_frames(storyboard: dict, casting: dict, out: Path,
             # forward); the first frame of a scene seeds from the in-frame
             # character's representation image (identity reference).
             seed = prev_tail if (prev_tail and continuity) else _frame_char_anchor(fr, cast_index, out)
+            # Multi-character identity lock at a "shot boundary" (scene start,
+            # or the in-frame cast changing from the previous panel) — see
+            # _resolve_panel_references. Computed alongside `seed`, not
+            # instead of it: `i2v._gen_gemini` decides which actually gets
+            # used, falling back to `seed` on its own if this is
+            # disabled/unavailable/fails.
+            reference_images, prev_char_key = _resolve_panel_references(
+                fr, prev_char_key, cast_index, out)
             res = _render_one_panel(fr, snum, sdir, seed, prev_clip_path, out,
                                     casting_lookup=casting_lookup, location_desc=location_desc,
                                     visual_overview=visual_overview, voice_index=voice_index,
                                     audio_overview=audio_overview,
                                     no_bg_music=no_bg_music, room_tone=room_tone,
-                                    no_subtitles=no_subtitles)
+                                    no_subtitles=no_subtitles,
+                                    reference_images=reference_images or None)
             if res["rendered"]:
                 manifest["clips"] += 1
                 if continuity:
@@ -1124,14 +1188,31 @@ def rerender_panels(storyboard: dict, casting: dict, out: Path, *,
                 return p
         return None
 
+    def _prev_char_key(pnum):
+        """The immediately-preceding panel's in-frame character set, read
+        from the STORYBOARD (not the manifest — a targeted re-render may
+        not be walking sequentially) — mirrors what `_render_scene_frames`'s
+        own top-to-bottom walk would have as `prev_char_key` for this same
+        panel, so `_resolve_panel_references`'s boundary detection (and
+        thus this panel's `_content_hash`) stays consistent between the two
+        entry points, same reasoning as `_resolve_prev_clip_path` above."""
+        if pnum == first_panel_num:
+            return None
+        prev_num = pnum - 1 if isinstance(pnum, int) else None
+        prev_fr = panels_by_num.get(prev_num) if prev_num is not None else None
+        names = list(dict.fromkeys((prev_fr or {}).get("characters_in_frame") or []))
+        return frozenset(names) if names else None
+
     def _render(pnum):
         fr = panels_by_num[pnum]
         seed = _resolve_start_frame(pnum)
         prev_clip_path = _resolve_prev_clip_path(pnum)
+        reference_images, _ = _resolve_panel_references(fr, _prev_char_key(pnum), cast_index, out)
         res = _render_one_panel(fr, snum, sdir, seed, prev_clip_path, out,
                                 casting_lookup=casting_lookup, location_desc=location_desc,
                                 visual_overview=visual_overview, voice_index=voice_index,
                                 audio_overview=audio_overview,
+                                reference_images=reference_images or None,
                                 no_bg_music=no_bg_music, room_tone=room_tone,
                                 no_subtitles=no_subtitles, force=True)
         frames_by_num[pnum] = res["frame_record"]
@@ -1186,7 +1267,19 @@ def rerender_panels(storyboard: dict, casting: dict, out: Path, *,
                                                    voice_index=voice_index,
                                                    no_bg_music=no_bg_music, room_tone=room_tone,
                                                    no_subtitles=no_subtitles)
-                accepted_hash = _content_hash(after_prompt, new_end_path, new_clip_path)
+                # after_num's reference_images (if it's itself a boundary
+                # panel) depend on next_panel_num's NEW character set as
+                # prev_char_key — must be included here too, same reasoning
+                # as new_end_path/new_clip_path above: this bookkeeping has
+                # to match what _render_one_panel's own hash formula would
+                # produce for after_num, or a boundary after_num would be
+                # spuriously flagged stale (or not) on a later pass.
+                next_fr = panels_by_num[next_panel_num]
+                next_names = list(dict.fromkeys(next_fr.get("characters_in_frame") or []))
+                next_char_key = frozenset(next_names) if next_names else _prev_char_key(next_panel_num)
+                after_refs, _ = _resolve_panel_references(after_fr, next_char_key, cast_index, out)
+                accepted_hash = _content_hash(after_prompt, new_end_path, new_clip_path,
+                                              *(after_refs or []))
                 after_hash_path.write_text(accepted_hash)
 
     # Re-stitch this scene's clips (some changed) and reassemble the movie.

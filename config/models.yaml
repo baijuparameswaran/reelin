@@ -93,6 +93,21 @@ video:
                                    #         prior Veo generation (max 141s old, stored 2 days), fixed
                                    #         at 720p, extends up to 7s per call (max 20x -> 148s total).
                                    #         Falls back to `seed` automatically on any error.
+  multi_character_references: true   # at a "shot boundary" (a scene's first panel, or any panel
+                                   # whose in-frame character SET changes from the one before it)
+                                   # with 2+ in-frame characters, seed via Veo 3.1's
+                                   # `reference_images` (up to 3 ASSET-typed identity portraits —
+                                   # "Ingredients to Video") instead of a single `image=` seed, so
+                                   # EVERY in-frame character gets an identity anchor, not just
+                                   # whichever one pipeline.py's single-seed picker happened to
+                                   # pick first. Gemini/veo backend only; mutually exclusive with
+                                   # image-seed/extend continuity for that one clip (a genuine Veo
+                                   # API constraint — see project memory `veo-character-
+                                   # consistency`), so it trades frame-to-frame visual continuity
+                                   # for multi-character identity-lock at that boundary panel only;
+                                   # every other panel is unaffected. Falls back to the normal
+                                   # seed/extend path automatically on any failure. Set false to
+                                   # disable and always use single-image seeding.
   style_suffix: "cinematic, photorealistic"   # Veo guide style keywords; appended only when no style is present in the prompt
   poll_seconds: 10
   timeout_seconds: 1200

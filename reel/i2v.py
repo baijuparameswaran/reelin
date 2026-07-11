@@ -152,7 +152,8 @@ def _veo_nearest_valid_duration(seconds: float, *, force_max: bool = False) -> i
 
 
 def _gen_gemini(images: list[Path], prompt: str, out_path: Path, *,
-                prev_clip: Path | None = None, duration_seconds: float | None = None) -> bool:
+                prev_clip: Path | None = None, duration_seconds: float | None = None,
+                reference_images: list[Path] | None = None) -> bool:
     """Veo image-to-video via the Gemini API. Seeds from the last keyframe (the
     reference image produced by the image stage); text-to-video if none given.
 
@@ -168,6 +169,21 @@ def _gen_gemini(images: list[Path], prompt: str, out_path: Path, *,
     scene extension instead of image seeding, which also carries ambient/music
     audio forward across the cut. Best-effort: any extend failure falls back to
     the image-seed path below.
+
+    `reference_images` — 2+ character/location identity portraits for a
+    "shot boundary" panel (the caller, `pipeline._resolve_panel_references`,
+    only ever populates this for a panel with MORE than one in-frame
+    character — a single-character panel stays on the proven `images`
+    seed path below, since Veo's `image=` conditioning is a stronger,
+    more literal grounding for a lone subject than a loose identity
+    reference). Tried FIRST, ahead of extend-mode — a character-set
+    boundary is exactly the moment continuity from the previous clip
+    should yield to fresh identity-lock for the new cast. Requires the
+    `multi_character_references` config toggle (default on) AND the SDK;
+    any failure (disabled, SDK unavailable, API error) falls through to
+    the normal seed/extend path below using `images`/`prev_clip` exactly
+    as if `reference_images` had never been given — never a hard failure,
+    same best-effort contract as extend-mode.
 
     Pre-flight: runs the Veo prompt through the guide verifier before sending to
     the API.  Issues are logged as warnings (generation always proceeds — the
@@ -197,6 +213,19 @@ def _gen_gemini(images: list[Path], prompt: str, out_path: Path, *,
     # config/models.yaml's `video.resolution` comment.
     dur = (_veo_nearest_valid_duration(duration_seconds, force_max=(resolution != "720p"))
           if duration_seconds else 8)
+
+    want_refs = (bool(reference_images) and len(reference_images) >= 2
+                and bool(c.get("multi_character_references", True)))
+    if want_refs:
+        try:
+            return gemini.generate_video_with_references(
+                full_prompt, Path(out_path), reference_images,
+                model=model, aspect_ratio=aspect_ratio, resolution=resolution,
+                poll_seconds=poll_seconds, timeout_seconds=timeout_seconds,
+            )
+        except Exception as e:
+            _log(f"      ⚠ Veo reference-image call failed ({type(e).__name__}: {e}) — "
+                 "falling back to single-image-seed continuity")
 
     want_extend = c.get("continuity_mode", "seed") == "extend" and prev_clip and Path(prev_clip).exists()
     if want_extend and resolution != "720p":
@@ -306,12 +335,22 @@ def _gen_http(images: list[Path], prompt: str, out_path: Path, *,
 # ── public API ───────────────────────────────────────────────────────────────
 
 def generate_clip(images, prompt: str, out_path: Path, *, prev_clip: Path | None = None,
-                  duration_seconds: float | None = None) -> bool:
+                  duration_seconds: float | None = None,
+                  reference_images: list[Path] | None = None) -> bool:
     """Render a clip to `out_path` (mp4) conditioned on one or more keyframe
     `images` (a Path or list — last is the start frame; a leading second image is
     used as the prior/last-frame anchor for continuity when the model supports it).
     `prev_clip` — the previous clip's mp4, used for Veo's native scene-extend
     continuity mode (gemini/veo backend only; ignored otherwise).
+
+    `reference_images` — 2+ character/location identity portraits for a
+    multi-character "shot boundary" panel (gemini/veo backend only, via
+    `_gen_gemini`'s `reference_images` param; silently ignored by every
+    other backend — no verified equivalent for diffusers/comfyui-http).
+    `images`/`prev_clip` are still passed through unconditionally alongside
+    it, since `_gen_gemini` falls back to them on its own if the reference
+    call is disabled/unavailable/fails — this function doesn't need to
+    know which path was actually used.
 
     `duration_seconds` — the caller's requested clip length (e.g. from the
     storyboard panel's own duration estimate). Each backend is its own
@@ -327,14 +366,17 @@ def generate_clip(images, prompt: str, out_path: Path, *, prev_clip: Path | None
     imgs = [Path(p) for p in ([images] if isinstance(images, (str, Path)) else images) if p]
     imgs = [p for p in imgs if p.exists()]
     b = backend()
-    # Veo can do text-to-video; the other backends require a seed image.
+    # Veo can do text-to-video; the other backends require a seed image
+    # (reference_images is gemini/veo-only — silently ignored by them, so
+    # it doesn't substitute for a seed here).
     if not imgs and b not in ("gemini", "veo"):
         _log(f"      ⚠ clip skipped — no seed image available and {b!r} backend requires one")
         return False
     try:
         if b in ("gemini", "veo"):
             return _gen_gemini(imgs, prompt, out_path, prev_clip=prev_clip,
-                               duration_seconds=duration_seconds)
+                               duration_seconds=duration_seconds,
+                               reference_images=reference_images)
         if b == "diffusers":
             return _gen_diffusers(imgs, prompt, out_path, duration_seconds=duration_seconds)
         if b in ("comfyui", "http"):

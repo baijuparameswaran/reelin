@@ -149,14 +149,26 @@
   confirming the locked-location block is doing its job); `storyboard` was
   still running (synthesis profile, 5 scenes sequential) when this note was
   written and not yet confirmed end-to-end.
-- **Open investigation (not yet implemented):** multi-character reference
-  images for Veo (`reference_images`, up to 3 `ASSET` images, mutually
-  exclusive with continuity per-call — this is Increment 5 above) and for
-  Gemini image gen (`refs`, up to 20 images, no such exclusivity but not wired
-  through `imagegen.py` yet); Kling 3.0 as a possible alternate provider for
-  cross-scene subject-locked generation, not yet vetted against its real API.
-  Full notes in memory (`veo_character_consistency` — see auto-memory for this
-  project).
+- **Increment 5 (multi-character Veo `reference_images`) is now implemented**
+  — see the 2026-07-10 (later 11) session log entry for the full mechanism
+  (`pipeline._resolve_panel_references`, `gemini.generate_video_with_references`,
+  config `video.multi_character_references`). Scoped to CHARACTERS only
+  (per explicit request), at a "shot boundary" (scene start, or the
+  in-frame cast changing panel to panel), only when 2+ characters have a
+  resolvable casting portrait — a single-character boundary still uses the
+  proven `image=` seed path, which grounds a lone subject more literally
+  than a loose identity reference does. **Still open, not implemented:**
+  folding the scene's LOCATION portrait into the same `reference_images`
+  call alongside characters (memory `veo_character_consistency` shows this
+  works together in a live ad-hoc test, but wasn't asked for here and would
+  eat into the 3-reference budget); multi-reference for Gemini STILL-image
+  generation (`imagegen.py`'s `_gen_gemini`/`generate_image` still don't
+  accept `refs`, even though `gemini.generate_image()` itself already
+  does — this specific gap is unrelated to and unaffected by the video-side
+  work just landed); Kling 3.0 as a possible alternate provider for
+  cross-scene subject-locked generation, not yet vetted against its real
+  API. Full notes in memory (`veo_character_consistency` — see auto-memory
+  for this project, updated alongside this session's implementation).
 - **Recommended next action:** Enable GPU — replace the snap Ollama:
   `! curl -fsSL https://ollama.com/install.sh | sh`
   Then re-pull: `ollama pull qwen3:4b && ollama pull qwen3:8b`.
@@ -179,13 +191,128 @@
   examples), not a committed suite.
 - **Next up:** confirm the still-running `storyboard` live test (bundle
   location/cast data, panel consistency with the rendered location image);
-  Increment 5 — wire location + character references into Veo's
-  `reference_images` for a scene's opening frame; live smoke-test the SDK
-  video-call fixes on a real run; moodboard tile auto-render (opt-in); richer
-  ingest (PDF/EPUB/.fdx); draft all scenes (not just first N); edit / sound mix
-  / final cut phase.
+  live smoke-test the multi-character-reference feature (2026-07-10 later 11)
+  and the SDK video-call fixes on a real run (both currently only verified
+  offline against stubs/the real SDK's Pydantic validation, per this
+  project's established practice of not spending live API quota mid-
+  investigation); moodboard tile auto-render (opt-in); richer ingest
+  (PDF/EPUB/.fdx); draft all scenes (not just first N); edit / sound mix /
+  final cut phase.
 
 ## Session log
+- 2026-07-10 (later 11) — **Every character in frame at a scene/shot
+  boundary now gets its own Veo identity reference, not just one** —
+  Increment 5 from the 2026-07-04 "locations cast alongside characters"
+  session, explicitly paused back then and picked up now on direct
+  request ("while determining the scene/shot boundaries, make sure to pass
+  in the reference of all the characters present in the frame as a
+  reference image while rendering"). The real gap this closes:
+  `pipeline._frame_char_anchor` has always only anchored the FIRST name in
+  a panel's `characters_in_frame` list — a panel with two or more
+  characters gave every character after the first ZERO identity grounding,
+  since Veo's `image=` seed can only carry one still image. Design taken
+  directly from the prior investigation already saved in project memory
+  (`veo_character_consistency` — includes a live ad-hoc SDK smoke test from
+  2026-07-06 confirming the request shape works): Veo 3.1's "Ingredients to
+  Video" `reference_images` config field accepts up to 3 ASSET-typed
+  identity images per call, but is HARD mutually exclusive with
+  `image=`/`last_frame` continuity in the same call — a genuine Veo API
+  constraint confirmed via live SDK introspection, not something this
+  wrapper can work around. So it's used selectively, not on every panel:
+  new `pipeline._resolve_panel_references(fr, prev_char_key, cast_index,
+  out)` treats a panel as a "shot boundary" when it's a scene's first panel
+  or its in-frame character SET differs from the immediately preceding
+  panel's, and only actually returns references when 2+ of those
+  characters have a resolvable casting portrait — a boundary panel with
+  just one character stays on the existing single-`seed` path, since a
+  literal first-frame seed is a stronger grounding for a lone subject than
+  a loose "ingredient" reference is, and there's nothing "multi" about one
+  character anyway. Every other (non-boundary) panel is completely
+  unaffected — still chains from `prev_tail` exactly as before.
+
+  New `gemini.generate_video_with_references` (+ `_generate_video_with_
+  references_once`) mirrors `extend_video`'s shape (SDK-only — the raw
+  REST `predictLongRunning` surface has never been verified to accept this
+  field, unlike image-seeding/extend; same transient-error retry/backoff,
+  same `_log_call` tagging). Always requests Veo's only valid duration for
+  this mode (8s, per `i2v._veo_nearest_valid_duration`'s docstring, which
+  had already documented this force_max case in an earlier session before
+  the feature existed to use it) and `person_generation="allow_adult"`
+  (the official parameter table groups reference-images with image-to-
+  video/interpolation for this field, per the comment already sitting next
+  to `_extend_video_once`'s own `"allow_all"` choice). `i2v._gen_gemini`
+  gained a `reference_images` param, tried FIRST — ahead of extend-mode —
+  since a character-boundary is exactly the moment continuity from the
+  previous clip should yield to fresh identity-lock for the new cast; any
+  failure (config `video.multi_character_references: false`, SDK
+  unavailable, API error) falls straight through to the existing
+  seed/extend logic using the SAME `images`/`prev_clip` the caller always
+  passes regardless — `pipeline.py` computes the normal single-image
+  `seed` unconditionally, same as before this feature existed, and passes
+  `reference_images` ALONGSIDE it rather than instead of it, so a disabled/
+  failed reference call never loses grounding entirely, it just falls back
+  to exactly today's behavior. `generate_clip`/`_content_hash` both thread
+  `reference_images` through (the hash now includes every reference
+  image's bytes, so a casting-portrait revision correctly invalidates a
+  boundary panel that references it, same as it already invalidates a
+  panel that SEEDS from it); the manifest's per-panel record gained a
+  `reference_images` field for operator visibility into which characters a
+  given boundary panel was asked to lock.
+
+  `rerender_panels` (the one-hop-cascade targeted re-render path) needed
+  the identical boundary/reference computation wired in too, or its
+  `_content_hash` would disagree with what a full `_render_scene_frames`
+  pass computes for the same panel — the exact class of bug
+  `_resolve_prev_clip_path` was already written to prevent for
+  `prev_clip_path`, in the session that built the one-hop cascade
+  mechanism. New `_prev_char_key(pnum)` (reads the PRECEDING panel's
+  `characters_in_frame` from the storyboard, since a targeted re-render
+  isn't walking sequentially) feeds the same shared
+  `_resolve_panel_references` both call sites now use. The cascade-stop
+  bookkeeping (the panel two hops past the last target, whose `.hash`
+  sidecar gets rewritten to the value it WOULD have if fully re-chained,
+  without touching its actual clip bytes) needed the same treatment — it
+  was already missing `requested_seconds` from its hash recompute (a
+  pre-existing gap, left alone, out of scope here) but adding
+  `reference_images` there was NOT optional: without it, a boundary panel
+  two hops past a cascade would get a bookkeeping hash that disagreed with
+  `_render_one_panel`'s real formula, spuriously flagging it stale (or not)
+  on a later pass — a real latent bug this change would otherwise have
+  introduced, caught by tracing the formula through rather than by a test
+  failure.
+
+  New config `video.multi_character_references` (default `true`).
+
+  Added `tests/test_multi_character_references.py` (16 tests, fully
+  offline — no live Ollama/Gemini/Veo calls): `_resolve_panel_references`'
+  boundary/cast-change/portrait-availability/3-image-cap logic directly (7
+  cases); `_render_one_panel` threading `reference_images` through to
+  `i2v.generate_clip` and into the hash (confirmed a revised casting
+  portrait's bytes changing re-triggers a render); `i2v._gen_gemini`'s
+  branch selection (reference call used when 2+ refs + config enabled;
+  falls back to seed on a single ref, config-disabled, or a raised
+  exception); and — notably — a test against the REAL installed
+  `google-genai` SDK types (only `Client` mocked, so real Pydantic
+  validation of the request shape still runs, matching how earlier
+  sessions verified other SDK-shape fixes) confirming
+  `GenerateVideosConfig.reference_images` actually accepts the built
+  `VideoGenerationReferenceImage(image=..., reference_type=ASSET)` objects,
+  `duration_seconds=8`/`person_generation="allow_adult"` land correctly,
+  and more than 3 supplied images get capped; plus one end-to-end
+  `rerender_panels` test (3-panel scene, Bob joins at panel 2) confirming
+  the targeted boundary panel gets both characters' references while the
+  one-hop cascade panel (same cast, not a boundary) correctly gets none.
+  Full suite now 123 tests (was 107), all still offline, `py_compile`
+  clean. Not live-tested against the real Veo API in this session
+  (deliberately, per this project's established practice of stubbing first
+  and spending real API quota only once, on purpose, later) — worth a
+  live smoke test on the next real run, per the updated "Next up" note.
+
+  Updated project memory `veo_character_consistency` to reflect this is
+  now implemented (was "Open investigation... nothing implemented yet"),
+  keeping the still-genuinely-open items (location-in-the-same-call,
+  Gemini still-image multi-ref, Kling 3.0) so a future session doesn't
+  have to re-derive what's actually left.
 - 2026-07-10 (later 10) — **`revise` can now DELETE and ADD scenes directly
   in `scenes.json`, not just modify one — lifting the "v1 scope assumption:
   scene count/order is stable" limit documented (and deliberately left

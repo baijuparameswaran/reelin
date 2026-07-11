@@ -520,6 +520,125 @@ def _extend_video_once(prev_video_path: Path, prompt: str, out_path: Path, *,
     raise RuntimeError("Veo extend returned no video")
 
 
+def generate_video_with_references(prompt: str, out_path: Path,
+                                   reference_image_paths: list[Path], *,
+                                   model: str = "veo-3.1-generate-preview",
+                                   aspect_ratio: str = "16:9",
+                                   resolution: str = "720p",
+                                   poll_seconds: float = 10,
+                                   timeout_seconds: float = 1200,
+                                   op_retries: int = 3) -> bool:
+    """Generate a video clip anchored to up to 3 character/object identity
+    reference images — Veo 3.1's "Ingredients to Video" `reference_images`
+    config field, each typed ASSET (STYLE is Veo-2-only, rejected on 3.1;
+    confirmed via live SDK introspection — see project memory
+    `veo-character-consistency`). Used at a "shot boundary" where MORE THAN
+    ONE character is in frame: unlike a single `image=` seed (which can
+    only carry ONE identity forward, whichever character
+    `pipeline._frame_char_anchor` happened to pick first), every in-frame
+    character gets its own locked identity reference.
+
+    SDK-only — the raw REST `predictLongRunning` surface
+    `_generate_video_urllib` uses has not been verified to accept this
+    field (unlike image-seeding/extend, which have both been exercised over
+    both transports); raises `RuntimeError` immediately if the SDK isn't
+    available, which the caller (`i2v._gen_gemini`) treats as any other
+    reference-call failure and falls back to the proven single-image-seed
+    path.
+
+    MUTUALLY EXCLUSIVE with image-seed/last-frame continuity in the same
+    call — a genuine Veo API constraint (confirmed via a live ad-hoc SDK
+    smoke test, see the same memory note), not a limitation of this
+    wrapper: a reference-image call can't also chain from a previous
+    clip's tail frame, so this one clip trades frame-to-frame visual
+    continuity for multi-character identity-lock. Always requests Veo's
+    only valid duration for this mode, 8s (see
+    `i2v._veo_nearest_valid_duration`'s `force_max` cases), and
+    `person_generation="allow_adult"` (the official parameter table groups
+    reference-images with image-to-video/interpolation for this field, not
+    with text-to-video/extension's "allow_all" — see the comment in
+    `_extend_video_once` above). Retries transient Veo operation errors
+    (8/13/14) with the same backoff as `generate_video`/`extend_video`.
+    Best-effort — raises on any non-transient failure; the caller catches
+    it and falls back to the single-image-seed path."""
+    for attempt in range(op_retries + 1):
+        try:
+            ok = _generate_video_with_references_once(
+                prompt, out_path, reference_image_paths, model=model,
+                aspect_ratio=aspect_ratio, resolution=resolution,
+                poll_seconds=poll_seconds, timeout_seconds=timeout_seconds)
+            _log_call("VIDEO_REFS", model=model, backend="sdk", outcome="success", path=out_path)
+            return ok
+        except Exception as e:
+            code = getattr(e, "veo_code", None)
+            if code in _VEO_TRANSIENT and attempt < op_retries:
+                wait = min(15.0 * (2 ** attempt), 90.0)
+                print(f"[reel] Veo reference-image call: transient error (code {code}) — "
+                      f"resubmitting in {wait:.0f}s (attempt {attempt + 1}/{op_retries})", flush=True)
+                _log_call("VIDEO_REFS", model=model, backend="sdk",
+                          outcome=f"retry(code={code})", path=out_path,
+                          note=f"attempt={attempt + 1}/{op_retries}")
+                time.sleep(wait)
+                continue
+            _log_call("VIDEO_REFS", model=model, backend="sdk",
+                      outcome=f"error({type(e).__name__}, code={code})", path=out_path)
+            raise
+    return False
+
+
+def _generate_video_with_references_once(prompt: str, out_path: Path,
+                                          reference_image_paths: list[Path], *,
+                                          model: str, aspect_ratio: str, resolution: str,
+                                          poll_seconds: float, timeout_seconds: float) -> bool:
+    """Single reference-image attempt — no retry, no logging (the caller
+    wraps both, mirroring `_extend_video_once`)."""
+    genai, types = _sdk() or (None, None)
+    if genai is None:
+        raise ImportError("google-genai not installed — run: pip install google-genai")
+    client = genai.Client(api_key=api_key())
+
+    refs = []
+    for p in reference_image_paths[:3]:   # Veo 3.1 accepts at most 3 reference images
+        p = Path(p)
+        mime = "image/png" if str(p).lower().endswith(".png") else "image/jpeg"
+        refs.append(types.VideoGenerationReferenceImage(
+            image=types.Image(image_bytes=p.read_bytes(), mime_type=mime),
+            reference_type=types.VideoGenerationReferenceType.ASSET,
+        ))
+
+    operation = client.models.generate_videos(
+        model=model,
+        prompt=prompt,
+        config=types.GenerateVideosConfig(
+            aspect_ratio=aspect_ratio,
+            resolution=resolution,
+            number_of_videos=1,
+            duration_seconds=8,             # only valid value for a reference-image call
+            person_generation="allow_adult",
+            reference_images=refs,
+        ),
+    )
+    deadline = time.time() + timeout_seconds
+    while not operation.done:
+        if time.time() > deadline:
+            raise TimeoutError(f"Veo reference-image operation timed out after {timeout_seconds}s")
+        time.sleep(poll_seconds)
+        operation = client.operations.get(operation)
+
+    for gen_video in (operation.result.generated_videos or []):
+        video_bytes = client.files.download(file=gen_video.video)
+        video_data = bytes(video_bytes) if not isinstance(video_bytes, (bytes, bytearray)) else video_bytes
+        Path(out_path).write_bytes(video_data)
+        return True
+
+    if operation.error:
+        err = RuntimeError(f"Veo reference-image call failed: {operation.error}")
+        err.veo_code = (operation.error.get("code")
+                        if isinstance(operation.error, dict) else None)
+        raise err
+    raise RuntimeError("Veo reference-image call returned no video")
+
+
 def _generate_video_urllib(prompt: str, out_path: Path, *,
                             image_path: Path | None,
                             model: str,
