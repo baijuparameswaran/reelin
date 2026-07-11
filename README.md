@@ -254,15 +254,17 @@ each completed `output/<stage>.json` and only recomputes the first stage that
 isn't done yet (and everything after it). A stage that was mid-flight when you
 stopped is never half-saved — it simply re-runs.
 
-`--max-scenes`/`--profile` are **inherited automatically** on `--resume` if you
-don't repeat them — the effective values from the run being resumed are saved
-to `output/run_params.json` and reused, so `--resume` alone (as printed at the
-pause prompt) never silently drops back to `--max-scenes`'s default of `1`
-even if the original run used `--max-scenes all`. Passing either flag
-explicitly on the resume command always overrides the inherited value (and
-becomes the new one remembered for any later resume). `--genre` doesn't need
-this — it's already checkpointed to `output/genre.json` and reloaded
-automatically on `--resume`.
+`--max-scenes`/`--profile`/`--no-render` are **inherited automatically** on
+`--resume` if you don't repeat them — the effective values from the run being
+resumed are saved to `output/run_params.json` and reused, so `--resume` alone
+(as printed at the pause prompt) never silently drops back to
+`--max-scenes`'s default of `1` even if the original run used `--max-scenes
+all`, and never silently starts rendering (spending real API quota) partway
+through a run that was explicitly started with `--no-render`. Passing any of
+these flags explicitly on the resume command always overrides the inherited
+value (and becomes the new one remembered for any later resume). `--genre`
+doesn't need this — it's already checkpointed to `output/genre.json` and
+reloaded automatically on `--resume`.
 
 ### Session tracking
 
@@ -313,6 +315,17 @@ Best-effort: with no key the run continues and keeps each character's text
 casting agent — but only the character is rendered.) The `diffusers`/`auto1111`
 backends remain available for local/self-hosted image models
 (`pip install -r requirements-image.txt` for diffusers).
+
+Both this and video rendering (below) can also be skipped for a single run
+without touching config, via `python -m reel.cli story.txt --no-render` —
+every design/planning stage still runs normally (structure, characters,
+scenes, soundscape, visuals, cinematography, screenplay, storyboard), only
+the two stages that spend real Gemini/Veo API quota are skipped. Equivalent
+in effect to setting `image.enabled: false` / `video.enabled: false`, but
+scoped to just this invocation instead of a persistent config change —
+useful for iterating on a story's text before committing to a render.
+Inherited across `--resume` like `--max-scenes`/`--profile` (see
+[Pause & resume](#pause--resume)).
 
 ## Scene rendering (image-to-video, Veo)
 

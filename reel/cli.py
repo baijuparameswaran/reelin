@@ -2,7 +2,7 @@
 
 Usage:
     python -m reel.cli SOURCE.txt [--out DIR] [--max-scenes N] [--profile NAME]
-        [--target-duration N] [--resume]
+        [--target-duration N] [--resume] [--no-render]
     python -m reel.cli --list-models             # show local model status
     python -m reel.cli stages                    # list pipeline stages + their inputs
     python -m reel.cli stage NAME [SOURCE.txt]   # run ONE stage independently
@@ -94,9 +94,10 @@ def _run_params_path(out):
 
 
 def _load_run_params(out) -> dict:
-    """Best-effort read of the CLI-level knobs (max_scenes/profile/genre) the
-    previous full-pipeline run at `out` was actually invoked with — written
-    by `_save_run_params` below. Missing/corrupt file (e.g. a pre-existing
+    """Best-effort read of the CLI-level knobs (max_scenes/profile/genre/
+    target_duration/render) the previous full-pipeline run at `out` was
+    actually invoked with — written by `_save_run_params` below. Missing/
+    corrupt file (e.g. a pre-existing
     `--out` from before this existed, or one only ever touched by standalone
     `stage`/`revise` commands) degrades to an empty dict, never raises —
     callers treat that the same as "no prior record, use the normal
@@ -111,23 +112,30 @@ def _load_run_params(out) -> dict:
         return {}
 
 
-def _save_run_params(out, *, max_scenes, profile, genre, target_duration=None) -> None:
+def _save_run_params(out, *, max_scenes, profile, genre, target_duration=None,
+                     render: bool = True) -> None:
     """Persist the EFFECTIVE (already-resolved, post-inheritance) knobs a
     full-pipeline run used, so a later `--resume` that omits `--max-scenes`/
-    `--profile`/`--target-duration` inherits the same values instead of
-    silently falling back to argparse's own defaults (1 scene, no profile
-    override, config's default target runtime) — which would otherwise be a
-    correctness gap, not just a UX one: an unfinished `--max-scenes all` run
-    resumed bare would only render scene 1's worth of casting images/video
-    from then on. Re-written on every run (fresh or resumed) with whatever
-    was actually used THIS time, so the stored value stays current across
-    any number of resumes and an explicit override on one resume becomes the
-    new inherited default for the next."""
+    `--profile`/`--target-duration`/`--no-render` inherits the same values
+    instead of silently falling back to argparse's own defaults (1 scene, no
+    profile override, config's default target runtime, rendering on) —
+    which would otherwise be a correctness gap, not just a UX one: an
+    unfinished `--max-scenes all` run resumed bare would only render scene
+    1's worth of casting images/video from then on, and a `--no-render`
+    run resumed bare would silently start spending real API quota on a
+    resume that was explicitly meant to stay text-only. Re-written on every
+    run (fresh or resumed) with whatever was actually used THIS time, so
+    the stored value stays current across any number of resumes and an
+    explicit override on one resume becomes the new inherited default for
+    the next. `render` defaults to `True` (rendering on) — matches this
+    project's pre-`--no-render` behavior for every existing caller that
+    doesn't pass it explicitly (standalone `stage`/`revise` invocations,
+    and any run_params.json predating this field)."""
     import json
     p = _run_params_path(out)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps({"max_scenes": max_scenes, "profile": profile, "genre": genre,
-                            "target_duration": target_duration},
+                            "target_duration": target_duration, "render": render},
                             ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -1283,6 +1291,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--resume", action="store_true",
                     help="reuse completed stages in --out and continue from the "
                          "first unfinished one (pair with a prior paused run)")
+    ap.add_argument("--no-render", action="store_true", default=None, dest="no_render",
+                    help="skip casting-image and video rendering for this run — "
+                         "every design/planning stage (structure, characters, scenes, "
+                         "soundscape, visuals, cinematography, screenplay, storyboard) "
+                         "still runs normally, only the two stages that spend real "
+                         "Gemini/Veo API quota are skipped. Equivalent to setting "
+                         "config `image.enabled`/`video.enabled` to false, but scoped "
+                         "to just this invocation. Omitted on a --resume run: inherits "
+                         "whatever the run being resumed actually used")
     ap.add_argument("--list-models", action="store_true",
                     help="show local model / profile status and exit")
     args = ap.parse_args(argv)
@@ -1317,14 +1334,27 @@ def main(argv: list[str] | None = None) -> int:
         target_duration = prev_params["target_duration"]
         print(f"[reel] --target-duration not given — inheriting {target_duration}s "
              "from the run being resumed")
+    # `args.no_render` is None when the flag wasn't given at all (default=None,
+    # distinct from the flag's own True when it WAS given) — same sentinel
+    # pattern as --max-scenes above, needed here because a bare boolean
+    # default of False couldn't tell "not given" apart from "given as off".
+    if args.no_render is None:
+        if args.resume and "render" in prev_params:
+            render = prev_params["render"]
+            print(f"[reel] --no-render not given — inheriting "
+                 f"render={'on' if render else 'off'} from the run being resumed")
+        else:
+            render = True
+    else:
+        render = not args.no_render
 
     _save_run_params(args.out, max_scenes=max_scenes, profile=profile, genre=args.genre,
-                     target_duration=target_duration)
+                     target_duration=target_duration, render=render)
 
     try:
         run(args.source, out_dir=args.out, max_scenes=max_scenes,
             profile_override=profile, resume=args.resume, genre=args.genre,
-            target_duration_seconds=target_duration)
+            target_duration_seconds=target_duration, render=render)
     except PipelineStopped as e:
         session.finish(args.out, "paused")
         print(f"\n[reel] paused at '{e.stage}'. Completed stages saved in {args.out}/.")
@@ -1334,6 +1364,8 @@ def main(argv: list[str] | None = None) -> int:
             resume_cmd += f" --profile {profile}"
         if target_duration:
             resume_cmd += f" --target-duration {target_duration}"
+        if not render:
+            resume_cmd += " --no-render"
         print(f"[reel] resume:  {resume_cmd}")
         return 0
     except KeyboardInterrupt:

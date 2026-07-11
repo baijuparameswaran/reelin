@@ -1624,6 +1624,7 @@ def run(
     resume: bool = False,
     genre: str | None = None,
     target_duration_seconds: int | None = None,
+    render: bool = True,
 ) -> dict:
     """Run the full screenplay-material phase and write artifacts to `out_dir`.
 
@@ -1638,6 +1639,17 @@ def run(
     arithmetic — see `reel.duration_budget`) AND the basis for each rendered
     clip's requested duration, translated by whichever video backend is
     configured (see `reel.i2v.generate_clip`).
+
+    `render` (default `True`) — when `False`, skips casting-image generation
+    AND video rendering entirely for this run, regardless of config
+    `image.enabled`/`video.enabled` — the two ONLY stages that spend real
+    Gemini/Veo API quota (see `cli.py`'s `--no-render` flag, and `revise`'s
+    own `render` flag/`RENDER_SKIP_STAGES` for the analogous toggle in the
+    revision flow). Every other stage (structure, characters, scenes,
+    soundscape, visuals, cinematography, screenplay, storyboard) runs
+    normally either way — this is purely a media-generation cost switch,
+    not a scoping mechanism (unlike `max_scenes`, which still applies to
+    whichever of the two stages DOES run when `render=True`).
     """
     # On a fresh run, clear any direction left over from a previous run that may
     # have crashed before reaching the llm.set_direction(None) at the end.
@@ -1931,7 +1943,9 @@ def run(
     # Render character + location portraits only for names appearing in the scenes
     # that will actually be rendered (1..max_scenes). Capping here avoids burning
     # API quota on characters/locations the video stage will never reference.
-    if imagegen.enabled():
+    if not render:
+        _log("      portraits skipped (--no-render)")
+    elif imagegen.enabled():
         active_names: set[str] = set()
         for sc in scenes.get("scenes", [])[:max_scenes]:
             for nm in (sc.get("characters") or []):
@@ -2029,7 +2043,9 @@ def run(
     #           output/video/movie.mp4               (final assembly)
     # Best-effort: skipped gracefully when no video backend is available.
     scene_render = {}
-    if not i2v.enabled():
+    if not render:
+        _log("10/11 video render — skipped (--no-render)")
+    elif not i2v.enabled():
         _log(f"10/11 video render — skipped ({i2v.unavailable_hint()})")
     else:
         backend_label = i2v.backend()

@@ -200,6 +200,68 @@
   final cut phase.
 
 ## Session log
+- 2026-07-11 (later) — **Added `--no-render` to the main `python -m
+  reel.cli SOURCE.txt` command — casting-image + video rendering can now
+  be skipped for a normal full pipeline run, not just inside `revise`.**
+  User asked directly ("is it possible to add no render for normal
+  pipeline run as well"), pointing at the `revise --render`/`RENDER_
+  SKIP_STAGES` toggle built in an earlier session as the precedent to
+  mirror. Investigated first: `config/models.yaml` already has `image.
+  enabled`/`video.enabled` toggles, and `pipeline.run()` already gates both
+  render call sites on `imagegen.enabled()`/`i2v.enabled()` — so a
+  persistent, config-level "no render" was already possible before this
+  session. What was missing was a per-invocation CLI override (without
+  editing config) and inheritance across `--resume`, matching the UX
+  `--max-scenes`/`--profile` already have.
+
+  `pipeline.run()` gained a `render: bool = True` param; both existing
+  render blocks (casting-image portraits, the "10/11 video render" block)
+  got an `if not render:` short-circuit ahead of their existing config
+  checks, printing a distinct `(--no-render)` skip note so it's clear in
+  the log why nothing rendered (vs. the pre-existing "no API key"/backend-
+  unavailable hints). `cli.py`'s `main()` gained `--no-render`
+  (`action="store_true", default=None` — the same sentinel trick
+  `--profile` already uses, needed here because a plain boolean default of
+  `False` can't tell "flag not given" apart from "explicitly given as
+  off"). Threaded through the exact same inheritance machinery
+  `--max-scenes`/`--profile` already established: `_save_run_params`/
+  `_load_run_params` gained a `render` field (default `True` for any
+  run_params.json predating this — backward compatible, never crashes on
+  an old file), an omitted `--no-render` on `--resume` inherits whatever
+  the run being resumed used, an explicit flag on a resume always
+  overrides AND updates the stored value, and the printed "resume:" hint
+  at a pause includes `--no-render` when applicable so copy-pasting it
+  reproduces the same run rather than silently starting to spend API
+  quota partway through a run that was explicitly meant to stay
+  text-only.
+
+  Added `tests/test_cli_no_render.py` (9 tests): `run_params.json`
+  round-tripping the new `render` field (including the missing-key/
+  pre-existing-file backward-compat case), and `cli.main()` driven
+  directly with `reel.cli.run` mocked as a call-recorder (no real
+  pipeline execution) — flag present/absent, resume inheritance both
+  ways (a prior `render: false` correctly reached, a prior run_params.json
+  with no `render` key at all correctly defaults to `True` rather than
+  crashing), an explicit override on a resume updating the stored value
+  for a LATER bare resume, and the paused-run resume-hint text actually
+  containing `--no-render` when applicable. **Caught and fixed a real bug
+  in the test file itself before it caught anything in the actual code**:
+  two assertions were accidentally dedented outside their own
+  `tempfile.TemporaryDirectory()` `with` block, so they were reading
+  `run_params.json` from an already-deleted temp directory — a
+  `KeyError`/`AssertionError` that looked like a real product bug at
+  first (confirmed it wasn't by reproducing the exact same `cli.main()`
+  call in a bare script outside the test file, which passed) before
+  finding the actual mistake was the test's own indentation. Deliberately
+  did NOT add a `pipeline.run()`-level end-to-end test for the two new
+  `if not render:` gates themselves — consistent with this project's
+  established practice (see the "Still shelved" note above) that a full
+  stubbed `pipeline.run()` integration suite stays throwaway/uncommitted
+  per session, not a committed permanent suite; the gate itself is a
+  single mechanical boolean short-circuit ahead of an already-proven
+  `imagegen.enabled()`/`i2v.enabled()` check, verified by direct code
+  review rather than a heavy new fixture. Full suite now 141 tests (was
+  132), still fully offline, `py_compile` clean.
 - 2026-07-11 — **`revise` now always operates as if `--max-scenes all` had
   been used, and prints its scoping evaluation up front plus a per-
   downstream-stage indication of what's changing.** Three related requests

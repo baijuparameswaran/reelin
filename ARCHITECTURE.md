@@ -332,6 +332,28 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
   (a pre-existing `--out` from before this existed, or one only ever touched
   by standalone `stage`/`revise` commands, which don't go through this path)
   degrades to the normal argparse defaults, never raises.
+- **`--no-render` skips casting-image + video rendering for a normal full
+  pipeline run** — the same two API-cost stages `revise`'s own `RENDER_SKIP_STAGES`/
+  `--render` toggle already gates in the revision flow, now available on the
+  main `python -m reel.cli SOURCE.txt` command too (`pipeline.run`'s new
+  `render: bool = True` param). Every design/planning stage still runs
+  normally either way — this is purely a media-generation cost switch, not
+  a scoping mechanism (unlike `--max-scenes`, which still applies to
+  whichever of the two DOES run when rendering is on). Two call sites in
+  `pipeline.run()` gained an `if not render:` short-circuit ahead of their
+  existing `imagegen.enabled()`/`i2v.enabled()` checks (config `image.
+  enabled`/`video.enabled` — already-existing toggles this flag doesn't
+  replace, just adds a per-invocation override on top of). `cli.py`'s
+  `--no-render` flag uses the same `default=None` sentinel trick
+  `--profile` already established (distinct from the flag's own `True`
+  when actually given) so `main()` can tell "not given, inherit" apart
+  from "explicitly turned off" — mirrors `_MAX_SCENES_UNSET`'s reasoning
+  above, applied to a plain `store_true` flag rather than a typed value.
+  `render` is persisted to `run_params.json` (default `True` for any
+  pre-existing file lacking the field) and inherited across `--resume`
+  identically to `--max-scenes`/`--profile`; the printed "resume:" hint
+  includes `--no-render` when applicable so copy-pasting it reproduces the
+  same run.
 - **Session identity (`reel/session.py`):** one full story-to-video run (ingest
   through render) is a **session**, identified by a generated id
   (`<timestamp>-<random>`) persisted to `output/session.json`
