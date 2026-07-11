@@ -80,7 +80,7 @@ scenes to hit a count — but every scene below becomes a separate rendered
 video clip downstream, so also never split what can be told as ONE continuous
 scene; prefer the FEWEST scenes that still tell the story faithfully (see
 STRICT RULE 9 below).
-
+{structure_note}
 STRICT RULES:
 1. SOURCE TEXT IS THE ONLY AUTHORITY. Every scene must correspond to an actual
    event, location, or moment explicitly present in the source text below.
@@ -201,6 +201,69 @@ def _canonical_names_block(characters: dict | None) -> str:
         "isn't in this list, name them using the exact wording from the "
         "source text instead, as usual.\n"
         f"{bullet}\n"
+    )
+
+
+def _structure_alignment_note(existing: dict | None, revise_keys: set | None) -> str:
+    """Scoped-revision-only prompt block: states the EXISTING scene count and
+    exactly which scene number(s) this round is scoped to, so the model
+    aligns to the previous run's structure by default rather than silently
+    re-segmenting the whole story to a different count. Additions/removals
+    remain possible — `revision_merge.merge_by_key` only actually accepts a
+    new number if it's in `revise_keys`, and deletion is handled entirely by
+    the caller (`cli._strip_removed_scenes`) — but per the operator's own
+    framing, that should only ever happen as an explicit, intended exception,
+    never as an incidental side effect of the model re-segmenting freely.
+    Empty (no-op) for a fresh, non-scoped run."""
+    if revise_keys is None or not existing:
+        return ""
+    count = len(existing.get("scenes", []) or [])
+    if not count:
+        return ""
+    return (
+        f"\nSTRUCTURE ALIGNMENT — SCOPED REVISION: the story currently has "
+        f"{count} scene(s). This round only revises scene number(s) "
+        f"{sorted(revise_keys, key=str)} — every other scene must stay "
+        f"exactly as it was (same count, same numbering, same order). Do NOT "
+        f"add or remove a scene as a side effect of re-segmenting the story; "
+        f"only introduce a new scene number or drop an existing one if the "
+        f"revision note above explicitly calls for it as a deliberate "
+        f"exception, not as an incidental recount.\n"
+    )
+
+
+def _revision_reminder_note(prior_scene_count: int | None) -> str:
+    """Distinct from `_structure_alignment_note` above: that one only fires
+    for a SCOPED regen (`existing`+`revise_keys` both given), where the
+    scene count is enforced to stay stable. This one fires for a DRASTIC,
+    fully UNSCOPED regen following a revision (e.g. `cli._revise_source`'s
+    fallback when a source-text edit is judged to genuinely imply an
+    added/removed scene) — where the count IS expected to legitimately
+    change, so `_structure_alignment_note`'s "keep the same count" framing
+    would be actively wrong here.
+
+    But "the count may change" is not the same as "fragment freely" — rule
+    9 (MINIMIZE SCENE COUNT) already applies to every segmentation, fresh or
+    not, yet a full regen triggered by a text EDIT carries a specific risk
+    the generic rule doesn't call out: the edited prose's own paragraph
+    breaks can bias the model toward treating each rewritten beat as its
+    own scene, even when location and time both stay continuous — exactly
+    the failure this note exists to head off. Empty (no-op) for a genuinely
+    fresh, non-revision segmentation (`prior_scene_count` is only ever
+    passed by the reel.cli revise flow, never a first-time pipeline run)."""
+    if not prior_scene_count:
+        return ""
+    return (
+        f"\nNOTE: this is a REVISION regenerating the scene breakdown for an "
+        f"edited story, not a first-time segmentation — the previous version "
+        f"told this story in {prior_scene_count} scene(s). MINIMIZE SCENE "
+        f"COUNT (rule 9) still applies IN FULL here: new or rewritten prose "
+        f"is not itself a reason for more scenes, and a paragraph break in "
+        f"the edited text is not automatically a scene break. Only introduce "
+        f"a new scene where the edit genuinely changes location, causes a "
+        f"real time jump, or shifts the dramatic purpose — merge everything "
+        f"else exactly as rule 9 already requires, the same as you would for "
+        f"a fresh segmentation.\n"
     )
 
 
@@ -344,6 +407,7 @@ def segment_scenes(
     existing: dict | None = None,
     revise_keys: set | None = None,
     characters: dict | None = None,
+    prior_scene_count: int | None = None,
 ) -> dict:
     """`existing` + `revise_keys` (a set of scene `number`s) support a scoped
     revision: the model still sees the FULL source text and re-segments the
@@ -370,10 +434,23 @@ def segment_scenes(
     deterministically corrects the common near-miss (e.g. "Woman" vs the
     canonical "Young Woman") the LLM sometimes still produces despite that
     instruction — see both functions' docstrings for why this needed both a
-    prompt fix AND a deterministic fallback."""
+    prompt fix AND a deterministic fallback.
+
+    `prior_scene_count` (only ever passed by `reel.cli`'s `revise` flow, for
+    a DRASTIC — fully unscoped — regen following a source-text edit judged
+    to genuinely imply an added/removed scene) feeds `_revision_reminder_note`
+    instead of `_structure_alignment_note`: the count is expected to change
+    here, but rule 9's discipline still fully applies — see that function's
+    docstring for the specific risk (edited prose's paragraph breaks biasing
+    the model toward over-fragmenting) it exists to head off. Mutually
+    exclusive with the scoped `existing`+`revise_keys` case in practice — a
+    call is either scoped (existing+revise_keys) or a fresh/drastic regen
+    (prior_scene_count), never both."""
     profile = profile or llm.agent_profile("scenes")
     beats = json.dumps(structure.get("three_act", {}), ensure_ascii=False, indent=2)
     source_text = source["text"][:MAX_CHARS]
+    structure_note = (_structure_alignment_note(existing, revise_keys)
+                      or _revision_reminder_note(prior_scene_count))
     prompt = llm.with_feedback(
         PROMPT.format(
             target=target,
@@ -381,6 +458,7 @@ def segment_scenes(
             title=source["title"],
             text=source_text,
             character_names_block=_canonical_names_block(characters),
+            structure_note=structure_note,
         ),
         feedback,
     )

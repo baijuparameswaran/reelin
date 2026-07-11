@@ -73,14 +73,17 @@ def _moodboard(ctx, *, profile=None, feedback=None, max_scenes=1, **_):
                             max_scenes=max_scenes, profile=profile, feedback=feedback)
 
 def _scenes(ctx, *, profile=None, feedback=None, existing=None, revise_keys=None,
-           target=None, **_):
+           target=None, prior_scene_count=None, **_):
     # `target` (from reel.duration_budget.suggest_scene_target, given the
     # run's --target-duration) only overrides segment_scenes' own default
     # scene-count guidance when the caller actually has one to give (e.g.
     # cli.py's `revise`, restoring the original run's target) — None leaves
     # segment_scenes' own default in place, unchanged from before this param
-    # existed.
+    # existed. `prior_scene_count` (also revise-only) feeds the DRASTIC-regen
+    # reminder note — see segment_scenes' own docstring.
     kwargs = {"target": target} if target else {}
+    if prior_scene_count:
+        kwargs["prior_scene_count"] = prior_scene_count
     return segment_scenes(ctx["source"], ctx["structure"], profile=profile, feedback=feedback,
                           existing=existing, revise_keys=revise_keys,
                           characters=ctx.get("characters"), **kwargs)
@@ -268,7 +271,8 @@ def run_stage(name: str, out: str | Path = "output", *, input_path: str | None =
               profile: str | None = None, feedback: str | None = None,
               max_scenes: int | None = 1, save: bool = True,
               existing: dict | None = None, revise_keys: set | None = None,
-              target: str | None = None, shots_guidance: str = "") -> dict:
+              target: str | None = None, shots_guidance: str = "",
+              prior_scene_count: int | None = None) -> dict:
     """Invoke a single stage independently. Loads each required input from its
     checkpoint in `out` (ingesting the source on demand), runs the stage, and
     writes its artifact. Returns the stage result.
@@ -290,7 +294,17 @@ def run_stage(name: str, out: str | Path = "output", *, input_path: str | None =
     the original run used — `cli.py`'s `revise` command computes these from
     `reel.duration_budget` given the inherited target before calling here;
     both default to falsy, meaning "no override, use this stage's own
-    default", identical to every call site that predates these params."""
+    default", identical to every call site that predates these params.
+
+    `prior_scene_count` (only consumed by the "scenes" stage, ignored
+    elsewhere) is the OPPOSITE case from `existing`+`revise_keys`: it's for
+    a DRASTIC, fully unscoped regen (no `existing`/`revise_keys` at all)
+    following a revision that's expected to legitimately change the scene
+    count — `cli._revise_source`'s full-regen fallback passes the PRIOR
+    scene count so the model is still reminded rule 9 (MINIMIZE SCENE
+    COUNT) applies in full, rather than treating a text edit's own
+    paragraph breaks as license to fragment. See `scenes.
+    _revision_reminder_note`'s docstring for the specific risk this covers."""
     if name not in REGISTRY:
         raise KeyError(f"unknown stage '{name}'. Known: {', '.join(names())}")
     stage = REGISTRY[name]
@@ -306,7 +320,8 @@ def run_stage(name: str, out: str | Path = "output", *, input_path: str | None =
             ctx[dep] = data
     result = stage.run(ctx, out=outp, profile=profile, feedback=feedback, max_scenes=max_scenes,
                        existing=existing, revise_keys=revise_keys,
-                       target=target, shots_guidance=shots_guidance)
+                       target=target, shots_guidance=shots_guidance,
+                       prior_scene_count=prior_scene_count)
     if save and isinstance(result, dict):
         _save_artifact(outp, stage.artifact(), result)
         if name == "screenplay":

@@ -35,7 +35,7 @@ SYSTEM = (
 PROMPT = """\
 {revision_note}Break ONE scene into a numbered shot list with fully attributed
 dialogue. Use the camera coverage below to decide the shots.
-
+{structure_note}
 Story logline: {logline}
 Tone: {tone}
 {story_block}
@@ -184,6 +184,28 @@ def _scene_cinema_block(scene_number: int, lookup: dict[int, dict]) -> str:
     if c.get("transition_to_next"):
         lines.append(f"- Transition: {c['transition_to_next']}")
     return "\n".join(lines) + "\n"
+
+
+def _shot_structure_note(existing_scene: dict | None) -> str:
+    """Scoped-revision-only prompt block: states this ONE scene's EXISTING
+    shot count so a targeted redraft aligns to the previous run's structure
+    by default — changing shot COUNT should be a deliberate exception (the
+    revision note explicitly needs a different number of set-ups), not an
+    incidental side effect of redrafting the scene from scratch. Empty
+    (no-op) for a fresh (non-scoped) draft, or a scene with no prior shots
+    to align to (e.g. one newly added this round)."""
+    if not existing_scene:
+        return ""
+    count = len(existing_scene.get("shots", []) or [])
+    if not count:
+        return ""
+    return (
+        f"\nSTRUCTURE ALIGNMENT — SCOPED REVISION: this scene currently has "
+        f"{count} shot(s). Keep the SAME shot count unless the revision note "
+        f"above (or the scene's own content) genuinely requires adding or "
+        f"removing one — a shot count change must be a deliberate exception, "
+        f"not an incidental side effect of redrafting this scene.\n"
+    )
 
 
 def _casting_lookup(casting: dict) -> dict[str, dict]:
@@ -357,6 +379,7 @@ def draft_screenplay(
             prior_ctx = drafted
         prompt = PROMPT.format(
             revision_note=revision_note,
+            structure_note=_shot_structure_note(context_by_num.get(scene_num) if scoped else None),
             logline=logline,
             tone=tone,
             story_block=story_blk,

@@ -84,7 +84,7 @@ Film:
 - Logline: {logline}
 - Genre: {genre}
 - Tone: {tone}
-{story_block}
+{story_block}{structure_note}
 STORYBOARD STRUCTURE:
 
 For each scene produce:
@@ -752,18 +752,43 @@ def _deterministic_storyboard_style(visuals: dict, cinematography: dict, moodboa
     return f"{genre_name} — {tone}".strip(" —") or "Cinematic, photorealistic."
 
 
+def _panel_structure_note(existing_panel_count: int | None) -> str:
+    """Scoped-revision-only prompt block: states this ONE scene's EXISTING
+    panel count so a feedback-driven redraft aligns to the previous run's
+    structure by default — changing panel COUNT should be a deliberate
+    exception (the feedback note genuinely needs a different number of
+    shots covered), not an incidental side effect of regenerating the whole
+    scene from a free-text note. Empty (no-op) for a fresh scene, or one
+    with no prior panels to align to (e.g. newly added this round)."""
+    if not existing_panel_count:
+        return ""
+    return (
+        f"\nSTRUCTURE ALIGNMENT — SCOPED REVISION: this scene currently has "
+        f"{existing_panel_count} panel(s). Keep the SAME panel count unless "
+        f"the feedback note above genuinely requires adding or removing one "
+        f"— a panel count change must be a deliberate exception, not an "
+        f"incidental side effect of regenerating this scene.\n"
+    )
+
+
 def _llm_generate_scene(bundle: dict, logline: str, genre_name: str, tone: str,
-                        source_text: str, feedback: str, profile: str) -> tuple[dict | None, str]:
+                        source_text: str, feedback: str, profile: str,
+                        existing_panel_count: int | None = None) -> tuple[dict | None, str]:
     """The one remaining LLM path — used only when `feedback` (a directed
     creative note) is given, since the deterministic builder above can't
     interpret free text. Same PROMPT/SYSTEM as the original full-generation
-    design. Returns (scene_doc_or_None, storyboard_style)."""
+    design. Returns (scene_doc_or_None, storyboard_style).
+
+    `existing_panel_count` (only passed during a scoped revision — see
+    `plan_storyboard`) feeds `_panel_structure_note` so the model aligns to
+    the previous run's panel count by default."""
     scene_ctx = bundle.pop("_source_context", "") or source_text
     story_blk = _story_block(scene_ctx)
     single_bundle = json.dumps([bundle], ensure_ascii=False, indent=2)
     prompt = llm.with_feedback(
         PROMPT.format(logline=logline, genre=genre_name, tone=tone,
-                      story_block=story_blk, bundles=single_bundle),
+                      story_block=story_blk, bundles=single_bundle,
+                      structure_note=_panel_structure_note(existing_panel_count)),
         feedback,
     )
     raw = llm.generate(prompt, profile=profile, system=SYSTEM, as_json=True)
@@ -832,10 +857,15 @@ def plan_storyboard(
         # A directed creative note needs actual model judgment to apply —
         # the deterministic builder below can't interpret free text.
         storyboard_style = existing.get("storyboard_style", "") if scoped else ""
+        existing_panel_counts = {
+            s.get("scene_number"): len(s.get("panels", []) or [])
+            for s in existing.get("storyboard", [])
+        } if scoped else {}
         for bundle in bundles:
             expected_num = bundle.get("scene_number")
-            scene_doc, style = _llm_generate_scene(bundle, logline, genre_name, tone,
-                                                   source_text, feedback, profile)
+            scene_doc, style = _llm_generate_scene(
+                bundle, logline, genre_name, tone, source_text, feedback, profile,
+                existing_panel_count=existing_panel_counts.get(expected_num))
             if style and not storyboard_style:
                 storyboard_style = style
             # Each call is sent exactly ONE scene's bundle, so the response

@@ -964,6 +964,7 @@ def _revise_source(out, *, edited_override: dict | None = None, auto_confirm: bo
         print("[reel] revision cancelled")
         return False
 
+    prior_scene_count = len(current_scenes.get("scenes", [])) if current_scenes else None
     _save_artifact(out, "source", edited)
     for s in STAGES:
         if s.name == "ingest":
@@ -972,9 +973,10 @@ def _revise_source(out, *, edited_override: dict | None = None, auto_confirm: bo
             print(f"[reel]   {s.name}: skipped (casting/rendering disabled by default — "
                  "pass --render, or type 'render on' in the revise loop, to include it)")
             continue
+        extra = {"prior_scene_count": prior_scene_count} if s.name == "scenes" else {}
         run_stage(s.name, out=out, profile=profile,
                  max_scenes=_effective_max_scenes(s.name, max_scenes),
-                 **_duration_kwargs(s.name, out, target_duration))
+                 **_duration_kwargs(s.name, out, target_duration), **extra)
     _align_scene_keyed_stages(out, profile=profile, max_scenes=max_scenes,
                               target_duration=target_duration)
     print("[reel] source revision applied — every downstream stage regenerated"

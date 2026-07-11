@@ -214,6 +214,40 @@ class TestReviseSourceScopedPath(unittest.TestCase):
             self.assertIn("characters", run_stage_calls)
             self.assertIn("scenes", run_stage_calls)
 
+    def test_drastic_fallback_passes_prior_scene_count_to_the_scenes_stage(self):
+        # A drastic source-text edit still needs to remind the model that
+        # MINIMIZE SCENE COUNT applies in full — not a license to fragment
+        # just because the fallback regen is unscoped. Only the "scenes"
+        # stage call should receive `prior_scene_count`; every other stage
+        # ignores it via its own **_ catch-all.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir)
+            self._setup_run(out)   # seeds scenes.json with 2 scenes
+            edited_source = {"title": "T",
+                             "text": "A whole new opening scene. Marcel walked into the bar. "
+                                     "He ordered a whiskey. Later, Marcel drove home.",
+                             "chunks": []}
+
+            run_stage_kwargs = {}
+
+            def fake_run_stage(name, *, out, **kwargs):
+                run_stage_kwargs[name] = kwargs
+                return {}
+
+            with mock.patch("reel.stages.run_stage", side_effect=fake_run_stage), \
+                 mock.patch("reel.agents.revision.identify_source_text_changes",
+                           return_value={"drastic": True,
+                                        "reason": "a new opening event has no matching scene",
+                                        "changed_scene_numbers": []}):
+                applied = cli._revise_source(out, edited_override=edited_source,
+                                             auto_confirm=True, render=True)
+
+            self.assertTrue(applied)
+            self.assertEqual(run_stage_kwargs["scenes"].get("prior_scene_count"), 2)
+            # Some other stage should NOT have been handed prior_scene_count
+            # at all — it's scenes-specific.
+            self.assertNotIn("prior_scene_count", run_stage_kwargs.get("structure", {}))
+
     def test_no_scenes_json_skips_analysis_entirely_and_falls_back(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             out = Path(tmpdir)

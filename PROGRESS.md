@@ -200,6 +200,134 @@
   final cut phase.
 
 ## Session log
+- 2026-07-11 (later 7) — **Diagnosed a live case of scenes.json growing from
+  1 to 3 scenes during `revise`, and closed the actual prompt gap it
+  surfaced.** User noticed `output/scenes.json` had more scenes than an
+  older snapshot (`../old/output.14/scenes.json`) and asked whether this
+  violated the structural-alignment work from the two entries below.
+  Investigated by diffing both `scenes.json` and `source.json`, and
+  checking `output/session.json`'s `session_id` (same id, same session,
+  reached via several `revise` rounds — confirmed via the leftover
+  `.scenes.json.swp`/`.cinematography.json.swp` files sitting IN `output/`
+  itself, which only happens from directly `vim`-ing an artifact file —
+  `gate.edit_in_editor` always opens a `tempfile.mkstemp` file elsewhere, so
+  legitimate `revise` edits never leave a swap file beside the real
+  artifact). User confirmed: the edit went through `revise` → "source",
+  editing the story text's own ending (from a happy hand-back to the woman
+  walking away with the ball, a genuinely new event/beat).
+
+  Traced why the count COULD legitimately increase at all:
+  `revision.identify_source_text_changes`'s `changed_scene_numbers` is
+  sanitized against the scene numbers that exist in the CURRENT scenes.json
+  before the caller ever sees it (`reel/agents/revision.py:188-192`) — with
+  only 1 scene existing, that scoped path could never produce scene 2 or 3
+  no matter what the model returned. So the count increase could only have
+  come from the DRASTIC, fully-unscoped full-regen fallback — confirmed
+  correctly triggered here, since the edited ending genuinely added a new
+  event. This part is working exactly as designed: `_structure_alignment_note`
+  (the scoped-only "keep the same count" enforcement from the entry below)
+  is correctly a no-op for an unscoped drastic regen, since the count IS
+  expected to change there.
+
+  **The actual gap, surfaced by the user's follow-up question** ("has this
+  something to do with revise prompts missing some clear instructions?"):
+  the drastic full-regen fallback calls `segment_scenes` with NO revision
+  context at all (no `existing`, no `revise_keys`, no `feedback`) — it's
+  treated exactly like segmenting a brand-new story from scratch, even
+  though rule 9 (MINIMIZE SCENE COUNT) is under EXTRA strain here
+  specifically: an edited passage's own paragraph breaks (the user's edit
+  had 3 distinct paragraphs — boy approaches; woman takes the ball and
+  leaves; boy's disappointment — all still at the SAME location, same
+  continuous time) can bias a fresh segmentation toward one scene per
+  paragraph, exactly what happened, even though rule 9 already asks it not
+  to. Added a SECOND, distinct note (`scenes._revision_reminder_note`,
+  alongside the scoped-only `_structure_alignment_note` from the entry
+  below — the two are mutually exclusive: one enforces "keep the same
+  count" for a SCOPED call, this one reinforces "count may change, but rule
+  9 still applies in full" for a fully unscoped DRASTIC regen) that states
+  the PRIOR scene count and explicitly calls out that a paragraph break in
+  edited prose is not automatically a scene break. Wired through as a new
+  `prior_scene_count` param: `segment_scenes` → `stages._scenes` wrapper →
+  `stages.run_stage` (ignored by every other stage via its own `**_`
+  catch-all) → `cli._revise_source`'s drastic-fallback loop, which computes
+  it from the scene count that existed just BEFORE the edit (only passed
+  for the `"scenes"` stage specifically, not any other `STAGES` entry).
+
+  Added `TestScenesRevisionReminderNote` (4 tests) to `tests/
+  test_revise_structure_alignment_prompts.py`: states the prior count +
+  reinforces rule 9 + the paragraph-break caveat; empty for `None`/`0`; the
+  note reaches the actual prompt for a fully unscoped `segment_scenes` call
+  (no existing/revise_keys, matching the drastic-fallback shape); and the
+  scoped alignment note takes precedence over this one if a caller ever
+  somehow supplied both (confirms the mutual-exclusivity assumption holds
+  even if violated). Added `test_drastic_fallback_passes_prior_scene_count_
+  to_the_scenes_stage` to `tests/test_revise_scoped_source.py`, driving
+  `cli._revise_source`'s actual drastic path end-to-end (mocked `run_stage`
+  as a call-recorder) confirming `prior_scene_count=2` reaches ONLY the
+  `"scenes"` stage call, not `"structure"` or any other. Full suite now 177
+  tests (was 172), still fully offline, `py_compile` clean. Not yet
+  live-verified against the real playground sample story that surfaced
+  this (the fix is prompt-text-only — worth watching whether the next real
+  `revise`-with-a-drastic-source-edit on that story now stays at fewer
+  scenes for a same-location, continuous-time edit like this one).
+- 2026-07-11 (later 6) — **Scoped-revision prompts now explicitly state the
+  structure (scene/shot/panel COUNT) the model is expected to align to —
+  the model-visible half of the enforcement the entry below only did at the
+  code/merge level.** User asked directly: "make sure revision prompt to
+  the model need to make sure the structure as in the number of
+  scenes/shots/panels may be explicitly aligned during revisions of
+  respective stage .. Deviation as in additions and deletions may be done
+  only as exceptions." The previous fix (`merge_by_key` discarding an
+  unrequested new key) only ever caught a structural drift AFTER the model
+  had already produced it — the model itself had no idea, from the prompt
+  alone, what scene/shot/panel count it was supposed to preserve during a
+  scoped call, so it had no reason not to freely add/drop one; the merge
+  layer was silently cleaning up after a model that was never told the
+  rule in the first place.
+
+  Added a "STRUCTURE ALIGNMENT — SCOPED REVISION" prompt block, present
+  ONLY during a scoped revision (`existing` + `revise_keys` both given),
+  to the four agents where a scoped edit's nested list COUNT can silently
+  drift: `scenes.py` (`_structure_alignment_note` — states the story's
+  current total scene count and exactly which scene number(s) this round
+  targets, everything else must stay as-is); `cinematography.py`
+  (`_shot_structure_note` — states each TARGETED scene's existing shot
+  count, since this agent processes all scenes in one call); `screenplay.py`
+  (`_shot_structure_note` — same idea but per-call, since this agent
+  already loops one call per scene, so it states just the one scene's
+  count); `storyboard.py` (`_panel_structure_note` — same per-scene
+  shape, wired into `_llm_generate_scene`'s new `existing_panel_count`
+  param, only reachable via the `feedback`-driven LLM path, since the
+  default deterministic build path has no structure-drift risk at all —
+  it copies panel count directly from cinematography's own shot list via
+  `_align_shots`). All four are genuine no-ops for a fresh, non-scoped run
+  (empty string when `revise_keys`/`existing` aren't both present, or when
+  there's no prior count to compare against — e.g. a scene newly added
+  this round). `soundscape.py`/`visuals.py` were deliberately NOT touched
+  — neither has a shot/panel-like nested COUNT the user's request named;
+  their existing scene-count-level scoping (via `revise_keys` itself) was
+  already sufficient.
+
+  Every prompt block explicitly frames a count change as a "deliberate
+  exception" the revision note (or the scene's own content) must actually
+  call for — not an incidental side effect of the model re-working a
+  scene/coverage/board from scratch with full context, directly mirroring
+  the user's own "exceptions only" framing back into the text the model
+  actually reads.
+
+  Existing `tests/test_prompt_rules.py` render helpers (4 classes) needed
+  updating for the new `structure_note` placeholder (a required, no-default
+  `.format()` key) — both the per-class `_render()` helpers and the
+  `TestNoStoryLikeExamplesInPrompts._all_rendered_prompts()` fixture.
+  Added `tests/test_revise_structure_alignment_prompts.py` (11 tests):
+  each of the four note-builder functions directly (states the right
+  count, empty when not scoped or nothing to compare, skips a genuinely
+  new scene/target with no prior count rather than erroring) plus two
+  end-to-end tests (mocked `llm.generate`) confirming the note actually
+  reaches the real prompt text sent to the model for `scenes.
+  segment_scenes` and `storyboard._llm_generate_scene`, not just the
+  isolated helper function. Full suite now 172 tests (was 161), still
+  fully offline, `py_compile` clean.
 - 2026-07-11 (later 5) — **`revision_merge.merge_by_key` no longer lets a
   scoped revision's model call silently ADD an entry that wasn't explicitly
   requested — closing the last structural-drift gap after the two entries

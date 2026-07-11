@@ -53,7 +53,7 @@ Film details:
 
 Process all scenes together so that camera continuity, recurring motifs, and \
 lens/movement language are coherent across the whole film.
-
+{structure_note}
 Respond with JSON in exactly this shape:
 {{
   "cinematography_style": "one sentence — the overall camera philosophy for this film",
@@ -117,6 +117,37 @@ above exactly, one output scene per input scene, none skipped or renumbered.
 """
 
 
+def _shot_structure_note(existing: dict | None, revise_keys: set | None) -> str:
+    """Scoped-revision-only prompt block: for each targeted scene number,
+    states its EXISTING shot count so the model aligns its shot list to the
+    previous run's structure by default — changing shot COUNT in a targeted
+    scene should be a deliberate exception (the scene's content genuinely
+    needs a different number of set-ups), not an incidental side effect of
+    reworking coverage from scratch with full-story context. Empty (no-op)
+    for a fresh, non-scoped run, or when there's nothing to compare against
+    yet (e.g. a scene newly added this round, with no prior shots to align
+    to)."""
+    if revise_keys is None or not existing:
+        return ""
+    by_num = {s.get("scene_number"): s for s in existing.get("scenes", [])}
+    lines = []
+    for k in sorted(revise_keys, key=str):
+        sc = by_num.get(k)
+        count = len(sc.get("shots", []) or []) if sc else 0
+        if count:
+            lines.append(f"- Scene {k}: currently {count} shot(s)")
+    if not lines:
+        return ""
+    return (
+        "\nSTRUCTURE ALIGNMENT — SCOPED REVISION: this round only revises "
+        "the scene(s) below; every other scene stays exactly as it was. "
+        "Keep the SAME shot count for each one unless its content genuinely "
+        "requires adding or removing a set-up — a shot count change must be "
+        "a deliberate exception, not an incidental side effect of "
+        "reworking the coverage:\n" + "\n".join(lines) + "\n"
+    )
+
+
 def plan_cinematography(
     structure: dict,
     scenes: dict,
@@ -158,6 +189,7 @@ def plan_cinematography(
             themes=", ".join(structure.get("themes", [])),
             duration_rule=(f" — {shots_guidance}" if shots_guidance else ""),
             scenes=scene_list,
+            structure_note=_shot_structure_note(existing, revise_keys),
         ),
         feedback,
     )

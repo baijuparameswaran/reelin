@@ -88,7 +88,8 @@ class SandwichAssertionsMixin:
 class TestScenesPrompt(SandwichAssertionsMixin, unittest.TestCase):
     def _render(self, **overrides):
         kwargs = dict(target="as few as possible", beats="{}", title="T",
-                      text="some source text", character_names_block="")
+                      text="some source text", character_names_block="",
+                      structure_note="")
         kwargs.update(overrides)
         return scenes.PROMPT.format(**kwargs)
 
@@ -368,7 +369,7 @@ class TestVisualsPrompt(SandwichAssertionsMixin, unittest.TestCase):
 class TestCinematographyPrompt(SandwichAssertionsMixin, unittest.TestCase):
     def _render(self, **overrides):
         kwargs = dict(logline="L", genre="G", tone="T", themes="x",
-                      duration_rule="", scenes="[]")
+                      duration_rule="", scenes="[]", structure_note="")
         kwargs.update(overrides)
         return cinematography.PROMPT.format(**kwargs)
 
@@ -408,8 +409,8 @@ class TestDurationBudgetShotFloor(unittest.TestCase):
 
 class TestScreenplayPrompt(SandwichAssertionsMixin, unittest.TestCase):
     def _render(self, **overrides):
-        kwargs = dict(revision_note="", logline="L", tone="T", story_block="",
-                      characters="c", casting_block="", location_block="",
+        kwargs = dict(revision_note="", structure_note="", logline="L", tone="T",
+                      story_block="", characters="c", casting_block="", location_block="",
                       prior_scenes_block="", slugline="INT. X - DAY",
                       scene_number=3, summary="s", purpose="p",
                       soundscape_block="", visuals_block="", cinema_block="")
@@ -436,7 +437,8 @@ class TestScreenplayPrompt(SandwichAssertionsMixin, unittest.TestCase):
 
 class TestStoryboardPrompt(SandwichAssertionsMixin, unittest.TestCase):
     def _render(self, **overrides):
-        kwargs = dict(logline="L", genre="G", tone="T", story_block="", bundles="[]")
+        kwargs = dict(logline="L", genre="G", tone="T", story_block="", bundles="[]",
+                      structure_note="")
         kwargs.update(overrides)
         return storyboard.PROMPT.format(**kwargs)
 
@@ -625,7 +627,7 @@ class TestNoStoryLikeExamplesInPrompts(unittest.TestCase):
         return {
             "scenes": scenes.PROMPT.format(
                 target="as few as possible", beats="{}", title="T",
-                text="some source text", character_names_block=""),
+                text="some source text", character_names_block="", structure_note=""),
             "casting": casting.PROMPT.format(
                 logline="L", genre="Drama", tone="melancholic",
                 characters="[]", locations_block="", props_block=""),
@@ -635,15 +637,16 @@ class TestNoStoryLikeExamplesInPrompts(unittest.TestCase):
                 logline="L", genre="G", tone="T", themes="x", scenes="[]"),
             "cinematography": cinematography.PROMPT.format(
                 logline="L", genre="G", tone="T", themes="x",
-                duration_rule="", scenes="[]"),
+                duration_rule="", scenes="[]", structure_note=""),
             "screenplay": screenplay.PROMPT.format(
-                revision_note="", logline="L", tone="T", story_block="",
+                revision_note="", structure_note="", logline="L", tone="T", story_block="",
                 characters="c", casting_block="", location_block="",
                 prior_scenes_block="", slugline="INT. X - DAY",
                 scene_number=3, summary="s", purpose="p",
                 soundscape_block="", visuals_block="", cinema_block=""),
             "storyboard": storyboard.PROMPT.format(
-                logline="L", genre="G", tone="T", story_block="", bundles="[]"),
+                logline="L", genre="G", tone="T", story_block="", bundles="[]",
+                structure_note=""),
             "characters": characters_agent.PROMPT.format(title="T", text="story text"),
             "structure": structure_agent.PROMPT.format(title="T", text="story text"),
             "genre_determine": genre_agent.DETERMINE_PROMPT.format(
