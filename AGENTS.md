@@ -96,7 +96,16 @@ provider-policy bullet.
   (rule 10) — notable physical objects the source text explicitly mentions
   for that scene — the earliest, source-grounded point a prop enters the
   pipeline; see `casting.py` and `visuals.py` below for how it's used
-  downstream.
+  downstream. Its scoped-revision support (`existing`/`revise_keys`) is the
+  one scene-keyed artifact where `revise_keys` can ADD a genuinely new scene
+  number, not just modify an existing one — `merge_by_key` appends it, then
+  `segment_scenes` re-sorts the merged list by `number` so it lands in
+  narrative order rather than always at the end. DELETING a scene isn't
+  handled inside `segment_scenes` itself — that's `cli._revise_one`'s
+  `"scenes"` branch (see ARCHITECTURE.md's "A DIRECT hand-edit to
+  `scenes.json`..." bullet), which strips the deleted number out of every
+  OTHER scene-keyed artifact directly, since `merge_by_key` can only add or
+  replace a key, never remove one.
 - **`casting.py`** — locks each character's on-screen visual form: an
   `actor` block (the performer's own intrinsic look) plus a `character`
   block (that actor aged/costumed into the role). Also casts every distinct
@@ -163,12 +172,21 @@ provider-policy bullet.
   deterministic — does this stage's scene-keyed data actually match
   `scenes.json`) which self-heals automatically inside `pipeline.run_group`
   before the operator ever sees the gate.
-- **`revision.py`** — powers `python -m reel.cli revise`. `suggest_ripple_scenes`
-  is an advisory-only LLM call flagging other scenes that might depend on an
-  edit (never auto-applied); `is_drastic_identity_change` is a deterministic
-  `difflib` heuristic that decides whether an edited character/location
-  description drifted enough to warrant re-casting vs. preserving the
-  existing locked identity/image.
+- **`revision.py`** — powers `python -m reel.cli revise`. `identify_source_text_changes`
+  scopes a raw story-TEXT edit down to the scene numbers it actually
+  affects (given `artifact_diff`'s deterministic candidate pre-filter +
+  compact paragraph diff), deciding `drastic` (implies a scene should be
+  added/removed) vs. a scoped `changed_scene_numbers` list — fails safe to
+  `drastic` on any malformed/ambiguous response, and sanitizes every
+  returned number against scenes that actually exist. Runs on
+  `agent_profiles.revision`, the largest local tier (`quality_high`) by
+  default, since this needs to correlate a diff against every existing
+  scene reliably. `suggest_ripple_scenes` is a separate, advisory-only LLM
+  call flagging other scenes that might depend on an edit (never
+  auto-applied); `is_drastic_identity_change` is a deterministic `difflib`
+  heuristic that decides whether an edited character/location description
+  drifted enough to warrant re-casting vs. preserving the existing locked
+  identity/image.
 
 ## Adding a new agent
 

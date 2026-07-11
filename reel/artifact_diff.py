@@ -8,16 +8,29 @@ everything.
 
 Every artifact's revisable content is a JSON-object list keyed by some stable
 field (scene `number`, `scene_number`, or casting/character `name`) — that key
-is the only thing treated as a stable identity across a revision. Positions
-that are purely sequential (scene numbering, panel numbering) are ASSUMED
-stable across a revision in v1 — no scene insertion/deletion/reordering is
-supported; a `removed` key on an artifact that disallows removal is reported
+is the only thing treated as a stable identity across a revision. A `removed`
+key on an artifact that disallows removal (`allow_remove=False`) is reported
 as `drastic`, and the caller should fall back to a full downstream re-run
 rather than attempt a scoped one.
-"""
+
+`scenes.json` itself (the SOURCE of truth for the scene list) allows both
+add and remove directly — `cli._revise_one`'s "scenes" branch propagates an
+addition (a new scene number) through the normal `revise_keys` scoped-
+regen path, and a removal by stripping the deleted scene number out of
+every OTHER scene-keyed artifact (`cli._strip_removed_scenes`, reusing
+`fidelity.strip_orphan_scenes` — the exact same primitive `pipeline.
+run_group` already uses to self-heal scene-structure alignment). Every
+OTHER scene-keyed artifact (soundscape/visuals/cinematography/screenplay/
+storyboard) still disallows add/remove for ITS OWN diff — they're not
+independently edited to add/remove scenes, they're kept in sync with
+scenes.json's actual set by that same propagation, so a direct hand-edit to
+one of them that doesn't match scenes.json's current scene set remains
+`drastic` (unrelated to the scenes.json-driven add/remove path above)."""
 from __future__ import annotations
 
+import difflib
 import json
+import re
 from dataclasses import dataclass, field
 
 
@@ -43,13 +56,19 @@ def diff_keyed_list(old_list: list[dict], new_list: list[dict], key_fn,
                      *, allow_add: bool = True, allow_remove: bool = False) -> KeyDiff:
     """Generic keyed diff over two lists of dicts.
 
-    `allow_remove=False` (the default, and the v1 scope assumption for every
-    scene-keyed artifact) means any key present in `old` but missing from
-    `new` sets `drastic=True` — a deletion/reorder isn't a "this key changed"
-    edit, it invalidates the positional assumptions the rest of the revision
-    flow relies on. `allow_add` stays True for name-keyed artifacts
-    (characters/casting) where a genuinely new name is the normal, expected
-    case, not a drastic one.
+    `allow_remove=False` (the default for every scene-keyed artifact EXCEPT
+    `scenes` itself — see `ARTIFACT_SHAPES`) means any key present in `old`
+    but missing from `new` sets `drastic=True` for THIS artifact's own diff —
+    the caller (`cli._revise_one`) instead propagates a `scenes.json`
+    deletion by directly stripping the orphaned key from these artifacts
+    (`cli._strip_removed_scenes`), not by editing them here. `allow_add`
+    stays True for name-keyed artifacts (characters/casting) where a
+    genuinely new name is the normal, expected case, not a drastic one, and
+    for `scenes` itself, where a genuinely new scene number is likewise
+    normal (see `revision_merge.merge_by_key`'s append-new-keys behavior;
+    `scenes.segment_scenes` re-sorts the merged list by `number` afterward
+    so an appended scene lands in its correct narrative position rather than
+    always at the end).
     """
     old_by_key = {key_fn(e): e for e in old_list}
     new_by_key = {key_fn(e): e for e in new_list}
@@ -81,7 +100,7 @@ def diff_keyed_list(old_list: list[dict], new_list: list[dict], key_fn,
 # list one level down (storyboard panels inside scenes, cinematography shots
 # inside scenes) — None for flat keyed lists.
 ARTIFACT_SHAPES: dict[str, tuple] = {
-    "scenes":         ("scenes",      lambda s: s.get("number"),        False, False, None),
+    "scenes":         ("scenes",      lambda s: s.get("number"),        True,  True,  None),
     "characters":     ("characters",  lambda c: c.get("name"),          True,  True,  None),
     "casting":        ("casting",     lambda c: c.get("name"),          True,  True,  None),
     "soundscape":     ("soundscapes", lambda s: s.get("scene_number"),  False, False, None),
@@ -150,18 +169,77 @@ def diff_nested(name: str, old: dict, new: dict) -> dict:
 
 
 def diff_source_text(old_source: dict, new_source: dict) -> dict:
-    """Special case for a hand-edit of the raw ingested story text
-    (`source.json`'s `"text"` field). Word-level diffing raw prose into
-    "which scene's source_line moved" is a genuinely hard problem (every
-    downstream per-scene agent trusts `chunk_indices`/`source_line` offsets
-    that a text edit can shift) — out of scope for v1. Always reports drastic
-    when the text differs, so the caller falls back to a full downstream
-    regen rather than attempting anything fine-grained."""
+    """Cheap "did the raw story text actually change at all" gate for a
+    hand-edit of `source.json`'s `"text"` field — used by `cli._revise_source`
+    before spending any effort (deterministic or LLM) on figuring out WHERE
+    it changed. Deliberately says nothing about scope: `unified_source_diff`/
+    `candidate_changed_scenes` below (deterministic) plus
+    `reel.agents.revision.identify_source_text_changes` (LLM-confirmed) are
+    what narrow a source-text edit down to the specific scene numbers it
+    actually affects, rather than treating every edit as drastic."""
     changed = (old_source.get("text", "") != new_source.get("text", ""))
     return {
         "changed": changed,
         "drastic": changed,
-        "reason": "source text changed — chunk_indices/source_line offsets throughout "
-                  "the pipeline are no longer trustworthy; falling back to a full "
-                  "downstream regen" if changed else "",
+        "reason": "source text changed" if changed else "",
     }
+
+
+def _split_paragraphs(text: str) -> list[str]:
+    """Split raw story text into paragraph-like units for diffing:
+    blank-line-separated paragraphs when present, else single lines, else
+    sentence-ish chunks as a last resort — so even a single-block story
+    (no line breaks at all) still yields a meaningful diff granularity
+    instead of one giant "the whole thing changed" unit."""
+    normalized = text.replace("\r\n", "\n")
+    paras = [p for p in re.split(r"\n\s*\n", normalized) if p.strip()]
+    if len(paras) >= 2:
+        return paras
+    lines = [ln for ln in normalized.split("\n") if ln.strip()]
+    if len(lines) >= 2:
+        return lines
+    sentences = [s for s in re.split(r"(?<=[.!?])\s+", normalized.strip()) if s.strip()]
+    return sentences or ([normalized] if normalized.strip() else [])
+
+
+def unified_source_diff(old_text: str, new_text: str, *, context: int = 1) -> str:
+    """A compact, paragraph-level unified diff between two versions of the
+    raw story text — deliberately NOT "send the whole story twice", which
+    wastes context and gives a model no structural hint about where to
+    even look. `-`-prefixed lines were removed, `+`-prefixed were added,
+    unprefixed lines are unchanged context (kept `context` paragraphs deep
+    on either side of a change so the model can tell what surrounds it).
+    File-diff header lines (`---`/`+++`/`@@`) are stripped since they're
+    meaningless for prose with no real filenames or line numbers."""
+    old_paras = _split_paragraphs(old_text)
+    new_paras = _split_paragraphs(new_text)
+    raw = difflib.unified_diff(old_paras, new_paras, lineterm="", n=context)
+    body = [ln for ln in raw if not ln.startswith(("---", "+++", "@@"))]
+    return "\n".join(body).strip()
+
+
+def candidate_changed_scenes(old_text: str, new_text: str, scenes: dict) -> list[int]:
+    """Deterministic (no LLM) first pass: a scene whose stored
+    `source_excerpt` (falling back to `source_line` for a checkpoint that
+    predates that field) is no longer found verbatim — whitespace-
+    normalized — anywhere in `new_text` is a CANDIDATE for being affected
+    by the edit. Not a certainty either way: the surrounding prose may have
+    only been re-wrapped or trivially reworded (a false positive the LLM
+    confirmation pass in `reel.agents.revision.identify_source_text_changes`
+    can rule back out), and a genuinely different scene's short `source_line`
+    could in principle still coincidentally match elsewhere (unlikely for a
+    real quote, and a pre-existing limitation this function shares with
+    `reel.agents.scenes._map_chunks`'s identical matching approach — not
+    solved here). Returns scene numbers sorted ascending."""
+    norm_new = re.sub(r"\s+", " ", new_text).lower()
+    candidates = []
+    for sc in scenes.get("scenes", []):
+        anchor = (sc.get("source_excerpt") or sc.get("source_line") or "").strip()
+        if not anchor:
+            continue
+        norm_anchor = re.sub(r"\s+", " ", anchor).lower()
+        if norm_anchor and norm_anchor not in norm_new:
+            num = sc.get("number")
+            if isinstance(num, int):
+                candidates.append(num)
+    return sorted(candidates)

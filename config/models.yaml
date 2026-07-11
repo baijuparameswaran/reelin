@@ -167,6 +167,9 @@ moodboard:
 # story text) and selectively re-run only what's actually affected downstream.
 # `suggest_ripple_scenes` (LLM, open model, never Gemini) is advisory only —
 # suggestions are shown for accept/reject, never auto-applied.
+# `identify_source_text_changes` (also LLM, open model) scopes a raw-text
+# hand-edit down to the specific scene numbers it affects, given a compact
+# diff + a deterministic candidate pre-filter (never the whole story twice).
 # `identity_drift_threshold` gates the deterministic (no LLM) check that flags
 # when an edited character/location description has drifted enough from what
 # its locked casting entry was rendered from that the old reference image
@@ -315,4 +318,8 @@ agent_profiles:
   fidelity:        quality
   genre:           quality
   moodboard:       quality
-  revision:        quality
+  # quality_high (largest local tier — qwen3:30b) so identify_source_text_changes
+  # can reliably correlate a diff against every existing scene's content — slow
+  # (~7-9 tok/s on this host) but this call is infrequent (once per source-text
+  # revision round, not per scene) and correctness matters more than speed here.
+  revision:        quality_high

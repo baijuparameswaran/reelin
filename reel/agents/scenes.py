@@ -350,12 +350,17 @@ def segment_scenes(
     whole story (scene boundaries need full-story awareness to stay
     consistent), but the caller only trusts its output for the numbers in
     `revise_keys` — every other scene number is spliced back in
-    byte-identical from `existing["scenes"]`. Scene insertion/deletion/
-    reordering is out of scope for a scoped revision in v1 (see
-    `reel.artifact_diff`'s `allow_add=False, allow_remove=False` for
-    "scenes") — a revision that changes the scene COUNT should go through
-    `reel.artifact_diff.diff_artifact`'s drastic path (a full, non-scoped
-    regeneration) instead of `revise_keys`.
+    byte-identical from `existing["scenes"]`. A genuinely NEW scene number
+    (not present in `existing["scenes"]` at all) is appended by
+    `merge_by_key`, then the merged list is re-sorted by `number` below
+    so an inserted scene lands in its correct narrative position rather
+    than always at the end of the array — several downstream consumers
+    (e.g. `storyboard._scene_bundles`) iterate `scenes["scenes"]` in LIST
+    order, not re-sorted by number themselves. Scene DELETION is handled
+    by the caller (`cli._revise_one`'s "scenes" branch + `cli.
+    _strip_removed_scenes`), not here — this function only ever adds to or
+    replaces `existing["scenes"]`, consistent with `revision_merge.
+    merge_by_key` never deleting a key on its own.
 
     `characters` (optional, from characters.json — the `characters` stage
     already runs before `scenes` in the pipeline, see pipeline.py's "2/10
@@ -389,6 +394,12 @@ def segment_scenes(
     if revise_keys is not None and existing:
         scenes = merge_by_key(existing.get("scenes", []), scenes,
                               lambda s: s.get("number"), revise_keys)
+        # A genuinely new scene number is appended by merge_by_key — re-sort
+        # so it lands in its correct narrative position, not always last.
+        # A single numeric key (not a tuple) avoids None-vs-None comparison
+        # errors if more than one entry somehow lacks a number.
+        scenes.sort(key=lambda s: s.get("number")
+                    if isinstance(s.get("number"), int) else float("inf"))
     result["scenes"] = scenes
     result["dropped_scenes"] = dropped
     return result

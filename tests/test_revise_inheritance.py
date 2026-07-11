@@ -202,7 +202,14 @@ class TestReviseThreadsInheritedAttributes(unittest.TestCase):
                 calls.append((name, kwargs))
                 return {}
 
-            with mock.patch("reel.stages.run_stage", side_effect=fake_run_stage):
+            # This test is about profile/max_scenes threading through the
+            # FULL-REGEN fallback path specifically, not the new scoped
+            # source-text analysis — force drastic=True so it takes that
+            # path deterministically, without a live LLM call.
+            with mock.patch("reel.stages.run_stage", side_effect=fake_run_stage), \
+                 mock.patch("reel.agents.revision.identify_source_text_changes",
+                           return_value={"drastic": True, "reason": "forced for this test",
+                                        "changed_scene_numbers": [], "summary": ""}):
                 cli._revise_source(out, edited_override=edited_source, auto_confirm=True,
                                    profile="quality", max_scenes=2, target_duration=30)
 

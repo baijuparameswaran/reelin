@@ -369,12 +369,63 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
   panel numbers actually changed (no LLM — `diff_keyed_list` + a small
   `ARTIFACT_SHAPES` table keyed by each artifact's list field + key function,
   e.g. `scenes.json` by `number`, `casting.json` by `name`, `storyboard.json`
-  nested by `(scene_number, panel)`). **v1 scope assumption: scene
-  count/order is stable across a revision** — an added/removed scene number
-  sets `diff.drastic=True`, and `structure`/`moodboard`/`source` (no
-  scene/name-keyed structure at all) are always treated as drastic
-  (`artifact_diff.WHOLE_FILE_ARTIFACTS`) — a drastic change falls back to a
-  full, non-scoped downstream regen (with a confirm + warning), not a refusal.
+  nested by `(scene_number, panel)`). `structure`/`moodboard`/`source` (no
+  scene/name-keyed structure at all) are `artifact_diff.WHOLE_FILE_ARTIFACTS`
+  — for `diff_artifact` specifically, always treated as drastic — a drastic
+  change falls back to a full, non-scoped downstream regen (with a confirm
+  + warning), not a refusal. (`source` is the one exception with an escape
+  route: `cli._revise_source` runs its own scene-scoped analysis BEFORE
+  ever falling back to that whole-file treatment — see the dedicated bullet
+  on scoped source-text revision below.)
+  **A DIRECT hand-edit to `scenes.json` can add or delete a scene, not just
+  modify one** — `ARTIFACT_SHAPES["scenes"]` sets `allow_add=allow_remove=
+  True` (the only scene-keyed artifact that does; every OTHER one —
+  soundscape/visuals/cinematography/screenplay/storyboard — still disallows
+  both, since they're kept in sync with scenes.json rather than edited to
+  add/remove scenes directly, so a mismatch there remains `drastic` as
+  before). Add flows through the normal `revise_keys` path unchanged
+  (`merge_by_key` already appends a genuinely new key); `scenes.
+  segment_scenes` additionally re-sorts the merged list by `number`
+  afterward so the new scene lands in its correct narrative position
+  instead of always at the list's end — several downstream consumers (e.g.
+  `storyboard._scene_bundles`) iterate `scenes["scenes"]` in LIST order, not
+  re-sorted by number. Delete needed a genuinely new mechanism, since
+  `merge_by_key` can only add/replace a key, never remove one:
+  `cli._revise_one`'s `"scenes"` branch computes `removed_keys` from
+  `diff.removed` and, right after saving the edited scenes.json (before the
+  normal downstream cascade runs), calls `cli._strip_removed_scenes` — which
+  reuses `fidelity.strip_orphan_scenes` (the exact same deterministic
+  primitive `pipeline.run_group` already uses to self-heal scene-structure
+  alignment during a fresh run, not a second implementation) against every
+  downstream scene-keyed artifact, and regenerates `screenplay.fountain`
+  deterministically (no LLM) since a pure deletion leaves `screenplay`'s own
+  `revise_keys` scope empty and nothing else would touch that file — plus
+  `cli._strip_removed_scenes_from_video_manifest`, since `pipeline.
+  _assemble_movie` stitches every scene `video/manifest.json` lists, in
+  order, so a stale entry for a deleted scene would otherwise still end up
+  in `movie.mp4` (the underlying clip files are left on disk, not deleted —
+  non-destructive). Both strip steps are pure local bookkeeping (no Gemini/
+  Veo call), so they run unconditionally, independent of the `render`
+  skip-by-default flag. One correctness fix this needed:
+  `cli._translate_revise_keys` previously returned `None` (meaning
+  "drastic, full regen") whenever it found no locations to translate a
+  `scenes`→`casting` scope into — which was fine when `revise_keys` was
+  always non-empty on entry, but a deletion-only edit now legitimately
+  reaches it with an EMPTY (not `None`) `revise_keys`, and translating that
+  to `None` would have wrongly forced a full casting regen for a revision
+  that changed nothing casting needs to see; fixed to return `set()` for an
+  empty input, reserving `None` for the genuine "non-empty input, no known
+  translation" ambiguous case. `cli._run_downstream_revision` also gained a
+  matching optimization: an empty (non-`None`) translated scope now skips
+  calling `run_stage` entirely for that downstream stage (its `existing`
+  artifact — already stripped, if applicable — is already correct; calling
+  the LLM would just discard the whole response via `merge_by_key`'s
+  `keys_to_replace=set()`). Deleting a NAME (a character/location from
+  `casting.json`/`characters.json`) was already possible before this work
+  (`allow_remove=True` there already) but has no equivalent downstream-
+  stripping step — those artifacts have no per-scene structure to reconcile
+  against, so the deletion is saved as-is and downstream stages simply stop
+  seeing that name in FUTURE regenerations, not retroactively cleaned up.
   For a non-drastic edit: `stages.downstream_of(name)` (transitive closure
   over the `STAGES` registry's `inputs`/`optional` — the only place stage
   deps exist as data) gives the affected stage set; each downstream agent
@@ -520,6 +571,53 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
   computes the right one from `reel.duration_budget` — `cinematography`'s
   needs the CURRENT scene count, reloaded fresh from disk since `scenes` may
   have just been regenerated earlier in the same revision round.
+- **A source-TEXT edit is now SCOPED to the scenes it actually affects,
+  instead of always falling back to a full downstream regen.** Previously
+  `source` (in `artifact_diff.WHOLE_FILE_ARTIFACTS`) meant "no natural
+  keyed-list shape to diff, treat any edit as drastic" — true for `diff_
+  artifact`'s purposes, but `cli._revise_source` (the special handler
+  `stage_name in ("source", "ingest")` routes to) now does its own
+  scene-scoped analysis FIRST, before ever falling back to that whole-file
+  treatment. Two layers, deterministic-then-LLM-confirmed (the same
+  pairing this project always uses for "prompting alone isn't reliable
+  enough" problems): `artifact_diff.candidate_changed_scenes` (no LLM) flags
+  any scene whose stored `source_excerpt` (or `source_line`, for an older
+  checkpoint) is no longer found verbatim — whitespace-normalized — in the
+  new text; `artifact_diff.unified_source_diff` (no LLM) turns the edit into
+  a COMPACT paragraph-level diff (`-`/`+`/context lines, `difflib.
+  unified_diff` over `_split_paragraphs`' blank-line/single-line/sentence
+  splitting — chosen so even a single-block story with no line breaks at
+  all still yields real diff granularity) instead of sending the whole
+  story twice, which wastes context and gives a model no structural hint
+  about where to even look. `reel.agents.revision.
+  identify_source_text_changes` (LLM, `models.text` — neutral, never
+  Gemini) takes both, confirms/refines the candidate set against the
+  diff's actual content, and decides `drastic` (the diff implies a scene
+  should be ADDED or REMOVED — the same v1 "scene count/order stays
+  stable" assumption every other scene-keyed artifact's diff already
+  makes) vs. a scoped `changed_scene_numbers` list. FAILS SAFE at every
+  layer: a malformed/empty/inconsistent model response forces
+  `drastic=True` rather than silently under-scoping, and every returned
+  scene number is sanitized against the scene numbers that actually exist
+  before the caller ever sees it — an invented number can never leak into
+  `revise_keys`. Runs on `agent_profiles.revision`, changed to
+  **`quality_high`** (the largest local tier — qwen3:30b, ~7-9 tok/s on
+  this host) specifically for this: correlating a diff against every
+  existing scene reliably needs more than pattern-matching, and this call
+  is infrequent (once per source-text revision round, not once per scene),
+  so the slower tier's cost is worth it. Once scoped, the affected scene
+  numbers are funneled through the EXACT SAME machinery a direct
+  `scenes.json` hand-edit already uses — no second, parallel
+  implementation that could drift: `scenes` itself is re-run via
+  `stages.run_stage("scenes", existing=current_scenes, revise_keys=
+  changed_scene_numbers, ...)`, then the new `cli._run_downstream_revision`
+  (extracted from what used to be `_revise_one`'s own inline downstream
+  loop, now shared by both callers) cascades through `stages.
+  downstream_of("scenes")` exactly like `_revise_one("scenes", ...)`
+  already would. Falls back to the original full-regen-of-every-STAGES-
+  entry behavior in two cases: no `scenes.json` exists yet to correlate the
+  diff against (the LLM call is skipped entirely in that case — nothing
+  to attempt), or the analysis itself says `drastic`.
 - **Casting data model:** each character entry has an `actor` block (performer's
   own features) and a `character` block (that actor aged/costumed into the role).
   **Image generation renders the character only** — exactly one image per

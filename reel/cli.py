@@ -15,9 +15,14 @@ Usage:
         [--model NAME] [--aspect-ratio 16:9]     #   override model / aspect ratio
         [--duration N]                           #   clip duration in seconds
     python -m reel.cli revise [--out DIR] [--render]  # revise a completed/paused run: pick any
-                                                 # stage (or the raw source text) to hand-edit,
-                                                 # then selectively re-run what's actually
-                                                 # affected — repeat rounds until 'quit'/'pause'.
+                                                 # stage (or the raw source text) to hand-edit —
+                                                 # modify existing content, add a new scene/
+                                                 # character/location, or delete one — then
+                                                 # selectively re-run what's actually affected;
+                                                 # repeat rounds until 'quit'/'pause'. Deleting a
+                                                 # scene from scenes.json removes it everywhere
+                                                 # downstream (design artifacts + video manifest),
+                                                 # not just from scenes.json itself.
                                                  # Casting + all image/video rendering are SKIPPED
                                                  # by default (cheap text-only iteration); pass
                                                  # --render to include them, or type 'render on'/
@@ -475,9 +480,18 @@ def _translate_revise_keys(from_stage: str, to_stage: str, revise_keys, edited_f
     can't affect a CHARACTER's casting at all). Any other cross-type
     combination has no known translation, so that one downstream stage falls
     back to a full, non-scoped regen — still correct, just not maximally
-    scoped, rather than being silently skipped."""
+    scoped, rather than being silently skipped.
+
+    An EMPTY (but non-None) `revise_keys` — e.g. a scenes.json revision that
+    only DELETED scene(s), with nothing added/changed — must translate to
+    an empty scope too, not `None`/drastic: there's nothing for `to_stage`
+    to regenerate either. Checked before the "no locations found" case
+    below, which legitimately still means "fall back to full regen,
+    ambiguous" for a genuinely non-empty `revise_keys`."""
     if revise_keys is None:
         return None
+    if not revise_keys:
+        return set()
     if from_stage in _SCENE_KEYED_STAGES and to_stage in _SCENE_KEYED_STAGES:
         return revise_keys
     if from_stage in _NAME_KEYED_STAGES and to_stage in _NAME_KEYED_STAGES:
@@ -587,33 +601,184 @@ def _apply_scene_render_revision(out, source_stage: str, revise_keys, panel_targ
 RENDER_SKIP_STAGES = {"casting", "casting_images", "moodboard_tiles", "scene_render"}
 
 
+def _run_downstream_revision(out, stage_name: str, downstream: list[str], revise_keys,
+                             edited_artifact: dict, panel_targets: dict, *,
+                             profile: str | None, max_scenes: int | None,
+                             target_duration: int | None, render: bool) -> None:
+    """Selectively re-run every stage in `downstream` (already computed by
+    the caller via `stages.downstream_of(stage_name)`), scoped to
+    `revise_keys`. Shared by `_revise_one` (any directly hand-edited stage)
+    and `_revise_source`'s scoped path (always `stage_name="scenes"`, since
+    a source-text edit that survives the drastic check gets funneled
+    through a scoped `scenes` re-run first, then cascades from there
+    exactly like a direct `scenes.json` edit would) — one shared cascade
+    implementation instead of two that could silently drift apart.
+
+    Respects `RENDER_SKIP_STAGES` (see that constant), routes `scene_render`
+    through `_apply_scene_render_revision` (translating a name-keyed source
+    to the scene numbers those names actually appear in first, via
+    `_names_to_scene_numbers`), and translates `revise_keys`'s key type per
+    downstream stage via `_translate_revise_keys` — the same three pieces
+    of logic `_revise_one`'s downstream loop always had, just no longer
+    only reachable from there."""
+    from .stages import REGISTRY, _load, run_stage
+
+    for dname in downstream:
+        if dname in RENDER_SKIP_STAGES and not render:
+            print(f"[reel]   {dname}: skipped (casting/rendering disabled by default — "
+                 "pass --render, or type 'render on' in the revise loop, to include it)")
+            continue
+        if dname == "scene_render":
+            render_keys = revise_keys
+            if revise_keys is not None and stage_name in _NAME_KEYED_STAGES:
+                # name-keyed source (casting/characters) -> translate to the
+                # scene numbers those names actually appear in, so a locked-
+                # identity change re-renders the scenes it actually affects.
+                render_keys = _names_to_scene_numbers(out, revise_keys) or None
+            _apply_scene_render_revision(out, stage_name, render_keys, panel_targets)
+            continue
+        if dname in ("casting_images", "moodboard_tiles"):
+            run_stage(dname, out=out, profile=profile, max_scenes=max_scenes)
+            continue
+        d_existing = _load(out, REGISTRY[dname].artifact())
+        d_keys = _translate_revise_keys(stage_name, dname, revise_keys, edited_artifact)
+        if d_keys is not None and not d_keys:
+            # Empty (not None) scope — e.g. a scenes.json revision that only
+            # DELETED scene(s), or a cross-type translation that found no
+            # locations to re-cast. Nothing to regenerate: `d_existing`
+            # already reflects the current state (any deletions were already
+            # stripped by `_strip_removed_scenes` before this loop runs), so
+            # calling the LLM here would just burn tokens on output that
+            # gets entirely discarded by `merge_by_key`.
+            print(f"[reel]   {dname}: nothing to regenerate (already up to date)")
+            continue
+        run_stage(dname, out=out, profile=profile,
+                 max_scenes=_effective_max_scenes(dname, max_scenes),
+                 existing=d_existing, revise_keys=d_keys,
+                 **_duration_kwargs(dname, out, target_duration))
+
+
+def _strip_removed_scenes(out, downstream: list[str], scenes_after: dict) -> None:
+    """Propagate a scenes.json DELETION to every other scene-keyed artifact.
+
+    `revision_merge.merge_by_key` (what every scoped agent call uses) can
+    only ADD or REPLACE a key, never delete one — so a scene removed from
+    scenes.json would otherwise leave a stale, orphaned entry behind in
+    soundscape/visuals/cinematography/screenplay/storyboard forever. Reuses
+    `fidelity.strip_orphan_scenes` — the exact same deterministic primitive
+    `pipeline.run_group` already uses to self-heal scene-structure
+    alignment during a fresh run — rather than a second implementation of
+    the same "drop any entry whose scene_number scenes.json doesn't have"
+    logic. Called BEFORE `_run_downstream_revision`, so that function's own
+    `existing=` load already sees the cleaned-up artifact.
+
+    `screenplay` additionally needs `screenplay.fountain` regenerated after
+    a strip (deterministic — no LLM call — via the same `to_fountain` the
+    normal `stages.run_stage("screenplay", ...)` path already calls after
+    every save), since nothing else in this revision round will touch that
+    file when the stage's own `revise_keys` scope is empty (see the
+    "nothing to regenerate" skip above)."""
+    from .stages import REGISTRY, _load, _save_artifact
+    from .agents import fidelity
+    from .agents.screenplay import to_fountain
+
+    for dname in downstream:
+        if dname not in _SCENE_KEYED_STAGES or dname == "scenes":
+            continue
+        artifact_name = REGISTRY[dname].artifact()
+        current = _load(out, artifact_name)
+        if current is None:
+            continue
+        stripped = fidelity.strip_orphan_scenes(dname, current, scenes_after)
+        if stripped is current:
+            continue   # no-op: this artifact had no orphaned scene entries
+        if dname == "screenplay" and "drafted_count" in stripped:
+            # Keep these two bookkeeping counts (used by to_fountain's own
+            # "draft covers N of M scenes" notice) honest after a deletion —
+            # cosmetic, but stale-by-one is an easy, needless confusion.
+            stripped = dict(stripped)
+            stripped["drafted_count"] = len(stripped.get("scenes", []))
+            stripped["total_scenes"] = len(scenes_after.get("scenes", []))
+        _save_artifact(out, artifact_name, stripped)
+        print(f"[reel]   {dname}: removed deleted scene entry/entries")
+        if dname == "screenplay":
+            structure = _load(out, "structure") or {}
+            source = _load(out, "source") or {}
+            (out / "screenplay.fountain").write_text(
+                to_fountain(source, structure, stripped), encoding="utf-8")
+
+
+def _strip_removed_scenes_from_video_manifest(out, scenes_after: dict) -> None:
+    """Deleting a scene leaves a stale entry in output/video/manifest.json —
+    `pipeline._assemble_movie` stitches every scene the manifest lists, in
+    order, so a leftover entry for a scene number scenes.json no longer has
+    would still be included in movie.mp4. Strips it and re-assembles the
+    movie so it reflects the current scene set. Does NOT delete the actual
+    clip files on disk (non-destructive by design — an operator who deletes
+    a scene can still find the old clips under output/video/scene_NN/ if
+    they want them). Purely local bookkeeping (no Gemini/Veo call), so this
+    runs unconditionally, independent of the `render` skip-by-default flag."""
+    import json as _json
+    from .pipeline import _assemble_movie
+
+    manifest_path = out / "video" / "manifest.json"
+    if not manifest_path.exists():
+        return
+    manifest = _json.loads(manifest_path.read_text(encoding="utf-8"))
+    valid_numbers = {s.get("number") for s in scenes_after.get("scenes", [])}
+    scenes_list = manifest.get("scenes", [])
+    kept = [s for s in scenes_list if s.get("scene_number") in valid_numbers]
+    if len(kept) == len(scenes_list):
+        return
+    removed_count = len(scenes_list) - len(kept)
+    manifest["scenes"] = kept
+    movie = _assemble_movie(manifest, out)
+    manifest["movie"] = str(movie.relative_to(out)) if movie else None
+    manifest_path.write_text(_json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"[reel]   scene_render: removed {removed_count} deleted scene(s) from the video "
+         "manifest and re-assembled movie.mp4 (old clip files left on disk, not deleted)")
+
+
 def _revise_source(out, *, edited_override: dict | None = None, auto_confirm: bool = False,
                    profile: str | None = None, max_scenes: int | None = 1,
                    target_duration: int | None = None, render: bool = False) -> bool:
-    """Revise the raw ingested story text. A source-text edit is ALWAYS
-    treated as drastic — every downstream stage's `chunk_indices`/
-    `source_line` anchors are keyed to the exact prior text, and fine-
-    grained diffing of raw prose into "which scene moved" is out of scope
-    for v1 (see `artifact_diff.diff_source_text`'s docstring) — so this
-    falls back to a full regen of every stage, replayed via `run_stage` in
-    registry order (each stage reloads its inputs fresh from disk, so the
-    edited `source.json` — and each newly regenerated artifact after it —
-    is what every subsequent stage actually sees).
+    """Revise the raw ingested story text — SCOPED to the scenes actually
+    affected, when possible, instead of always falling back to a full regen.
+
+    `artifact_diff.candidate_changed_scenes` (deterministic: which scenes'
+    stored `source_excerpt` no longer appears verbatim in the new text) plus
+    `reel.agents.revision.identify_source_text_changes` (LLM-confirmed, on
+    `agent_profiles.revision` — the LARGEST local tier by default, since
+    this needs to correlate a diff against every existing scene reliably)
+    narrow the edit down to specific scene numbers. Once known, those
+    numbers get funneled through the SAME machinery a direct `scenes.json`
+    hand-edit already uses: `scenes` itself is re-run scoped via
+    `existing=`/`revise_keys=`, then `_run_downstream_revision` cascades
+    from there exactly like `_revise_one("scenes", ...)` would — one shared
+    scoped-revision implementation, not a second one that could drift.
+
+    Falls back to the original full-regen-of-every-stage behavior in two
+    cases: no `scenes.json` exists yet to correlate the diff against (e.g.
+    the very first revision on a fresh ingest), or the analysis itself
+    reports the change as DRASTIC (implies a scene should be added or
+    removed — this pipeline's v1 scope assumption, shared with every other
+    scene-keyed artifact's diff, is that scene count/order stays stable
+    across a scoped revision).
 
     `profile`/`max_scenes`/`target_duration` are the original run's
     inherited attributes (see `_revise_loop`'s docstring) — threaded into
-    every `run_stage` call here so a full source-text regen doesn't
-    silently revert to `run_stage`'s own bare defaults (notably
-    `max_scenes=1`, which would otherwise quietly re-cap casting-image/video
-    rendering back down to one scene even after an original `--max-scenes
-    all` run).
+    every `run_stage` call so a regen doesn't silently revert to
+    `run_stage`'s own bare defaults (notably `max_scenes=1`, which would
+    otherwise quietly re-cap casting-image/video rendering back down to
+    one scene even after an original `--max-scenes all` run).
 
     `render` (default `False`) gates `RENDER_SKIP_STAGES` (casting +
     every image/video render stage) — see that constant's docstring."""
-    from .stages import STAGES, _load, _save_artifact, run_stage
+    from .stages import STAGES, _load, _save_artifact, run_stage, downstream_of
     from .agents.ingest import chunk_text
     from .gate import edit_in_editor
     from . import artifact_diff
+    from .agents import revision as revision_agent
 
     current = _load(out, "source")
     if current is None:
@@ -636,7 +801,54 @@ def _revise_source(out, *, edited_override: dict | None = None, auto_confirm: bo
     edited["word_count"] = len(new_text.split())
     edited["char_count"] = len(new_text)
 
-    print(f"[reel] ⚠ {diff['reason']}")
+    current_scenes = _load(out, "scenes")
+    analysis = None
+    if current_scenes and current_scenes.get("scenes"):
+        candidates = artifact_diff.candidate_changed_scenes(
+            current.get("text", ""), new_text, current_scenes)
+        unified_diff = artifact_diff.unified_source_diff(current.get("text", ""), new_text)
+        rev_profile = profile or llm.agent_profile("revision")
+        print(f"[reel] analyzing story-text change against "
+             f"{len(current_scenes.get('scenes', []))} scene(s)  [{rev_profile}] …")
+        analysis = revision_agent.identify_source_text_changes(
+            unified_diff, current_scenes, candidates, profile=rev_profile)
+
+    if analysis and not analysis.get("drastic") and analysis.get("changed_scene_numbers"):
+        changed_scene_numbers = set(analysis["changed_scene_numbers"])
+        print(f"[reel] scoped: scene(s) {sorted(changed_scene_numbers)} affected"
+             + (f" — {analysis['summary']}" if analysis.get("summary") else ""))
+        if render:
+            print("[reel]   casting + all image/video rendering will be re-invoked "
+                 "for the affected scene(s)")
+        else:
+            print("[reel]   casting/rendering stages will be SKIPPED by default — pass "
+                 "--render, or type 'render on' in the loop, to include them")
+        if not (auto_confirm or input(
+                f"[reel] proceed with scoped revision (scene(s) {sorted(changed_scene_numbers)} "
+                "+ downstream)? [y/N] ").strip().lower() == "y"):
+            print("[reel] revision cancelled")
+            return False
+
+        _save_artifact(out, "source", edited)
+        new_scenes = run_stage("scenes", out=out, profile=profile,
+                               existing=current_scenes, revise_keys=changed_scene_numbers,
+                               **_duration_kwargs("scenes", out, target_duration))
+        downstream = downstream_of("scenes")
+        _run_downstream_revision(out, "scenes", downstream, changed_scene_numbers, new_scenes, {},
+                                 profile=profile, max_scenes=max_scenes,
+                                 target_duration=target_duration, render=render)
+        print(f"[reel] source revision applied — scoped to scene(s) "
+             f"{sorted(changed_scene_numbers)}"
+             + ("" if render else " (casting/rendering stages skipped — see above)"))
+        return True
+
+    # Drastic (or no scenes.json to scope against yet) — full regen fallback.
+    if analysis and analysis.get("drastic"):
+        print(f"[reel] ⚠ {analysis.get('reason') or 'story-text change looks drastic'}")
+    elif current_scenes is None or not current_scenes.get("scenes"):
+        print("[reel] ⚠ no scenes.json yet to scope this change against")
+    else:
+        print(f"[reel] ⚠ {diff['reason']}")
     print("[reel]   falling back to a full regen of every stage (this may take a while)")
     if render:
         print("[reel]   casting + all image/video rendering will be re-invoked")
@@ -674,6 +886,28 @@ def _revise_one(stage_name: str, out, *, edited_override: dict | None = None,
     selectively re-run what's affected. Returns True if a revision was
     actually applied, False if cancelled or no change was made.
 
+    Handles all three edit shapes directly, not just in-place modification:
+    MODIFY (a changed value for an existing key) and ADD (a genuinely new
+    scene number / character-or-location name) both flow through the normal
+    `revise_keys` scoped-regen path (`revision_merge.merge_by_key` appends a
+    new key on its own). DELETE is different — `merge_by_key` can only add
+    or replace, never remove — so for `stage_name == "scenes"` specifically
+    (the one artifact where deletion is common and well-scoped: scenes.json
+    is the single source of truth every other scene-keyed artifact must
+    mirror), a removed scene number is propagated by directly stripping it
+    out of every downstream artifact (`_strip_removed_scenes`) and out of
+    the video manifest (`_strip_removed_scenes_from_video_manifest`) right
+    after the edit is saved, before the normal downstream cascade runs for
+    whatever was also added/changed in the same edit.
+
+    Deleting a NAME (a character/location from casting.json or
+    characters.json) is also allowed — `artifact_diff.ARTIFACT_SHAPES`
+    already sets `allow_remove=True` for both — but has no equivalent
+    downstream-stripping step: those artifacts have no per-scene structure
+    to reconcile against, so the deletion is simply saved as-is; anything
+    downstream that still references the deleted name only stops seeing it
+    in FUTURE regenerations, not retroactively cleaned up.
+
     `render` (default `False`) gates `RENDER_SKIP_STAGES` (casting +
     every image/video render stage) in the downstream re-run loop below —
     see that constant's docstring for why these are skipped by default.
@@ -696,7 +930,7 @@ def _revise_one(stage_name: str, out, *, edited_override: dict | None = None,
                               profile=profile, max_scenes=max_scenes, target_duration=target_duration,
                               render=render)
 
-    from .stages import REGISTRY, _load, _save_artifact, run_stage, downstream_of
+    from .stages import REGISTRY, _load, _save_artifact, downstream_of
     from .gate import edit_in_editor
     from . import artifact_diff
     from .agents import revision as revision_agent
@@ -714,6 +948,7 @@ def _revise_one(stage_name: str, out, *, edited_override: dict | None = None,
         return False
 
     panel_targets: dict = {}   # {scene_number: [panel_numbers]} — storyboard only
+    removed_keys: set = set()   # scene numbers / names DELETED from this artifact
     whole_file = stage_name in artifact_diff.WHOLE_FILE_ARTIFACTS
     if whole_file:
         drastic, reason, revise_keys = True, f"'{stage_name}' has no scene/name-keyed structure to scope by", None
@@ -721,6 +956,7 @@ def _revise_one(stage_name: str, out, *, edited_override: dict | None = None,
         diff = artifact_diff.diff_artifact(stage_name, current, edited)
         drastic, reason = diff.drastic, diff.drastic_reason
         revise_keys = set(diff.changed) | set(diff.added)
+        removed_keys = set(diff.removed)
         if stage_name == "storyboard" and not drastic and revise_keys:
             nested = artifact_diff.diff_nested("storyboard", current, edited)
             for snum in revise_keys:
@@ -737,10 +973,16 @@ def _revise_one(stage_name: str, out, *, edited_override: dict | None = None,
             print("[reel] revision cancelled")
             return False
         revise_keys = None
-    elif not revise_keys:
+    elif not revise_keys and not removed_keys:
         print("[reel] no changes detected — nothing to revise")
         return False
     else:
+        if removed_keys:
+            print(f"[reel] {sorted(removed_keys, key=str)} deleted from {artifact_name}.json")
+            if stage_name == "scenes":
+                print("[reel]   will be removed from every downstream artifact that "
+                     "tracks scenes, and from the video manifest if rendered")
+
         if stage_name == "casting":
             by_name_old = {c.get("name"): c for c in current.get("casting", [])}
             by_name_new = {c.get("name"): c for c in edited.get("casting", [])}
@@ -779,38 +1021,25 @@ def _revise_one(stage_name: str, out, *, edited_override: dict | None = None,
                                 print("[reel] couldn't parse that — skipping ripple additions")
 
     downstream = downstream_of(stage_name)
-    print(f"[reel] plan: save {artifact_name}.json"
-         + (f" (revising: {sorted(revise_keys, key=str)})" if revise_keys else " (full regen)")
+    plan_bits = []
+    if revise_keys:
+        plan_bits.append(f"revising: {sorted(revise_keys, key=str)}")
+    if removed_keys:
+        plan_bits.append(f"removing: {sorted(removed_keys, key=str)}")
+    plan_desc = f" ({'; '.join(plan_bits)})" if plan_bits else " (full regen)"
+    print(f"[reel] plan: save {artifact_name}.json{plan_desc}"
          + (f", then re-run: {', '.join(downstream)}" if downstream else ", nothing downstream"))
     if not (auto_confirm or input("[reel] proceed? [y/N] ").strip().lower() == "y"):
         print("[reel] revision cancelled")
         return False
 
     _save_artifact(out, artifact_name, edited)
-
-    for dname in downstream:
-        if dname in RENDER_SKIP_STAGES and not render:
-            print(f"[reel]   {dname}: skipped (casting/rendering disabled by default — "
-                 "pass --render, or type 'render on' in the revise loop, to include it)")
-            continue
-        if dname == "scene_render":
-            render_keys = revise_keys
-            if revise_keys is not None and stage_name in _NAME_KEYED_STAGES:
-                # name-keyed source (casting/characters) -> translate to the
-                # scene numbers those names actually appear in, so a locked-
-                # identity change re-renders the scenes it actually affects.
-                render_keys = _names_to_scene_numbers(out, revise_keys) or None
-            _apply_scene_render_revision(out, stage_name, render_keys, panel_targets)
-            continue
-        if dname in ("casting_images", "moodboard_tiles"):
-            run_stage(dname, out=out, profile=profile, max_scenes=max_scenes)
-            continue
-        d_existing = _load(out, REGISTRY[dname].artifact())
-        d_keys = _translate_revise_keys(stage_name, dname, revise_keys, edited)
-        run_stage(dname, out=out, profile=profile,
-                 max_scenes=_effective_max_scenes(dname, max_scenes),
-                 existing=d_existing, revise_keys=d_keys,
-                 **_duration_kwargs(dname, out, target_duration))
+    if removed_keys and stage_name == "scenes":
+        _strip_removed_scenes(out, downstream, edited)
+        _strip_removed_scenes_from_video_manifest(out, edited)
+    _run_downstream_revision(out, stage_name, downstream, revise_keys, edited, panel_targets,
+                             profile=profile, max_scenes=max_scenes,
+                             target_duration=target_duration, render=render)
 
     print(f"[reel] revision applied — {artifact_name}.json"
          + (f" and {len(downstream)} downstream stage(s)" if downstream else "") + " updated")

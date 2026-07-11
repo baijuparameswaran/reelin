@@ -448,10 +448,10 @@ false` in config, or no TTY.)
 Each round: pick any stage (or `source` for the raw ingested story text) to
 hand-edit in `$EDITOR` — the same "view/edit" mechanism the live pipeline gate
 already uses. On save, reel figures out **exactly what changed** (which scene
-numbers, character/location names, or storyboard panels — no LLM call, a
-deterministic diff) and proposes re-running only the stages that are actually
-downstream of the edit, scoped to just the changed keys — not the whole
-pipeline from scratch. You confirm before anything runs.
+numbers, character/location names, or storyboard panels — a deterministic
+diff for any JSON stage, no LLM needed) and proposes re-running only the
+stages that are actually downstream of the edit, scoped to just the changed
+keys — not the whole pipeline from scratch. You confirm before anything runs.
 
 A few things this is deliberately careful about:
 
@@ -471,10 +471,33 @@ A few things this is deliberately careful about:
   end frames for every rendered panel are recorded in
   `output/video/manifest.json`, which is what makes this targeted re-render
   (and re-stitching it back into the scene/movie) possible.
-- **Scene count/order is assumed stable.** Editing content within existing
-  scenes is scoped; inserting, deleting, or reordering scenes is treated as a
-  larger ("drastic") change and falls back to a full downstream regenerate,
-  with a warning and a confirmation prompt — not a silent partial revision.
+- **You can add or delete a scene directly in `scenes.json`, not just edit
+  one.** Hand-editing `scenes` to insert a new scene number scopes exactly
+  like any other edit — it (and whatever's downstream of it) gets
+  generated, everything else stays untouched. Deleting a scene number is
+  propagated too: it's stripped out of every other stage that tracks scenes
+  (soundscape/visuals/cinematography/screenplay/storyboard),
+  `screenplay.fountain` is regenerated to match, and — if that scene was
+  already rendered — it's dropped from the video manifest and the final
+  movie is re-stitched without it (the old clip files themselves are left
+  on disk, not deleted, in case you want them back). None of this costs an
+  API call: it's local bookkeeping, so it happens even in a `render: off`
+  session. Reordering scenes (renumbering an existing one) isn't supported
+  — that's still treated as a larger ("drastic") change, falling back to a
+  full downstream regenerate with a warning and confirmation prompt, not a
+  silent partial revision.
+- **Editing the raw story text is scoped too, not just a full regen.**
+  Hand-edit `source` and reel first figures out WHICH scenes the change
+  actually touches — a deterministic pre-check (does each scene's own
+  portion of the story still appear, word for word, in the new text?)
+  followed by an LLM pass that reads a compact diff of just the changed
+  paragraphs (not the whole story twice) and confirms/refines the affected
+  scene numbers, on the largest local model available for reliability. Only
+  those scenes — and whatever's actually downstream of them — get
+  regenerated; an edit that reads as adding or removing an event still
+  falls back to the full regen (this scoped path doesn't yet infer a
+  concrete new/deleted scene from prose the way a direct `scenes.json` edit
+  above does).
 - **One session, many rounds.** The revision loop reattaches to the run's
   existing `output/session.json` (see [Session tracking](#session-tracking)
   above) and keeps it `running` across every round; it's only marked

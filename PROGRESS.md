@@ -186,6 +186,209 @@
   / final cut phase.
 
 ## Session log
+- 2026-07-10 (later 10) — **`revise` can now DELETE and ADD scenes directly
+  in `scenes.json`, not just modify one — lifting the "v1 scope assumption:
+  scene count/order is stable" limit documented (and deliberately left
+  alone) in several earlier session-log entries.** User asked directly for
+  the revise agent to be able to "delete/add/modify from the existing
+  jsons/artifacts and create the revised ones." Scoped this to the one
+  artifact where it's well-defined and highest-value: `scenes.json`, the
+  single source of truth every other scene-keyed artifact (soundscape/
+  visuals/cinematography/screenplay/storyboard) is declared to depend on —
+  those artifacts still can't be independently edited to add/remove a
+  scene (a mismatch there remains `drastic`, unrelated to this feature);
+  they get kept in sync with scenes.json automatically.
+
+  `artifact_diff.ARTIFACT_SHAPES["scenes"]` changed from
+  `allow_add=False, allow_remove=False` to `True, True` — a scenes.json
+  edit that adds or removes a scene number is no longer automatically
+  `drastic`. ADD already mostly worked once this flipped:
+  `revision_merge.merge_by_key` already appends a genuinely new key: the
+  one gap was ordering — a new scene got appended to the END of the array
+  regardless of its number, but several downstream consumers (e.g.
+  `storyboard._scene_bundles`) iterate `scenes["scenes"]` in LIST order,
+  not re-sorted by number — fixed by having `scenes.segment_scenes` re-sort
+  the merged list by `number` after every scoped merge (a single numeric
+  sort key, not a tuple, to avoid a `None < None` comparison error if more
+  than one entry somehow lacks a number).
+
+  DELETE needed real new machinery, since `merge_by_key` can only add or
+  replace a key, never remove one — deliberately reusing what already
+  exists rather than inventing a second mechanism: `cli._revise_one`'s
+  `"scenes"` branch now computes `removed_keys` from `diff.removed`
+  (previously computed but discarded — `revise_keys` only ever included
+  `changed | added`) and, right after saving the edited scenes.json but
+  BEFORE the normal downstream cascade, calls two new functions: (1)
+  `cli._strip_removed_scenes` — for every scene-keyed stage in
+  `downstream_of("scenes")`, calls `fidelity.strip_orphan_scenes` (the
+  EXACT SAME deterministic primitive `pipeline.run_group` already uses to
+  self-heal scene-structure alignment during a fresh run — not a second
+  implementation) against that stage's current on-disk artifact and saves
+  the result back; `screenplay` additionally gets `screenplay.fountain`
+  regenerated (deterministic — `to_fountain`, no LLM) plus its
+  `drafted_count`/`total_scenes` bookkeeping fields corrected, since a
+  pure-deletion edit leaves `screenplay`'s own `revise_keys` scope empty
+  and nothing else in the round would otherwise touch that file. (2) `cli.
+  _strip_removed_scenes_from_video_manifest` — `pipeline._assemble_movie`
+  stitches every scene `video/manifest.json` lists, in order, so a stale
+  entry for a deleted scene would otherwise still end up in `movie.mp4`;
+  strips it and re-assembles (the underlying clip files are left on disk,
+  not deleted — non-destructive, matching this codebase's established
+  "never delete, only stop referencing" convention for
+  `rerender_panels`'s one-hop cascade-stop bookkeeping from an earlier
+  session). Both are pure local bookkeeping (no Gemini/Veo call), so they
+  run unconditionally, independent of the `render` skip-by-default flag —
+  only actual media generation is gated by that flag, not cleanup.
+
+  **A real correctness bug was found and fixed while wiring this up,
+  independent of deletion specifically**: `cli._translate_revise_keys`
+  (the `scenes`→`casting` cross-type scope translation, via revised
+  scenes' `location` names) returned `None` — meaning "no known
+  translation, fall back to a full regen" — whenever it found zero
+  locations among the targeted scenes, with no distinction between "the
+  input `revise_keys` was itself empty" (nothing to translate, correctly
+  an empty/no-op scope) and "the input was non-empty but genuinely
+  ambiguous" (correctly falls back). This was dormant before this session
+  because `_revise_one` always bailed out early ("no changes detected")
+  before `revise_keys` could ever reach `_run_downstream_revision` empty —
+  but this session's other fix (see next paragraph) makes an empty
+  `revise_keys` a normal, reachable case, which would have made EVERY
+  scenes-only-deletion revision wrongly force a full `casting` regen for
+  no reason. Fixed: `_translate_revise_keys` now returns `set()`
+  immediately for an empty input, before ever computing `locs`.
+  `cli._run_downstream_revision` gained a matching optimization for the
+  general (non-`scene_render`/`casting_images`) branch: when the
+  translated scope is empty-but-not-`None`, `run_stage` is skipped
+  entirely for that stage rather than called and its entire response
+  discarded by `merge_by_key`'s `keys_to_replace=set()` — avoids burning
+  local Ollama compute on output nothing will ever use.
+
+  The OTHER half of the "no changes detected" bailout also needed fixing:
+  it checked `elif not revise_keys:`, which would have incorrectly
+  swallowed a pure-deletion edit (no add/change, `revise_keys` legitimately
+  empty, but `removed_keys` non-empty) as "nothing to revise" and returned
+  early without ever saving the edit — changed to `elif not revise_keys and
+  not removed_keys:`. This same bailout also covers casting/characters
+  (name-keyed, `allow_remove=True` already before this session), so a
+  pure-deletion edit there is fixed too, though — per explicit scoping
+  decision — those artifacts get no equivalent downstream-stripping step
+  (no per-scene structure to reconcile against): the deletion is simply
+  saved as-is, and downstream stages stop seeing that name in FUTURE
+  regenerations only, not retroactively cleaned up. The revision-plan
+  printout (`[reel] plan: save ...`) now separately lists `revising: [...]`
+  and `removing: [...]` when both apply to the same edit (e.g. a round that
+  both adds scene 6 and deletes scene 3 at once — fully supported, handled
+  correctly by running the strip step first, then the normal scoped
+  regen for whatever was also added/changed).
+
+  Added `tests/test_revise_scene_delete_add.py` (10 tests, all offline/
+  mocked — no LLM/API/ffmpeg calls): the shape change itself (add/remove no
+  longer drastic for `scenes`, still drastic for every other scene-keyed
+  artifact); `segment_scenes`' merge-then-sort placing a new scene number
+  in correct narrative order while leaving untouched scenes byte-identical;
+  `_translate_revise_keys`'s three cases (empty input → empty output,
+  `None` stays `None`, non-empty-with-no-locations still falls back); and
+  three end-to-end `_revise_one("scenes", ...)` scenarios against a
+  realistic on-disk fixture (5 stages + a video manifest) — deleting scene
+  2 correctly strips it from soundscape.json/screenplay.json, regenerates
+  screenplay.fountain with scene 2's content gone, strips it from the video
+  manifest, and — the regression this was built to catch — does NOT call
+  `run_stage` for soundscape at all (nothing to regenerate); a
+  deletion-only edit reaches the actual apply logic instead of hitting the
+  old "no changes detected" bailout; and adding scene 4 correctly scopes
+  `revise_keys={4}` through to every downstream stage. Full suite now 107
+  tests (was 97), still zero LLM/API calls anywhere; `py_compile` clean
+  across `reel/*.py reel/agents/*.py tests/*.py`.
+- 2026-07-10 (later 9) — **A source-text edit in `revise` is now SCOPED to
+  the scenes it actually affects, on the largest local model tier — closing
+  a gap explicitly deferred as "genuinely hard, out of scope for v1" in an
+  earlier session.** User asked directly: identify the actual change in the
+  story, pass the current rendered artifacts at each stage, and change only
+  the scenes/shots that actually require it — using the largest available
+  model so the whole thing "can be processed seamlessly." Previously ANY
+  edit to the raw story text (`cli._revise_source`, the special handler for
+  `stage_name in ("source", "ingest")`) unconditionally fell back to a full
+  regen of every single stage, since `artifact_diff.diff_source_text`'s own
+  docstring called word-level prose diffing "a genuinely hard problem...
+  out of scope for v1." Built the missing piece as two deterministic
+  helpers plus one LLM confirmation call, deliberately NOT "send the whole
+  story twice to a big model and hope" — that would be slow, wasteful of
+  context, and give the model no structural hint about where to even look.
+  New in `reel/artifact_diff.py` (pure, no LLM, no new dependency — matches
+  this module's existing design contract): `candidate_changed_scenes(old,
+  new, scenes)` flags any scene whose stored `source_excerpt` (or
+  `source_line` for a checkpoint predating that field) is no longer found
+  verbatim, whitespace-normalized, in the new text — a cheap, deterministic
+  pre-filter; `unified_source_diff(old, new)` turns the edit into a
+  COMPACT paragraph-level diff (`difflib.unified_diff` over a new
+  `_split_paragraphs` helper — blank-line paragraphs, falling back to
+  single lines, falling back to sentence-splitting for a single-block story
+  with no line breaks at all, so there's always real diff granularity to
+  work with) instead of the full story. New `reel/agents/revision.
+  identify_source_text_changes(unified_diff, scenes, candidates, profile)`
+  takes both, asks the model to confirm/refine the candidate set against
+  the diff's actual content and decide `drastic` (the diff implies a scene
+  should be ADDED or REMOVED — the same v1 "scene count/order stays
+  stable" assumption every other scene-keyed artifact diff already makes,
+  intentionally not solved here either) vs. a scoped `changed_scene_
+  numbers` list. FAILS SAFE at every layer, verified via 5 direct test
+  cases: a malformed/unparseable response, or a `drastic: false` response
+  that's internally inconsistent (no scene numbers AND no reason given),
+  both force `drastic=True` rather than silently under-scoping; every
+  returned scene number is sanitized against the scene numbers that
+  actually exist before the caller ever sees it, so a hallucinated number
+  can never leak into `revise_keys`.
+
+  For "largest available model": bumped `agent_profiles.revision` from
+  `quality` to **`quality_high`** (qwen3:30b, the biggest tier this
+  hardware fits — ~7-9 tok/s, slow, but this call is infrequent — once per
+  source-text revision round, not once per scene — and correctness matters
+  more than speed for correlating a diff against potentially many existing
+  scenes). This also upgrades `suggest_ripple_scenes`'s tier as a side
+  effect (same config knob), a reasonable free improvement for a similarly
+  judgment-heavy advisory call.
+
+  Wiring it all together needed one refactor to avoid a second, parallel
+  scoped-revision implementation: extracted `cli._revise_one`'s inline
+  downstream-cascade loop (the `for dname in downstream: ...` block —
+  `RENDER_SKIP_STAGES` check, `scene_render` routing through
+  `_apply_scene_render_revision` with name→scene-number translation,
+  `_translate_revise_keys` per stage) into a shared `cli.
+  _run_downstream_revision(out, stage_name, downstream, revise_keys,
+  edited_artifact, panel_targets, ...)`, called by BOTH `_revise_one` (its
+  original call site, behavior unchanged — verified by the full existing
+  suite passing unmodified) and the new `_revise_source` scoped path: once
+  `identify_source_text_changes` returns a non-drastic result,
+  `stages.run_stage("scenes", existing=current_scenes, revise_keys=
+  changed_scene_numbers, ...)` re-runs `scenes` itself scoped (the exact
+  same `existing=`/`revise_keys=` mechanism a direct `scenes.json` hand-
+  edit already uses), then `_run_downstream_revision` cascades from there
+  exactly like `_revise_one("scenes", ...)` would — literally the same
+  code path, not a lookalike. Falls back to the original full-regen-of-
+  every-`STAGES`-entry behavior in exactly two cases: no `scenes.json`
+  exists yet to correlate the diff against (verified the LLM call is
+  skipped entirely here, not just ignored — nothing to attempt), or the
+  analysis itself says `drastic`.
+
+  **A real regression was caught and fixed while verifying this**: the
+  scoped analysis call fires whenever `scenes.json` exists — which it does
+  in `tests/test_revise_inheritance.py`'s existing `test_revise_source_
+  passes_inherited_attributes_to_every_stage` (its `_setup_run` writes
+  `scenes.json`) — and that test didn't mock `identify_source_text_changes`,
+  so running the full suite made a REAL live Ollama call, ballooning the
+  suite from ~0.03s to ~68s. Fixed by adding a mock there forcing
+  `drastic=True`, since that test's actual purpose (profile/max_scenes
+  threading through the full-regen fallback) doesn't need or want the new
+  scoped path exercised — restored to fully offline, <1s. Added
+  `tests/test_revise_scoped_source.py` (15 tests) covering the diff/
+  candidate helpers directly, `identify_source_text_changes`'s fail-safe
+  behavior (5 cases) and profile resolution (default `quality_high`, an
+  explicit override still wins), and three end-to-end `_revise_source`
+  scenarios (scoped path only touches `scenes`+its real downstream — NOT
+  a full-`STAGES` replay; drastic path still does the full regen; no-
+  scenes.json path never even attempts the LLM call). Full suite now 97
+  tests (was 82), still comfortably under a second, still zero live LLM
+  calls anywhere in the suite.
 - 2026-07-10 (later 8) — **`revise` now skips casting regeneration and all
   image/video rendering by default, with `--render`/`render on`/`render
   off` to opt in.** User asked for this directly, framed as a cost-control
