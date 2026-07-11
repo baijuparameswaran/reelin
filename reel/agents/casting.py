@@ -363,8 +363,11 @@ def cast_characters(
     its `_content_hash` in `pipeline._render_casting_images` — stable, so its
     already-rendered reference image is reused rather than regenerated from
     incidental LLM rewording. A genuinely new name (not in `existing` at all)
-    doesn't need to be in `revise_keys` — it's picked up automatically by
-    `merge_by_key`'s "append new keys" behavior."""
+    is only ever added if it's ALSO in `revise_keys` (e.g. because
+    `artifact_diff.diff_artifact` identified it as a genuinely added entry in
+    a direct hand-edit) — never picked up unprompted just because the
+    model's full-context response happened to include it (see
+    `revision_merge.merge_by_key`'s docstring)."""
     profile = profile or llm.agent_profile("casting")
     cast_input = json.dumps(
         [

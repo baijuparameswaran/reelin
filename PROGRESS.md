@@ -200,6 +200,47 @@
   final cut phase.
 
 ## Session log
+- 2026-07-11 (later 5) — **`revision_merge.merge_by_key` no longer lets a
+  scoped revision's model call silently ADD an entry that wasn't explicitly
+  requested — closing the last structural-drift gap after the two entries
+  below.** User's framing, stated as a general rule for the whole `revise`
+  flow: "reiterate and enforce the structure of the previous run as a rule
+  as much as possible .. deviation as in additions and deletions may be
+  done only as exceptions." Deletion was already exception-only (`merge_by_key`
+  never deletes anything on its own — it can only add/replace; an operator
+  deletion is the dedicated, explicit `cli._strip_removed_scenes` path).
+  Addition wasn't: `merge_by_key`'s second loop (appending a key from the
+  model's response that isn't in `existing_list` at all) had NO check against
+  `keys_to_replace` — every scoped call still gives the model full-story
+  context for coherence, so nothing stopped it from inventing or renaming an
+  extra character/scene/location not in scope and having it silently
+  appended to the final artifact. `casting.py`'s own docstring even
+  documented this as intentional ("a genuinely new name … doesn't need to
+  be in `revise_keys`"). Fixed: the append-new-key branch now requires
+  `k in keys_to_replace` too — a new key is only ever added when the CALLER
+  explicitly authorized it (e.g. `artifact_diff.diff_artifact`'s own
+  `added` set, for a genuine hand-edit that inserted a new scene/name), and
+  a new key the model returned outside that scope is discarded with a
+  printed notice rather than silently accepted. Audited every caller
+  (scenes/soundscape/visuals/cinematography/screenplay/storyboard/casting/
+  characters, plus `pipeline.py`'s video-manifest splice) to confirm this
+  doesn't break the legitimate ADD flows: the per-scene-loop agents
+  (screenplay/storyboard) only ever build `new_partial_list` from entries
+  already restricted to `revise_keys`, so the tightened check is a no-op
+  there; the whole-list agents (soundscape/visuals/cinematography/scenes)
+  only add a new key when it's the exact backfilled-missing-scene number
+  `cli._align_scene_keyed_stages` (entry below) put in `revise_keys`; the
+  video-manifest splice's `keys_to_replace` is by construction the same set
+  as its own new entries' keys. Updated `casting.py`'s docstring (no longer
+  claims the old unconditional-add behavior) and `merge_by_key`'s own
+  docstring to state the enforced-baseline framing explicitly.
+
+  Added 3 tests to `tests/test_revision_merge_fields.py`
+  (`TestMergeByKeyOnlyAddsExplicitlyRequestedNewKeys`): an unrequested new
+  key in the model's response is discarded, not appended; a new key that
+  IS explicitly in `keys_to_replace` (the legitimate add-a-scene/name case)
+  still gets added; and the discard prints a notice naming the dropped key.
+  Full suite now 161 tests (was 158), still fully offline, `py_compile` clean.
 - 2026-07-11 (later 2) — **Scoped revisions now merge FIELD BY FIELD within
   a targeted entry, not just entry-by-entry across the whole artifact.**
   User asked directly: "with the response received compare each value in

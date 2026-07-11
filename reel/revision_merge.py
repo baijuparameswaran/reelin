@@ -99,11 +99,25 @@ def merge_by_key(existing_list: list[dict], new_partial_list: list[dict],
     is guaranteed byte-identical), preserving `existing_list`'s order. A
     requested key the model didn't actually return a replacement for keeps
     its `existing` value (a loud warning, not a silent drop — a local model
-    occasionally omits an item; better to preserve than lose data). Keys in
-    `new_partial_list` that aren't in `keys_to_replace` are ignored (defends
-    against a chatty/over-eager LLM call that revised more than asked).
-    Genuinely new keys (not present in `existing_list` at all) are appended,
-    in the order the model returned them, after every existing entry.
+    occasionally omits an item; better to preserve than lose data).
+
+    `existing_list`'s own structure — its set of keys, in its own order — is
+    the enforced baseline: ANY key in `new_partial_list` that isn't in
+    `keys_to_replace` is ignored, including a genuinely NEW key (not present
+    in `existing_list` at all). Addition is only ever an intentional
+    EXCEPTION the caller opted into by including that key in
+    `keys_to_replace` (e.g. `artifact_diff.diff_artifact`'s own `added` set,
+    for a scenes.json hand-edit that genuinely inserted a scene) — never an
+    incidental side effect of a scoped call giving the model full-story
+    context and it deciding, unprompted, to invent or rename an extra entry.
+    A new key that IS in `keys_to_replace` is appended, in the order the
+    model returned it, after every existing entry (scene-numbered artifacts
+    additionally re-sort afterward — see `scenes.segment_scenes` — since
+    narrative position, not response order, is what matters there).
+    Deletion is never done here at all, by design — this primitive only
+    ever adds or replaces a key; see `cli._strip_removed_scenes` for the
+    dedicated, explicit mechanism an operator-requested deletion goes
+    through instead.
 
     A key that IS replaced doesn't take the model's entry wholesale — it's
     spliced through `merge_fields` (see that function's docstring) first,
@@ -127,6 +141,11 @@ def merge_by_key(existing_list: list[dict], new_partial_list: list[dict],
             out.append(e)
     for e in new_partial_list:
         k = key_fn(e)
-        if k not in seen:
+        if k in seen:
+            continue
+        if k in keys_to_replace:
             out.append(e)
+        else:
+            print(f"[revision] ⚠ discarding unrequested new key {k!r} the model returned "
+                 "— not in revise_keys, so not an intended addition", flush=True)
     return out

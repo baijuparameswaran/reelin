@@ -121,5 +121,45 @@ class TestMergeByKeyUsesFieldLevelMerge(unittest.TestCase):
         self.assertIs(result[0]["physical_form"], existing[0]["physical_form"])
 
 
+class TestMergeByKeyOnlyAddsExplicitlyRequestedNewKeys(unittest.TestCase):
+    """`revise` must enforce the PREVIOUS run's structure as the default rule
+    — an addition is only ever an intentional exception the caller opted
+    into via `keys_to_replace`, never an incidental side effect of a scoped
+    call giving the model full-story context and it deciding, unprompted,
+    to invent or rename an extra entry."""
+
+    def test_unrequested_new_key_is_discarded_not_appended(self):
+        existing = [{"name": "Alice", "role": "lead"}]
+        # Only "Alice" was targeted, but the model's full-context response
+        # also slipped in an entirely new, unrequested character.
+        new_partial = [
+            {"name": "Alice", "role": "protagonist"},
+            {"name": "Bob", "role": "invented, unprompted"},
+        ]
+        result = merge_by_key(existing, new_partial, lambda c: c["name"], {"Alice"})
+        names = [c["name"] for c in result]
+        self.assertEqual(names, ["Alice"])
+        self.assertNotIn("Bob", names)
+
+    def test_new_key_explicitly_in_keys_to_replace_is_still_added(self):
+        # The legitimate ADD path: the operator's own edit is what put this
+        # key in keys_to_replace (e.g. `artifact_diff.diff_artifact`'s
+        # `added` set for a direct scenes.json hand-edit) — addition as an
+        # explicit, intentional exception must still work.
+        existing = [{"number": 1, "summary": "s1"}]
+        new_partial = [{"number": 2, "summary": "s2 (genuinely new)"}]
+        result = merge_by_key(existing, new_partial, lambda s: s["number"], {2})
+        numbers = [s["number"] for s in result]
+        self.assertEqual(numbers, [1, 2])
+
+    def test_discarding_an_unrequested_key_prints_a_notice(self):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            merge_by_key([{"name": "Alice"}], [{"name": "Bob"}],
+                        lambda c: c["name"], {"Alice"})
+        self.assertIn("discarding unrequested new key", buf.getvalue())
+        self.assertIn("'Bob'", buf.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()
