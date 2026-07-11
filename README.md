@@ -492,6 +492,14 @@ A few things this is deliberately careful about:
   If your edit changes a character/location's description enough that it
   might imply a different look, you get a warning and the OLD image is kept
   by default — reworking it into the new look isn't attempted automatically.
+- **Even within a scene/character that IS being regenerated, only the
+  fields that actually changed are accepted — field by field, not the
+  whole entry wholesale.** The model still sees full-story context and can
+  incidentally reword a field that had nothing to do with your actual
+  edit; each field of its response is compared against the existing value,
+  and only genuinely different ones are taken — everything else keeps its
+  old value verbatim, so a targeted edit to one field of a scene/character
+  doesn't quietly cause every other field on it to drift too.
 - **Video panels re-render cheaply and predictably.** Editing one storyboard
   panel re-renders that panel plus exactly the one immediately after it (to
   keep that seam visually smooth), then stops — it does not cascade through

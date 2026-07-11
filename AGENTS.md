@@ -13,7 +13,10 @@
 - **Scoped revision** = accepts `existing: dict | None` + `revise_keys: set | None`
   kwargs (the `revision_merge.merge_by_key` pattern) so `python -m reel.cli revise`
   can regenerate just the targeted scene numbers / character-or-location names,
-  splicing everything else back in byte-identical from `existing`.
+  splicing everything else back in byte-identical from `existing`. Even for a
+  KEY that IS targeted, only the FIELDS that actually differ from the
+  existing entry are accepted (`revision_merge.merge_fields`) — a field the
+  model reworded without a real content change keeps its old value too.
 - **Sandwiched prompt** = the prompt template ends with a "Before you respond,
   re-check against [data] above" block restating its highest-stakes rules a
   second time, in addition to stating them up front — mitigates the

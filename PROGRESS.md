@@ -200,6 +200,76 @@
   final cut phase.
 
 ## Session log
+- 2026-07-11 (later 2) — **Scoped revisions now merge FIELD BY FIELD within
+  a targeted entry, not just entry-by-entry across the whole artifact.**
+  User asked directly: "with the response received compare each value in
+  the existing json with the received and accept the new value IF AND ONLY
+  IF it is not determined to be same. Otherwise retain old values for each
+  field." Previously `revision_merge.merge_by_key` — the one shared splice
+  primitive every scoped agent uses — only operated at the ENTRY level: an
+  untouched key (not in `revise_keys`) was already preserved byte-
+  identical, but a key that WAS targeted took the model's ENTIRE returned
+  entry wholesale, even fields that weren't the actual point of the edit —
+  since every scoped call still gives the model full-story context for
+  coherence, it can (and in practice does) incidentally reword unrelated
+  fields on a targeted entry, which previously always leaked through.
+
+  New `revision_merge.merge_fields(old_entry, new_entry, *, label="")`:
+  for every field the model's response supplies, accepts the new value
+  ONLY if it's structurally different from the existing one (`_values_equal`
+  — dict-key-order-tolerant, list-order-SENSITIVE equality, same approach
+  `artifact_diff._deep_eq` already uses at the entry level, kept as a
+  separate small implementation here since this module is deliberately
+  dependency-free); otherwise keeps the OLD value verbatim (the exact same
+  object, not just an equal copy — verified directly via `assertIs` in the
+  new tests). A field present only in the new response (genuinely new) is
+  taken as-is; a field present only in the old entry (the model didn't
+  echo it back) keeps its old value — an omission isn't a deletion, same
+  "preserve, don't lose data" philosophy `merge_by_key` already applies
+  when the model omits an entire targeted KEY, now extended one level
+  down to a single FIELD within one. `merge_by_key` now calls
+  `merge_fields(e, by_key_new[k], label=str(k))` instead of taking
+  `by_key_new[k]` wholesale — the `label` prints a one-line transparency
+  summary of which fields actually changed for that entry (or that none
+  did), extending the "indicate what's changing" theme from the
+  2026-07-11 (earlier) session-log entry down to field granularity, and
+  only ever fires during a scoped revision (every `merge_by_key` call site
+  is revise-only, never a fresh pipeline run).
+
+  Deliberately ONE level deep, not recursive: a list or nested-dict field
+  (e.g. storyboard's `panels`, casting's `character`/`actor` blocks) is
+  compared, and if different, replaced, as a WHOLE value — not diffed
+  field-by-field within itself. Going deeper would need per-artifact-type
+  knowledge of which nested structures are independently meaningful that
+  this generic primitive doesn't have; panel/shot-level granularity
+  already has its own dedicated mechanism (`artifact_diff.diff_nested` +
+  `cli.py`'s `panel_targets`) for the one case that actually needs it, so
+  extending `merge_fields` to cover that too would be a second, redundant
+  implementation of something that already exists.
+
+  Verified this is a pure refinement, not a behavior change, for the
+  common case: when EVERY field on a targeted entry genuinely differs
+  (the typical shape of a real scoped-revision response), `merge_fields`'
+  result is identical to the old wholesale-replace behavior — confirmed
+  directly by `test_all_fields_different_matches_old_wholesale_replace_
+  behavior`. The full existing suite (141 tests, none of which construct
+  old/new entries with coincidentally-identical individual fields) passed
+  unmodified after this change, confirming no regression to any prior
+  scoped-revision test.
+
+  Added `tests/test_revision_merge_fields.py` (12 tests): `merge_fields`
+  directly — unchanged field keeps the OLD value (and specifically the OLD
+  object via `assertIs`, not just an equal one), a genuinely new field is
+  taken, an old field the model omitted is retained, dict-key-reordering
+  counts as unchanged, LIST-element-reordering counts as changed (the one
+  asymmetry between the two container types), the all-fields-differ case
+  matches plain wholesale replacement, and both `label=` print paths
+  (changed / nothing changed); plus two `merge_by_key`-level end-to-end
+  tests confirming a targeted entry with a mix of genuinely-changed and
+  coincidentally-same fields only updates the ones that actually differ
+  (via `assertIs` on the retained field), and that an entry the model
+  echoed back byte-for-identical-content stays effectively untouched. Full
+  suite now 153 tests (was 141), still fully offline, `py_compile` clean.
 - 2026-07-11 (later) — **Added `--no-render` to the main `python -m
   reel.cli SOURCE.txt` command — casting-image + video rendering can now
   be skipped for a normal full pipeline run, not just inside `revise`.**

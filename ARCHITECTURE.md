@@ -464,6 +464,23 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
   `_render_casting_images` hash matches → its rendered PNG is reused with zero
   code changes needed in that function. A genuinely NEW name doesn't need to
   be in `revise_keys` at all (`merge_by_key` appends it automatically).
+  **Within an entry that IS in `revise_keys`, the same protection now
+  applies one level deeper, field by field** (`revision_merge.merge_fields`,
+  called by `merge_by_key` for every targeted key instead of taking the
+  model's entry wholesale): a field is only actually replaced if its new
+  value is structurally different from the existing one (dict-key-order-
+  tolerant, list-order-sensitive equality — `merge_fields._values_equal`);
+  a field the model reworded without any real content change — punctuation,
+  phrasing, an incidentally-touched field that wasn't the actual point of
+  the edit — keeps its OLD value instead of silently drifting. A field
+  entirely absent from the model's response keeps its OLD value too (an
+  omission isn't a deletion, same philosophy as a whole omitted KEY); a
+  field present only in the new response (genuinely new) is taken as-is.
+  Deliberately one level deep only — a list/nested-dict field is compared
+  (and, if different, replaced) as a whole value, not recursed into
+  further; panel/shot-level granularity already has its own dedicated
+  mechanism (`artifact_diff.diff_nested` + `cli.py`'s `panel_targets`) for
+  the one case that needs it.
   `screenplay`/`storyboard` already loop one LLM call per scene, so scoping
   them just filters which scenes enter the loop (screenplay additionally
   seeds `_prior_scenes_block` continuity from `existing` for any
