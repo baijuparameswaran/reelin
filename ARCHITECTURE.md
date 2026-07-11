@@ -555,6 +555,45 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
   ("source", "ingest")` to the same `_revise_source` handler, and the
   interactive menu skips listing `ingest` at all to avoid showing two
   entries for the same underlying artifact).
+- **`revise`'s downstream cascade gets the SAME per-stage review gate a
+  fresh `pipeline.run()` uses** — `cli._revise_loop` builds a real
+  `gate.Gate.from_config(...)` and threads it into every `_revise_one`/
+  `_revise_source` call, which thread it into `_run_downstream_revision`
+  (the scoped cascade), `_align_scene_keyed_stages` (the unconditional
+  scene-alignment backfill), and `_revise_source`'s drastic full-regen
+  loop. `cli._gate_stage_result(gate, name, result, ...)` is the shared
+  wrapper every one of those call sites routes a freshly-regenerated
+  stage's result through: it reuses `pipeline._gated` (the exact function
+  a fresh run's `run_group` already calls) — NOT a second gate
+  implementation — so fidelity/genre scoring, feedback-driven re-run
+  (re-scoped to the SAME `existing`/`revise_keys` this round already
+  committed to, so feedback refines rather than widens/narrows scope),
+  'view'-to-edit, auto-escalation, and the auto-approve timeout all behave
+  identically to a fresh pipeline stage's gate. `gate=None` (the implicit
+  default at every one of these functions' call sites, and what every
+  pre-existing test still passes) is a complete no-op — the result is
+  returned unchanged, byte-for-byte the auto-apply behavior `revise` always
+  had before this feature. `_gate_stage_result` looks up a per-stage
+  summarizer from a table of `pipeline._summarize_*` functions (the exact
+  ones a fresh run's gate already uses) and silently skips gating for any
+  stage without one (`casting_images`/`moodboard_tiles`/`scene_render` —
+  render steps with no text output to review — and `fidelity`, the grader
+  itself); fidelity/genre scoring reuses the module-level
+  `pipeline.FIDELITY_GATED_STAGES`/`GENRE_GATED_STAGES` constants (hoisted
+  out of `run()`'s local scope specifically so `cli.py` doesn't maintain a
+  second, potentially-drifting copy) and reloads `source.json`/`genre.json`
+  fresh from `out` each time, correct even when `scenes`/`genre` were just
+  regenerated earlier in the same revision round. Because a 'view'-then-
+  edit approval never goes through `stages.run_stage` at all (there's no
+  model call to make), `_gate_stage_result` explicitly persists the
+  final approved result itself after `_gated` returns (plus regenerating
+  `screenplay.fountain` when the gated stage is `screenplay`) — mirroring
+  why `pipeline.run_group` calls `save(nm, r)` right after its own `_gated`
+  call rather than trusting the loop body to have already written it. A
+  'stop' at any of these gates raises `PipelineStopped`, caught by
+  `_revise_loop` the same way `cli.main` already catches it for a fresh
+  `pipeline.run()` — the revision session is marked `"paused"` and the
+  loop exits, with every stage completed so far left saved.
 - **`revise` skips casting + all image/video rendering by default** —
   `cli.RENDER_SKIP_STAGES = {"casting", "casting_images", "moodboard_tiles",
   "scene_render"}` — since those are the only stages `revise` can trigger

@@ -83,6 +83,15 @@ def _scenes_label(max_scenes: int | None) -> str:
     return "all" if max_scenes is None else str(max_scenes)
 
 
+# Which stages get story-fidelity / genre-alignment scoring at their gate —
+# module-level (not local to `run()`) so `cli.py`'s `revise` flow can reuse
+# the exact same stage sets for its own per-stage gates, rather than
+# maintaining a second, potentially-drifting copy.
+FIDELITY_GATED_STAGES = {"structure", "characters", "scenes", "casting", "soundscape",
+                         "visuals", "cinematography", "screenplay", "storyboard"}
+GENRE_GATED_STAGES = FIDELITY_GATED_STAGES | {"moodboard"}
+
+
 # ── per-stage gate summarizers ────────────────────────────────────────────────
 
 def _summarize_structure(r: dict) -> str:
@@ -1685,8 +1694,7 @@ def run(
     fid_on = bool(fid_cfg.get("per_stage", True))
     fid_min = int(fid_cfg.get("min_score", 70))
     fid_reports: dict = {}
-    _FID_STAGES = {"structure", "characters", "scenes", "casting", "soundscape",
-                   "visuals", "cinematography", "screenplay", "storyboard"}
+    _FID_STAGES = FIDELITY_GATED_STAGES
 
     def fidelity_report(name: str, result: dict) -> dict | None:
         """Score this stage's output against the original story (open model).
@@ -1728,7 +1736,7 @@ def run(
     mood_cfg = llm.config().get("moodboard", {})
     mood_on = bool(mood_cfg.get("enabled", True))
     moodboard: dict = {}
-    _GENRE_STAGES = _FID_STAGES | {"moodboard"}
+    _GENRE_STAGES = GENRE_GATED_STAGES
 
     def apply_direction() -> None:
         """Compose the shared creative direction from genre + moodboard and steer

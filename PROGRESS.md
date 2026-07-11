@@ -200,6 +200,78 @@
   final cut phase.
 
 ## Session log
+- 2026-07-11 (later 8) — **`revise`'s downstream cascade now gets the SAME
+  per-stage review gate a fresh `pipeline.run()` uses, per direct request
+  ("can the revise do gating like normal pipeline run").** Previously every
+  stage `revise` regenerated (the scoped downstream cascade, the
+  unconditional scene-alignment backfill, and the drastic source-text
+  full-regen fallback) was auto-applied and saved with zero review — the
+  only human touchpoints in the whole flow were picking which stage to
+  hand-edit, an accept/reject prompt for ripple suggestions, and a single
+  plain `proceed? [y/N]` confirmation before the whole cascade ran. A fresh
+  pipeline run's gate (fidelity/genre score, feedback-driven re-run,
+  'view'-to-edit, auto-escalation, auto-approve timeout) had no equivalent
+  during revise at all.
+
+  Confirmed scope via two quick questions: gate EVERY regenerated
+  downstream stage (not just the one the operator directly picked), and
+  KEEP the existing upfront plan confirmation alongside the new per-stage
+  gates (not replace it) — so the operator still sees the whole scope
+  before anything runs, then each stage gets its own review as it's
+  actually regenerated.
+
+  Implementation reuses `pipeline._gated` — the exact function a fresh
+  run's `run_group` already calls — rather than a second gate
+  implementation: new `cli._gate_stage_result(gate, name, result, ...)`
+  builds the `summarize_fn`/`rerun_fn`/`fidelity_fn`/`genre_fn` `_gated`
+  needs and returns the approved result. `rerun_fn` re-invokes `stages.
+  run_stage` with the SAME `existing`/`revise_keys` this round already
+  committed to (so feedback at the gate refines the current scoped
+  regeneration rather than widening or narrowing what this round targets)
+  plus a new `extra_kwargs` passthrough (needed so a drastic "scenes" regen
+  doesn't lose its `prior_scene_count` MINIMIZE-SCENE-COUNT reminder — see
+  the entry below — across a feedback-driven rerun). Two constants
+  (`_FID_STAGES`/`_GENRE_STAGES`) were hoisted from `pipeline.run()`'s local
+  scope to module level (`pipeline.FIDELITY_GATED_STAGES`/
+  `GENRE_GATED_STAGES`, pure refactor, `run()`'s own behavior unchanged) so
+  `cli.py` scores the exact same stage sets rather than maintaining a
+  second, potentially-drifting copy. `_gate_summary` similarly reuses
+  `pipeline._summarize_*` (one shared table, not new summarizers);
+  `_gate_stage_result` silently skips a stage with no summarizer
+  (`casting_images`/`moodboard_tiles`/`scene_render` — render steps with
+  nothing textual to review — and `fidelity`, the grader itself), matching
+  the earlier decision that only DESIGN stages get this treatment.
+
+  `gate=None` is the implicit default at every one of `_run_downstream_
+  revision`/`_align_scene_keyed_stages`/`_revise_source`/`_revise_one`'s
+  signatures — a complete no-op, returning the result byte-for-byte
+  unchanged, so every pre-existing call site (including every existing
+  test) keeps today's auto-apply behavior with zero code changes needed
+  elsewhere. Only `_revise_loop` now builds a real `gate.Gate.from_config
+  (llm.config())` and threads it through every `_revise_one` call for an
+  actual interactive session. Because a 'view'-then-edit approval never
+  calls `stages.run_stage` at all (no model call needed), `_gate_stage_
+  result` explicitly persists the final approved result itself (plus
+  regenerating `screenplay.fountain` for a gated `screenplay` stage) —
+  mirroring why `pipeline.run_group` calls `save(nm, r)` right after its
+  own `_gated` call instead of trusting the loop body. `_revise_loop`
+  gained a `PipelineStopped` catch (a 'stop' at any of these new gates
+  raises it, same as a fresh run) alongside its existing `KeyboardInterrupt`
+  handler — marks the session `"paused"` and exits, completed stages left
+  saved, exactly like Ctrl-C already does.
+
+  Added `tests/test_revise_gating.py` (8 tests, offline, `llm.config()`
+  mocked to disable fidelity/genre scoring so `fidelity.check_stage`/
+  `genre.enforce_stage` are never actually reached — no live Ollama calls):
+  `gate=None` returns the result completely unchanged; a stage with no
+  summarizer is skipped without even calling `Gate.review`; immediate
+  approval persists the result to disk; feedback triggers a rerun scoped to
+  the exact same `existing`/`revise_keys`; `extra_kwargs` (prior_scene_count)
+  survives a feedback-driven rerun; a manual 'view'-edit is saved even
+  though `run_stage` is never called for it; a gated `screenplay` approval
+  regenerates `screenplay.fountain`; and 'stop' raises `PipelineStopped`.
+  Full suite now 185 tests (was 177), still fully offline, `py_compile`
+  clean.
 - 2026-07-11 (later 7) — **Diagnosed a live case of scenes.json growing from
   1 to 3 scenes during `revise`, and closed the actual prompt gap it
   surfaced.** User noticed `output/scenes.json` had more scenes than an

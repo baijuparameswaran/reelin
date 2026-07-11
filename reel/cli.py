@@ -32,7 +32,12 @@ Usage:
                                                  # only the diff-identified scenes actually get
                                                  # regenerated either way. Prints the identified
                                                  # scope as soon as it's known, and what each
-                                                 # downstream stage is doing as it runs.
+                                                 # downstream stage is doing as it runs. Every
+                                                 # stage the cascade regenerates gets the SAME
+                                                 # review gate a fresh pipeline run's stages get
+                                                 # (fidelity/genre score, feedback-driven re-run,
+                                                 # 'view' to edit, auto-escalation, auto-approve
+                                                 # timeout) — not a silent auto-apply.
     python -m reel.cli veo-sync                  # refresh Veo prompt guide snapshot
         [--status]                               #   print cache status only (no fetch)
 
@@ -615,10 +620,140 @@ def _apply_scene_render_revision(out, source_stage: str, revise_keys, panel_targ
 RENDER_SKIP_STAGES = {"casting", "casting_images", "moodboard_tiles", "scene_render"}
 
 
+def _gate_summary(name: str, result: dict) -> str | None:
+    """Reuse the exact same per-stage summary renderers a fresh `pipeline.
+    run()`'s live gate already uses, so a revise-round gate reads identically
+    to a fresh-run gate for the same stage — one summarizer per stage, not a
+    second copy. Returns `None` for a stage with no summarizer at all
+    (casting_images/moodboard_tiles/scene_render/fidelity — render steps or
+    the grader itself), which the caller treats as "don't gate this one"."""
+    from . import pipeline as P
+    table = {
+        "structure": P._summarize_structure,
+        "characters": P._summarize_characters,
+        "scenes": P._summarize_scenes,
+        "casting": P._summarize_casting,
+        "soundscape": P._summarize_soundscape,
+        "visuals": P._summarize_visuals,
+        "moodboard": P._summarize_moodboard,
+        "cinematography": P._summarize_cinematography,
+        "screenplay": P._summarize_screenplay,
+        "storyboard": P._summarize_storyboard,
+    }
+    fn = table.get(name)
+    return fn(result) if fn else None
+
+
+def _gate_stage_result(gate, name: str, result: dict, *, out, profile: str | None,
+                       existing: dict | None, revise_keys, max_scenes: int | None,
+                       duration_kwargs: dict, extra_kwargs: dict | None = None) -> dict:
+    """Show the SAME per-stage review gate a fresh `pipeline.run()` uses —
+    fidelity/genre score, feedback-driven re-run, view/edit-in-editor,
+    auto-escalation, auto-approve timeout — for a stage `revise` just
+    regenerated. Per direct request: `revise`'s downstream cascade should
+    get the same gating experience a fresh pipeline run's stages already do,
+    not just a plain auto-apply.
+
+    `gate=None` (every pre-existing call site's implicit default, and what
+    every non-gating test still passes) means "no gating at all" — the
+    result is returned completely unchanged, identical to before this
+    feature existed. Only `_revise_loop`'s real `Gate.from_config(...)`
+    instance turns this on for an interactive session.
+
+    A stage `_gate_summary` has no summarizer for (casting_images/
+    moodboard_tiles/scene_render/fidelity — render steps or the grader
+    itself) isn't gated either — nothing to meaningfully review.
+
+    `rerun_fn` re-invokes `stages.run_stage` with the SAME `existing`/
+    `revise_keys` this round already committed to (plus any operator
+    feedback appended) — feedback at this gate refines the CURRENT scoped
+    regeneration, it never widens or narrows what this round targets.
+    `extra_kwargs` (e.g. `prior_scene_count` for a drastic "scenes" regen —
+    see `scenes._revision_reminder_note`) is threaded into every rerun too,
+    so a feedback-driven re-run doesn't silently lose a stage-specific
+    reminder the initial call had.
+
+    Fidelity/genre scoring reuses `pipeline.FIDELITY_GATED_STAGES`/
+    `GENRE_GATED_STAGES` (the same stage sets a fresh run scores) and reloads
+    `source.json`/`genre.json` fresh from `out` — cheap, and correct even if
+    `scenes`/`genre` were just regenerated earlier in this same round.
+
+    Raises `PipelineStopped` on 'stop', exactly like a fresh run's gate —
+    callers catch it the same way `cli.main` already catches it for
+    `pipeline.run()`."""
+    if gate is None:
+        return result
+    summary = _gate_summary(name, result)
+    if summary is None:
+        return result
+    from . import pipeline as P
+    from .stages import _load, run_stage
+    from .agents import fidelity as fidelity_agent
+    from .agents import genre as genre_agent
+
+    def summarize_fn(r):
+        return _gate_summary(name, r) or ""
+
+    def rerun_fn(fb, p=None):
+        return run_stage(name, out=out, profile=p or profile, feedback=fb,
+                         existing=existing, revise_keys=revise_keys,
+                         max_scenes=max_scenes, **duration_kwargs,
+                         **(extra_kwargs or {}))
+
+    cfg = llm.config()
+    fid_cfg = cfg.get("fidelity", {})
+    gen_cfg = cfg.get("genre", {})
+    rt_cfg = cfg.get("runtime", {})
+
+    fidelity_fn = None
+    if bool(fid_cfg.get("per_stage", True)) and name in P.FIDELITY_GATED_STAGES:
+        source_text = (_load(out, "source") or {}).get("text", "")
+
+        def fidelity_fn(r, _n=name, _txt=source_text):
+            try:
+                return fidelity_agent.check_stage(_n, r, _txt)
+            except Exception:
+                return None
+
+    genre_fn = None
+    genre_spec = _load(out, "genre") or {}
+    if bool(gen_cfg.get("enforce", True)) and genre_spec and name in P.GENRE_GATED_STAGES:
+        def genre_fn(r, _n=name, _spec=genre_spec):
+            try:
+                return genre_agent.enforce_stage(_n, r, _spec)
+            except Exception:
+                return None
+
+    approved, _fid_rep, _gen_rep = P._gated(
+        gate, name, result, summarize_fn, rerun_fn,
+        fidelity_fn=fidelity_fn, min_score=int(fid_cfg.get("min_score", 70)),
+        genre_fn=genre_fn, genre_min=int(gen_cfg.get("min_score", 70)),
+        profile=profile, escalate_after=int(rt_cfg.get("escalate_after", 3)),
+        escalate_score_gap=int(rt_cfg.get("escalate_score_gap", 20)))
+
+    # `rerun_fn` (a feedback re-run) already persisted its own result via
+    # `run_stage`'s own save=True default — but a 'view'-then-edit approval
+    # never goes through `run_stage` at all (see `Gate.review`'s `edited`
+    # path), so it's never actually written to disk unless we do it here
+    # too — the same reason `pipeline.run_group` explicitly calls `save(nm,
+    # r)` right after its own `_gated` call rather than trusting the loop
+    # body to have already done it.
+    from .stages import REGISTRY, _save_artifact
+    _save_artifact(out, REGISTRY[name].artifact(), approved)
+    if name == "screenplay":
+        from .agents.screenplay import to_fountain
+        source = _load(out, "source") or {}
+        structure = _load(out, "structure") or {}
+        (out / "screenplay.fountain").write_text(
+            to_fountain(source, structure, approved), encoding="utf-8")
+    return approved
+
+
 def _run_downstream_revision(out, stage_name: str, downstream: list[str], revise_keys,
                              edited_artifact: dict, panel_targets: dict, *,
                              profile: str | None, max_scenes: int | None,
-                             target_duration: int | None, render: bool) -> None:
+                             target_duration: int | None, render: bool,
+                             gate=None) -> None:
     """Selectively re-run every stage in `downstream` (already computed by
     the caller via `stages.downstream_of(stage_name)`), scoped to
     `revise_keys`. Shared by `_revise_one` (any directly hand-edited stage)
@@ -658,7 +793,16 @@ def _run_downstream_revision(out, stage_name: str, downstream: list[str], revise
     That guarantee is `_align_scene_keyed_stages`'s job, called once,
     unconditionally, by both `_revise_one` and `_revise_source` after this
     function returns — see its docstring for why an edit-scoped cascade
-    alone isn't a strong enough guarantee."""
+    alone isn't a strong enough guarantee.
+
+    `gate` (default `None` = no gating, unchanged from before this param
+    existed) is passed straight through to `_gate_stage_result` for each
+    regenerated stage — a real `Gate` here shows the same fidelity/genre/
+    feedback-loop review a fresh pipeline run's gate does, per direct
+    request. Render stages (`casting_images`/`moodboard_tiles`/
+    `scene_render`) aren't gated — `_gate_stage_result` has no summarizer
+    for them anyway, but they're not even routed through it here since
+    they're media-generation steps, not text output to review."""
     from .stages import REGISTRY, _load, run_stage
 
     for dname in downstream:
@@ -699,14 +843,17 @@ def _run_downstream_revision(out, stage_name: str, downstream: list[str], revise
             print(f"[reel]   {dname}: full regen (no scoped subset applies)")
         else:
             print(f"[reel]   {dname}: regenerating {sorted(d_keys, key=str)}")
-        run_stage(dname, out=out, profile=profile,
-                 max_scenes=_effective_max_scenes(dname, max_scenes),
-                 existing=d_existing, revise_keys=d_keys,
-                 **_duration_kwargs(dname, out, target_duration))
+        d_max_scenes = _effective_max_scenes(dname, max_scenes)
+        d_duration_kwargs = _duration_kwargs(dname, out, target_duration)
+        result = run_stage(dname, out=out, profile=profile, max_scenes=d_max_scenes,
+                          existing=d_existing, revise_keys=d_keys, **d_duration_kwargs)
+        _gate_stage_result(gate, dname, result, out=out, profile=profile,
+                          existing=d_existing, revise_keys=d_keys,
+                          max_scenes=d_max_scenes, duration_kwargs=d_duration_kwargs)
 
 
 def _align_scene_keyed_stages(out, *, profile: str | None, max_scenes: int | None,
-                              target_duration: int | None) -> None:
+                              target_duration: int | None, gate=None) -> None:
     """Unconditional guarantee, called once after EVERY revision round
     (`_revise_one` and `_revise_source` both call this after their own
     scoped/full regen completes): every scene-keyed artifact already on disk
@@ -730,7 +877,11 @@ def _align_scene_keyed_stages(out, *, profile: str | None, max_scenes: int | Non
     on-disk artifact yet is left alone: it has nothing to be misaligned
     FROM, and will get full, unscoped coverage the first time it actually
     runs (see `draft_screenplay`/`plan_storyboard`'s own `scoped =
-    revise_keys is not None and existing` check)."""
+    revise_keys is not None and existing` check).
+
+    `gate` (default `None` = no gating) is passed through to
+    `_gate_stage_result` for each backfilled stage — see that function's
+    docstring."""
     from .stages import REGISTRY, _load, _save_artifact, run_stage
     from .agents import fidelity
 
@@ -753,10 +904,13 @@ def _align_scene_keyed_stages(out, *, profile: str | None, max_scenes: int | Non
             continue
         print(f"[reel]   {dname}: aligning to scenes.json — this stage was missing scene(s) "
              f"{sorted(missing)}, regenerating just those now")
-        run_stage(dname, out=out, profile=profile,
-                 max_scenes=_effective_max_scenes(dname, max_scenes),
-                 existing=existing, revise_keys=missing,
-                 **_duration_kwargs(dname, out, target_duration))
+        d_max_scenes = _effective_max_scenes(dname, max_scenes)
+        d_duration_kwargs = _duration_kwargs(dname, out, target_duration)
+        result = run_stage(dname, out=out, profile=profile, max_scenes=d_max_scenes,
+                          existing=existing, revise_keys=missing, **d_duration_kwargs)
+        _gate_stage_result(gate, dname, result, out=out, profile=profile,
+                          existing=existing, revise_keys=missing,
+                          max_scenes=d_max_scenes, duration_kwargs=d_duration_kwargs)
 
 
 def _strip_removed_scenes(out, downstream: list[str], scenes_after: dict) -> None:
@@ -842,7 +996,8 @@ def _strip_removed_scenes_from_video_manifest(out, scenes_after: dict) -> None:
 
 def _revise_source(out, *, edited_override: dict | None = None, auto_confirm: bool = False,
                    profile: str | None = None, max_scenes: int | None = 1,
-                   target_duration: int | None = None, render: bool = False) -> bool:
+                   target_duration: int | None = None, render: bool = False,
+                   gate=None) -> bool:
     """Revise the raw ingested story text — SCOPED to the scenes actually
     affected, when possible, instead of always falling back to a full regen.
 
@@ -933,15 +1088,19 @@ def _revise_source(out, *, edited_override: dict | None = None, auto_confirm: bo
             return False
 
         _save_artifact(out, "source", edited)
+        scenes_duration_kwargs = _duration_kwargs("scenes", out, target_duration)
         new_scenes = run_stage("scenes", out=out, profile=profile,
                                existing=current_scenes, revise_keys=changed_scene_numbers,
-                               **_duration_kwargs("scenes", out, target_duration))
+                               **scenes_duration_kwargs)
+        new_scenes = _gate_stage_result(gate, "scenes", new_scenes, out=out, profile=profile,
+                                        existing=current_scenes, revise_keys=changed_scene_numbers,
+                                        max_scenes=None, duration_kwargs=scenes_duration_kwargs)
         downstream = downstream_of("scenes")
         _run_downstream_revision(out, "scenes", downstream, changed_scene_numbers, new_scenes, {},
                                  profile=profile, max_scenes=max_scenes,
-                                 target_duration=target_duration, render=render)
+                                 target_duration=target_duration, render=render, gate=gate)
         _align_scene_keyed_stages(out, profile=profile, max_scenes=max_scenes,
-                                  target_duration=target_duration)
+                                  target_duration=target_duration, gate=gate)
         print(f"[reel] source revision applied — scoped to scene(s) "
              f"{sorted(changed_scene_numbers)}"
              + ("" if render else " (casting/rendering stages skipped — see above)"))
@@ -974,11 +1133,16 @@ def _revise_source(out, *, edited_override: dict | None = None, auto_confirm: bo
                  "pass --render, or type 'render on' in the revise loop, to include it)")
             continue
         extra = {"prior_scene_count": prior_scene_count} if s.name == "scenes" else {}
-        run_stage(s.name, out=out, profile=profile,
-                 max_scenes=_effective_max_scenes(s.name, max_scenes),
-                 **_duration_kwargs(s.name, out, target_duration), **extra)
+        s_max_scenes = _effective_max_scenes(s.name, max_scenes)
+        s_duration_kwargs = _duration_kwargs(s.name, out, target_duration)
+        result = run_stage(s.name, out=out, profile=profile, max_scenes=s_max_scenes,
+                          **s_duration_kwargs, **extra)
+        _gate_stage_result(gate, s.name, result, out=out, profile=profile,
+                          existing=None, revise_keys=None,
+                          max_scenes=s_max_scenes, duration_kwargs=s_duration_kwargs,
+                          extra_kwargs=extra)
     _align_scene_keyed_stages(out, profile=profile, max_scenes=max_scenes,
-                              target_duration=target_duration)
+                              target_duration=target_duration, gate=gate)
     print("[reel] source revision applied — every downstream stage regenerated"
          + ("" if render else " (casting/rendering stages skipped — see above)"))
     return True
@@ -987,7 +1151,7 @@ def _revise_source(out, *, edited_override: dict | None = None, auto_confirm: bo
 def _revise_one(stage_name: str, out, *, edited_override: dict | None = None,
                 auto_confirm: bool = False, profile: str | None = None,
                 max_scenes: int | None = 1, target_duration: int | None = None,
-                render: bool = False) -> bool:
+                render: bool = False, gate=None) -> bool:
     """One revision round: edit `stage_name`'s current artifact via $EDITOR
     (or the raw source text if `stage_name == "source"`), figure out what
     actually changed, propose a downstream re-run plan (falling back to a
@@ -1037,7 +1201,7 @@ def _revise_one(stage_name: str, out, *, edited_override: dict | None = None,
         # generic path below, which has no idea those derived fields exist.
         return _revise_source(out, edited_override=edited_override, auto_confirm=auto_confirm,
                               profile=profile, max_scenes=max_scenes, target_duration=target_duration,
-                              render=render)
+                              render=render, gate=gate)
 
     from .stages import REGISTRY, _load, _save_artifact, downstream_of
     from .gate import edit_in_editor
@@ -1158,9 +1322,9 @@ def _revise_one(stage_name: str, out, *, edited_override: dict | None = None,
         _strip_removed_scenes_from_video_manifest(out, edited)
     _run_downstream_revision(out, stage_name, downstream, revise_keys, edited, panel_targets,
                              profile=profile, max_scenes=max_scenes,
-                             target_duration=target_duration, render=render)
+                             target_duration=target_duration, render=render, gate=gate)
     _align_scene_keyed_stages(out, profile=profile, max_scenes=max_scenes,
-                              target_duration=target_duration)
+                              target_duration=target_duration, gate=gate)
 
     print(f"[reel] revision applied — {artifact_name}.json"
          + (f" and {len(downstream)} downstream stage(s)" if downstream else "") + " updated")
@@ -1205,8 +1369,18 @@ def _revise_loop(out, *, render: bool = False) -> None:
     render stages for no reason a revision should ever need. Scoping still
     happens — via `revise_keys`, not `max_scenes` — so this doesn't widen
     what actually gets regenerated, only removes an unrelated, accidental
-    cap on what CAN be."""
+    cap on what CAN be.
+
+    Builds a real `Gate.from_config(...)` (the same class a fresh
+    `pipeline.run()` uses) and threads it into every `_revise_one` call, so
+    each stage `revise` regenerates this round gets the identical review
+    experience a fresh run's stage does — fidelity/genre score, feedback-
+    driven re-run, view/edit-in-editor, auto-escalation, auto-approve
+    timeout (see `_gate_stage_result`) — not just an auto-apply. A 'stop' at
+    any of those gates raises `PipelineStopped`, caught here the same way
+    Ctrl-C already is: the session is marked 'paused' and the loop exits."""
     from . import session
+    from .gate import Gate
     from .stages import STAGES, names, _load
 
     _restore_direction(out)
@@ -1214,6 +1388,7 @@ def _revise_loop(out, *, render: bool = False) -> None:
     profile = run_params.get("profile")
     max_scenes = None                      # always "all" — see docstring above
     target_duration = run_params.get("target_duration")
+    gate = Gate.from_config(llm.config())
 
     try:
         while True:
@@ -1252,10 +1427,14 @@ def _revise_loop(out, *, render: bool = False) -> None:
                 print(f"[reel] unknown stage {choice!r}")
                 continue
             _revise_one(choice, out, profile=profile, max_scenes=max_scenes,
-                       target_duration=target_duration, render=render)
+                       target_duration=target_duration, render=render, gate=gate)
     except KeyboardInterrupt:
         session.finish(out, "paused")
         print("\n[reel] revision loop paused.")
+    except PipelineStopped as e:
+        session.finish(out, "paused")
+        print(f"\n[reel] {e} — revision loop paused "
+             "(completed stages this round stay saved).")
 
 
 def _offer_revise(out) -> None:
