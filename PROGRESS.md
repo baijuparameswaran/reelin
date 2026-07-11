@@ -200,6 +200,59 @@
   final cut phase.
 
 ## Session log
+- 2026-07-10 (later 12) — **`continuity_mode: extend` now only fires when a
+  panel's in-frame characters match the immediately preceding panel's** —
+  direct follow-up request ("use extend video as long as the
+  characters/properties in the subsequent panels are same") to the
+  multi-character-reference work in the entry just below. Previously
+  `i2v._gen_gemini`'s extend-mode eligibility check was purely mechanical —
+  config `continuity_mode: extend` set, a `prev_clip` path given, and
+  resolution 720p — with no awareness of WHAT was actually in the previous
+  clip; a panel whose cast changed (via the multi-character-reference
+  boundary logic from the entry below) would still have `prev_clip_path`
+  reach `_gen_gemini`, so if reference-images ended up NOT used for that
+  boundary (e.g. only one new resolvable portrait, under the 2-reference
+  threshold), extend-mode could still fire and wrongly extend the PREVIOUS
+  clip's now-wrong-cast continuity/audio into a shot that doesn't feature
+  those characters. Fixed by extracting the existing boundary check out of
+  `_resolve_panel_references` into a standalone `pipeline._char_set_changed
+  (fr, prev_char_key)` (same logic, now independently callable) and having
+  every caller that threads `prev_clip_path` into `_render_one_panel` null
+  it out — for that one call only, not the loop's running `prev_clip_path`
+  variable itself — whenever the current panel is a character boundary
+  relative to the one before it: `_render_scene_frames`' normal per-panel
+  walk, `rerender_panels`' `_render(pnum)` (using its existing
+  `_prev_char_key(pnum)` helper), and — the part easy to miss —
+  `rerender_panels`' cascade-stop bookkeeping (the panel two hops past a
+  targeted re-render, whose `.hash` sidecar gets rewritten to the value it
+  WOULD have if fully re-chained, without touching its actual bytes): that
+  recompute's `new_clip_path` stand-in needed the identical nulling when
+  the bookkeeping panel is itself a boundary relative to the freshly-
+  rendered panel's new cast, or the bookkeeping hash would disagree with
+  what `_render_one_panel`'s real formula produces for it.
+
+  **PROPS deliberately got no equivalent check** — traced whether
+  `visual_overview.key_props` (the storyboard's per-SCENE prop list, see
+  `pipeline._panel_context`'s own docstring: "no artifact currently says
+  which panel a given prop appears in") has any panel-level attribution in
+  the current schema, and it doesn't: `key_props` is constant across every
+  panel in a scene, so a "did props change between these two panels" check
+  would always be trivially true within a scene and could only ever differ
+  at a SCENE boundary — which already unconditionally resets
+  `prev_clip_path`/`prev_tail` to `None` between scenes, before this
+  change existed. Documented this reasoning directly in
+  `_char_set_changed`'s docstring rather than adding dead code that could
+  never actually fire, so a future session doesn't waste time re-deriving
+  the same conclusion or "fixing" what's actually already covered.
+
+  Verified via `tests/test_multi_character_references.py`: 4 new
+  `_char_set_changed` unit cases (scene start, same cast, changed cast,
+  no-characters-listed) plus a new end-to-end `_render_scene_frames` test
+  (3-panel scene: panel 2 has the same cast as panel 1 and correctly
+  reaches `i2v.generate_clip` with a non-`None` `prev_clip`; panel 3, where
+  a second character joins, correctly reaches it with `prev_clip=None`
+  even though panel 2's clip genuinely exists on disk by then). Full suite
+  now 128 tests (was 123), still fully offline, `py_compile` clean.
 - 2026-07-10 (later 11) — **Every character in frame at a scene/shot
   boundary now gets its own Veo identity reference, not just one** —
   Increment 5 from the 2026-07-04 "locations cast alongside characters"

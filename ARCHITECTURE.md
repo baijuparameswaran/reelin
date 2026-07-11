@@ -657,6 +657,22 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
   Falls back to the normal seed path automatically on any failure (disabled,
   SDK unavailable, API error) — `pipeline.py` always computes the normal
   single-image seed too, regardless, so nothing is lost on fallback.
+  **`continuity_mode: extend` is only ever attempted when a panel's
+  in-frame characters match the immediately preceding panel's** — the same
+  `pipeline._char_set_changed` check `_resolve_panel_references` uses,
+  reused (not reimplemented) to null out `prev_clip_path` for that one call
+  whenever the cast changes, even though a previous clip genuinely exists
+  on disk: extending a clip across a cast change would carry the WRONG
+  subject's continuity/audio into a shot that doesn't feature them. PROPS
+  (`visual_overview.key_props`) need no equivalent check — they're
+  scene-wide, not per-panel, in this codebase's data model (no artifact
+  attributes a prop to one specific panel), so they can only change at a
+  SCENE boundary, already covered by the existing per-scene
+  `prev_clip_path = None` reset. `pipeline.rerender_panels` (the targeted
+  one-hop re-render path) and its cascade-stop bookkeeping apply the exact
+  same rule, via the same shared `_char_set_changed` helper, so a targeted
+  re-render's `_content_hash` can't disagree with what a full
+  `_render_scene_frames` pass would compute for the same panel.
   **Every Veo prompt is
   verified** against the guide before submission (`veo_guide.verify_prompt` —
   checks the five required elements + audio cue formatting; issues logged as

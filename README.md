@@ -333,6 +333,12 @@ For each storyboard frame it generates a short **clip** (image-to-video):
   falls back to the normal single-seed path automatically if it's disabled
   or fails, and leaves every other frame unaffected. Toggle with config
   `video.multi_character_references` (default on).
+- if `video.continuity_mode` is set to `extend` (native video-to-video scene
+  extension, carries ambient/music audio forward too — see the config
+  comment), it's only ever used when a frame's in-frame characters are the
+  SAME as the previous frame's; a frame where the cast changes falls back
+  to seeding/reference-images instead, so a scene never extends the wrong
+  characters' continuity into a shot that doesn't feature them.
 
 `--max-scenes` (default 1, prototype; pass `all` for every scene) limits how
 many scenes get **rendered** — casting-image generation and this video render
