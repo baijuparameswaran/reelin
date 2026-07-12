@@ -306,7 +306,8 @@ def _stale(asset: Path, hash_path: Path, current_hash: str) -> bool:
 
 
 def _render_casting_images(casting: dict, out: Path,
-                           active_names: set[str] | None = None) -> int:
+                           active_names: set[str] | None = None,
+                           dry_run: bool = False) -> int:
     """Render ONE image per casting entry — character OR location representation —
     via the image backend. Kind-agnostic: a `kind: location` entry has no `actor`
     block, so the prompt lookup falls through to `character.visual_prompt`
@@ -315,6 +316,16 @@ def _render_casting_images(casting: dict, out: Path,
     Idempotent by prompt hash: skips an entry whose rendered image still matches
     its current `visual_prompt`, but re-renders when feedback has revised that
     prompt since (--resume or a standalone `stage casting --feedback` rerun).
+
+    `dry_run=True` (`--no-render`) still walks every entry and does the exact
+    same staleness check — an entry whose image is already current is left
+    alone either way — but for an entry that WOULD need a fresh render,
+    `imagegen.generate_image(..., dry_run=True)` logs the real request
+    params to `gemini_api.log` instead of actually calling the API. Since a
+    dry-run call always returns False, the success bookkeeping below
+    (image_path/hash/`n`) is naturally skipped too — an entry rendered this
+    way stays exactly as "not yet rendered" as it was before this call, so a
+    later real render still triggers for it.
     """
     if not imagegen.available():
         _log(f"      casting renders skipped — {imagegen.unavailable_hint()}")
@@ -346,9 +357,11 @@ def _render_casting_images(casting: dict, out: Path,
             hash_path.write_text(current_hash)
             n += 1
             continue
-        _log(f"      rendering {name} [{kind}] …"
-             + (" (prompt revised — re-rendering)" if img.exists() else ""))
-        if imagegen.generate_image(prompt, img):
+        _log(f"      {'recording intended API call for' if dry_run else 'rendering'} "
+             f"{name} [{kind}] …"
+             + (" (prompt revised)" if dry_run and img.exists() else
+                " (prompt revised — re-rendering)" if img.exists() else ""))
+        if imagegen.generate_image(prompt, img, dry_run=dry_run):
             target["image_path"] = str(img.relative_to(out))
             hash_path.write_text(current_hash)
             n += 1
@@ -796,7 +809,7 @@ def _render_one_panel(fr: dict, snum, sdir: Path, seed: Path | None,
                       voice_index: dict, audio_overview: dict,
                       no_bg_music: bool, room_tone: bool, no_subtitles: bool,
                       reference_images: list[Path] | None = None,
-                      force: bool = False) -> dict:
+                      force: bool = False, dry_run: bool = False) -> dict:
     """Render (or skip, if unchanged) exactly ONE storyboard panel's video
     clip. Shared by `_render_scene_frames`'s per-scene loop and
     `rerender_panels`'s targeted re-render, so the hash/render/overlay/tail-
@@ -808,6 +821,16 @@ def _render_one_panel(fr: dict, snum, sdir: Path, seed: Path | None,
     panel(s), since a caller re-rendering a specific panel on purpose wants
     that panel rebuilt even in the rare case its prompt+seed happen to hash
     identically to before.
+
+    `dry_run=True` (`--no-render`) still computes the prompt and the exact
+    same staleness check as a real call — a panel whose clip is already
+    current is left alone either way — but for a panel that WOULD need a
+    fresh render, `i2v.generate_clip(..., dry_run=True)` logs the real Veo
+    request params without spending API quota. A dry-run call always
+    returns False, so it's treated the same as `_stale`'s "not rendered"
+    case in the caller's bookkeeping (no clip/hash/tail written, `rendered`
+    stays False) — see the `elif dry_run:` branch below for why this is
+    NOT logged as `failed` too (it's an intentional skip, not an error).
 
     `reference_images` — see `_resolve_panel_references` (both call sites
     compute it the same way, given to this function pre-computed so the
@@ -860,10 +883,13 @@ def _render_one_panel(fr: dict, snum, sdir: Path, seed: Path | None,
     failed = False
     if force or _stale(clip, hash_path, current_hash):
         if clip.exists():
-            _log(f"      scene {snum} frame {tag} — prompt/seed revised, re-rendering …")
+            _log(f"      scene {snum} frame {tag} — prompt/seed revised"
+                 + (", API params logged (--no-render) …" if dry_run else ", re-rendering …"))
+        elif dry_run:
+            _log(f"      scene {snum} frame {tag} — recording intended API call (--no-render) …")
         if i2v.generate_clip([seed] if seed else [], prompt, clip, prev_clip=prev_clip_path,
                              duration_seconds=requested_seconds,
-                             reference_images=reference_images):
+                             reference_images=reference_images, dry_run=dry_run):
             rendered = True
             # Burn subtitle + shot-label overlays onto the clip (in-place)
             # when the operator enables them in config video.overlays.
@@ -877,6 +903,8 @@ def _render_one_panel(fr: dict, snum, sdir: Path, seed: Path | None,
             # stitching benefits from having clean cut-points regardless.
             i2v.last_frame(clip, tail_img)
             hash_path.write_text(current_hash)
+        elif dry_run:
+            pass  # intentional skip, not a failure — already logged above
         else:
             failed = True
             _log(f"      ⚠ scene {snum} frame {tag} — clip not produced")
@@ -934,10 +962,20 @@ def _render_scene_frames(storyboard: dict, casting: dict, out: Path,
                          max_scenes: int | None = None,
                          only_scenes: set | None = None,
                          existing_manifest: dict | None = None,
-                         characters: dict | None = None) -> dict:
+                         characters: dict | None = None,
+                         dry_run: bool = False) -> dict:
     """Render each storyboard frame as a video clip (Veo image-to-video), then
     stitch each scene's clips into a per-scene video (output/video/scene_NN.mp4)
     and assemble all scene videos into the final movie (output/video/movie.mp4).
+
+    `dry_run=True` (`--no-render`) still walks every scene/panel and computes
+    every prompt/seed/reference exactly as a real render would — see
+    `_render_one_panel`'s dry_run docstring for what that logs. Since a
+    dry-run panel never produces a clip, `_stitch_scene`/`_assemble_movie`
+    below naturally find nothing new to stitch for scenes that don't
+    already have a real clip on disk from an earlier render (and correctly
+    leave an already-rendered scene's existing video alone) — no separate
+    dry-run branch needed at the stitch/assembly level.
 
     Identity seeding: the first frame of each scene seeds from the in-frame
     character's representation image; subsequent frames chain from the previous
@@ -1056,7 +1094,8 @@ def _render_scene_frames(storyboard: dict, casting: dict, out: Path,
                                     audio_overview=audio_overview,
                                     no_bg_music=no_bg_music, room_tone=room_tone,
                                     no_subtitles=no_subtitles,
-                                    reference_images=reference_images or None)
+                                    reference_images=reference_images or None,
+                                    dry_run=dry_run)
             if res["rendered"]:
                 manifest["clips"] += 1
                 if continuity:
@@ -1649,12 +1688,17 @@ def run(
     clip's requested duration, translated by whichever video backend is
     configured (see `reel.i2v.generate_clip`).
 
-    `render` (default `True`) — when `False`, skips casting-image generation
-    AND video rendering entirely for this run, regardless of config
-    `image.enabled`/`video.enabled` — the two ONLY stages that spend real
-    Gemini/Veo API quota (see `cli.py`'s `--no-render` flag, and `revise`'s
-    own `render` flag/`RENDER_SKIP_STAGES` for the analogous toggle in the
-    revision flow). Every other stage (structure, characters, scenes,
+    `render` (default `True`) — when `False`, skips the actual Gemini/Veo API
+    invocation for casting-image generation AND video rendering for this
+    run — the two ONLY stages that spend real API quota (see `cli.py`'s
+    `--no-render` flag, and `revise`'s own `render` flag/`RENDER_SKIP_STAGES`
+    for the analogous toggle in the revision flow). Every prompt/seed/
+    reference is still computed exactly as a real render would, and its
+    exact request params are still logged to `output/logs/gemini_api.log`
+    (`outcome=skipped(no-render)`) — only the network/SDK call itself is
+    disabled (`_render_casting_images`/`_render_scene_frames`'s `dry_run`
+    param, threaded down through `imagegen`/`i2v` to `gemini.py`'s actual
+    API functions). Every other stage (structure, characters, scenes,
     soundscape, visuals, cinematography, screenplay, storyboard) runs
     normally either way — this is purely a media-generation cost switch,
     not a scoping mechanism (unlike `max_scenes`, which still applies to
@@ -1951,9 +1995,10 @@ def run(
     # Render character + location portraits only for names appearing in the scenes
     # that will actually be rendered (1..max_scenes). Capping here avoids burning
     # API quota on characters/locations the video stage will never reference.
-    if not render:
-        _log("      portraits skipped (--no-render)")
-    elif imagegen.enabled():
+    # `--no-render` disables the actual API invocation only (dry_run=True) —
+    # every prompt is still computed and its request params still logged to
+    # gemini_api.log; only the network/SDK call itself is skipped.
+    if imagegen.enabled():
         active_names: set[str] = set()
         for sc in scenes.get("scenes", [])[:max_scenes]:
             for nm in (sc.get("characters") or []):
@@ -1963,11 +2008,15 @@ def run(
             for p in (sc.get("props") or []):
                 if p:
                     active_names.add(p.strip())
-        _log(f"      rendering character/location/prop portraits for {len(active_names)} "
+        _log(f"      {'recording intended API calls (--no-render) for' if not render else 'rendering'} "
+             f"character/location/prop portraits — {len(active_names)} "
              f"name(s) in scene(s) 1..{_scenes_label(max_scenes)} …")
-        if _render_casting_images(casting, out, active_names=active_names or None):
+        if _render_casting_images(casting, out, active_names=active_names or None,
+                                  dry_run=not render):
             save("casting", casting)
             _log(f"      portraits → {out}/casting/")
+    elif not render:
+        _log("      portraits skipped (--no-render; image backend also not configured)")
 
     # ── 5–7/10  soundscape + visuals + cinematography ────────────────────────
     shots_guidance = duration_budget.suggest_shots_per_scene(target_seconds, len(scenes.get("scenes", [])))
@@ -2050,18 +2099,22 @@ def run(
     #           output/video/scene_NN.mp4            (per-scene stitch)
     #           output/video/movie.mp4               (final assembly)
     # Best-effort: skipped gracefully when no video backend is available.
+    # `--no-render` disables the actual API invocation only (dry_run=True) —
+    # every panel's Veo prompt/params is still computed and logged to
+    # gemini_api.log; only the network/SDK call itself is skipped, so an
+    # already-rendered scene's real clips are left untouched (see
+    # `_render_one_panel`'s dry_run docstring).
     scene_render = {}
-    if not render:
-        _log("10/11 video render — skipped (--no-render)")
-    elif not i2v.enabled():
+    if not i2v.enabled():
         _log(f"10/11 video render — skipped ({i2v.unavailable_hint()})")
     else:
         backend_label = i2v.backend()
         total_scenes = min(max_scenes, len(storyboard.get("storyboard", []))) if max_scenes else len(storyboard.get("storyboard", []))
-        _log(f"10/11 video render  [{backend_label}]  "
+        action = "recording intended Veo API calls (--no-render)" if not render else "video render"
+        _log(f"10/11 {action}  [{backend_label}]  "
              f"({total_scenes} scene(s), all shots, per-scene stitch + final assembly) …")
         scene_render = _render_scene_frames(storyboard, casting, out, max_scenes=max_scenes,
-                                            characters=characters)
+                                            characters=characters, dry_run=not render)
         if scene_render:
             ok = scene_render.get("clips", 0)
             failed = scene_render.get("failed", 0)
@@ -2069,7 +2122,12 @@ def run(
             scenes_stitched = sum(1 for s in scene_render.get("scenes", []) if s.get("scene_video"))
             total_scenes_rendered = len(scene_render.get("scenes", []))
             movie = scene_render.get("movie")
-            if failed and ok:
+            if not render:
+                _log(f"      API params logged for {total_scenes_rendered} scene(s) — "
+                     f"see {out}/logs/gemini_api.log"
+                     + (f"; {scenes_stitched} scene video(s) already on disk from an earlier "
+                        "render left untouched" if scenes_stitched else ""))
+            elif failed and ok:
                 _log(f"      ⚠ {ok}/{total_clips} clips, {failed} failed — "
                      f"{scenes_stitched}/{total_scenes_rendered} scene video(s)"
                      + (f" → {movie}" if movie else ""))

@@ -200,6 +200,93 @@
   final cut phase.
 
 ## Session log
+- 2026-07-12 (later) — **`--no-render` now still logs every Gemini/Veo
+  request's actual parameters — only the network/SDK call itself is
+  disabled.** Direct follow-up to the `gemini_api.log` params work just
+  below: user asked that running with `--no-render` keep logging the API
+  parameters, disabling only the invocation itself. Before this, `--no-render`
+  skipped `_render_casting_images`/`_render_scene_frames` ENTIRELY (an
+  `if not render:` short-circuit before either function was even called), so
+  no prompt was ever built and nothing reached the new `params=` logging from
+  the entry below — the params-logging work only helps for calls that
+  actually run, and `--no-render`'s whole point is that they don't.
+
+  Added a `dry_run: bool` parameter threaded all the way down both render
+  paths: `pipeline._render_casting_images`/`_render_one_panel`/
+  `_render_scene_frames` → `imagegen.generate_image`/`i2v.generate_clip`/
+  `i2v._gen_gemini` → `gemini.generate_image`/`generate_video`/
+  `extend_video`/`generate_video_with_references`. Each of the four
+  `gemini.py` functions, when `dry_run=True`, builds its exact params dict
+  and calls `_log_call(..., outcome="skipped(no-render)", params=params)`
+  BEFORE ever touching the SDK/network, then returns `False` immediately —
+  no exception path, no retry loop, no timeout risk. `pipeline.run()`'s two
+  render call sites no longer skip the functions outright; they now always
+  call them with `dry_run=not render` (still gated on `imagegen.enabled()`/
+  `i2v.enabled()` as before — nothing meaningful to log if no backend is
+  even configured).
+
+  The key design property, verified explicitly: because every one of these
+  functions already returns `False` for "nothing produced" (the pre-existing
+  best-effort contract every caller already handles), a dry-run call is
+  indistinguishable from a real failed one to the caller's control flow — no
+  `image_path`/hash-sidecar/manifest bookkeeping fires, so a LATER real
+  render still triggers normally for that exact entry. This composes safely
+  with the existing content-hash idempotency (`_stale`): an entry that's
+  ALREADY correctly rendered from a prior real run is left completely alone
+  either way, since `_stale()` short-circuits to "not stale, skip" before
+  `dry_run` is even consulted — so toggling `--no-render` on a later
+  `--resume` can never clobber or hide previously-rendered clips/portraits;
+  only genuinely new or prompt-revised entries produce a dry-run log line
+  instead of spending API quota. `_render_one_panel` needed one extra care
+  point: a dry-run call always returns `False` from `i2v.generate_clip`,
+  which would otherwise hit the same `else: failed = True` branch a real
+  failure does (printing an alarming "⚠ clip not produced" and incrementing
+  `manifest["failed"]`) — added a distinct `elif dry_run: pass` branch (the
+  informational log already happened before the call) so a dry run is never
+  miscounted as an actual failure. Local (non-Gemini) backends —
+  `diffusers`/`auto1111` for images, `diffusers`/`comfyui`/`http` for video —
+  have no external API call worth logging, so `dry_run` just skips them
+  outright there, identical to `--no-render`'s behavior before this change.
+
+  Verified via a stubbed offline smoke test (SDK mocked, no real network):
+  `_render_casting_images(dry_run=True)` on a fresh casting entry writes
+  zero files (no PNG, no `.hash`), leaves `casting.json` untouched (no
+  `image_path` set), and produces exactly one `IMAGE` log line with
+  `outcome=skipped(no-render)` whose `params=` JSON contains the real
+  prompt; `_render_one_panel(dry_run=True)` on a fresh panel writes no clip,
+  reports `rendered=False` AND `failed=False` (not miscounted as a failure),
+  and produces one `VIDEO` log line with the real Veo prompt/aspect_ratio/
+  resolution. Two pre-existing tests in `test_multi_character_references.py`
+  needed their `fake_generate_clip` stub signatures updated to accept the
+  new `dry_run` kwarg (`i2v.generate_clip` now always passes it) — a
+  mechanical fixture update, not a behavior change; full suite (195 tests)
+  passes clean afterward.
+- 2026-07-12 — **`gemini_api.log` now records the actual request parameters
+  for every real Gemini/Veo call, not just that a call happened.** User asked
+  directly for a log capturing the actual parameters passed to the Gemini
+  APIs. The existing `gemini.py`'s `_log_call`/`gemini_api.log` (added in an
+  earlier session) already recorded timestamp/session/kind/model/backend/
+  outcome/path — enough to audit THAT a call happened and how it went, but
+  not WHAT was actually sent (prompt text, seed/reference image paths,
+  aspect_ratio, resolution, duration_seconds, person_generation). `_log_call`
+  gained a `params: dict | None` kwarg, appended as a single compact
+  `params={...}` JSON blob (`json.dumps(..., default=str)`, so a `Path`
+  argument serializes cleanly) — grep-able like the rest of the line, and
+  separately parseable via `json.loads` for a deeper audit. All four real
+  API-call functions (`generate_image`, `generate_video`, `extend_video`,
+  `generate_video_with_references`) now build a params dict from what they
+  actually send and pass it to every one of their existing `_log_call` sites
+  (success, transient retry, and final-failure/fallback alike, so a retried
+  or urllib-fallback call's full parameter history is visible in order, not
+  just its first attempt). See the new ARCHITECTURE.md bullet for the exact
+  field list per call kind. Verified via a stubbed offline smoke test (SDK/
+  urllib mocked, no real network) confirming both an IMAGE and a VIDEO log
+  line contain a `params=` field that `json.loads` parses cleanly with the
+  expected keys/values (including the aspect-ratio hint actually appended to
+  the image prompt, and the `person_generation` value correctly derived from
+  whether a real seed image path was given). Full existing suite (195 tests)
+  re-ran clean afterward — no other code path depends on `gemini_api.log`'s
+  line shape.
 - 2026-07-11 (later 9) — **`revise`'s render skip is now two INDEPENDENT
   toggles — image rendering and video rendering — instead of one combined
   on/off switch, per direct request.** Previously `RENDER_SKIP_STAGES`

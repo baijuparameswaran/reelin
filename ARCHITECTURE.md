@@ -353,7 +353,34 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
   pre-existing file lacking the field) and inherited across `--resume`
   identically to `--max-scenes`/`--profile`; the printed "resume:" hint
   includes `--no-render` when applicable so copy-pasting it reproduces the
-  same run.
+  same run. **`--no-render` disables only the actual Gemini/Veo API
+  invocation, not the surrounding computation** — every prompt/seed/
+  reference image is still built exactly as a real render would, and its
+  full request params are still written to `output/logs/gemini_api.log`
+  (`outcome=skipped(no-render)`, same `params={...}` shape a real call logs
+  — see the `gemini_api.log` bullet above). Threaded via a `dry_run: bool`
+  param all the way down the call chain: `pipeline._render_casting_images`/
+  `_render_one_panel`/`_render_scene_frames` → `imagegen.generate_image`/
+  `i2v.generate_clip`/`i2v._gen_gemini` → `gemini.generate_image`/
+  `generate_video`/`extend_video`/`generate_video_with_references`, each of
+  which — when `dry_run=True` — builds its params dict and calls `_log_call`
+  BEFORE ever touching the SDK/network, then returns `False` immediately.
+  Because every one of these functions already returns `False` for "no
+  image/clip produced" (the existing best-effort contract), a dry-run call
+  is indistinguishable from a real one to its caller's control flow: no
+  `image_path`/hash/manifest bookkeeping fires, so a subsequent REAL render
+  still triggers normally for that exact entry — nothing about the dry-run
+  pass gets mistaken for a completed render. This also composes safely with
+  the existing content-hash idempotency (`_stale`): an entry/panel that's
+  ALREADY correctly rendered from a prior real run is left untouched either
+  way (the staleness check short-circuits before dry_run is even
+  consulted), so toggling `--no-render` on a later `--resume` can never
+  clobber or hide previously-rendered clips/portraits — only genuinely new
+  or prompt-revised entries produce a dry-run log line instead of a real
+  API call. Local (non-Gemini) backends — `diffusers`/`auto1111` for
+  images, `diffusers`/`comfyui`/`http` for video — have no external API
+  call to log, so `dry_run` just skips them outright there, identical to
+  `--no-render`'s pre-existing behavior for those backends.
 - **Session identity (`reel/session.py`):** one full story-to-video run (ingest
   through render) is a **session**, identified by a generated id
   (`<timestamp>-<random>`) persisted to `output/session.json`
@@ -376,6 +403,39 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
   zero dependency on any other `reel` module (stdlib only), so it's imported
   freely from `gemini.py`/`pipeline.py`/`stages.py`/`cli.py` without any risk
   of an import cycle.
+- **`gemini_api.log` records the actual request parameters for every real
+  Gemini/Veo call, not just that a call happened.** `_log_call` gained a
+  `params: dict | None` kwarg, appended to the line as a single compact
+  `params={...}` JSON object (`json.dumps(..., default=str)` so a `Path`
+  argument logs cleanly) — parseable on its own (`line.split("params=",
+  1)[1]` up to the next double-space-delimited field) for a deeper audit than
+  the plain `model=`/`backend=`/`outcome=` summary gives, while the line
+  stays grep-able as before. Every one of the four real API-call functions
+  (`generate_image`, `generate_video`, `extend_video`,
+  `generate_video_with_references`) builds its own params dict from what it
+  actually sends — `generate_image`: the full prompt (after
+  `_image_prompt`'s aspect_ratio/image_size hints are appended),
+  reference-image paths, aspect_ratio, image_size; `generate_video`: prompt,
+  seed `image_path`, aspect_ratio, resolution, duration_seconds, and the
+  derived `person_generation` (mirrors `_generate_video_sdk`'s own
+  has_image-based logic, computed once in the outer function so every retry/
+  fallback log line reflects it consistently); `extend_video`: prompt,
+  `prev_video_path`, aspect_ratio, resolution, and the fixed
+  `person_generation: "allow_all"`; `generate_video_with_references`:
+  prompt, reference_image_paths (capped to 3, the real Veo limit), aspect_
+  ratio, resolution, and the two fixed values for this mode
+  (`duration_seconds: 8`, `person_generation: "allow_adult"`). Logged once
+  per attempt (success, transient retry, and final failure all carry the
+  same params, since the request didn't change between retries — only the
+  outcome did), at every existing `_log_call` site in each function, so a
+  retried/fallen-back-to-urllib call's full parameter history is visible in
+  order. Deliberately distinct from `pipeline._write_scene_prompt_log`
+  (`output/logs/scene_NN_veo_prompts.txt`), which is a per-scene, human-
+  readable prompt-only transcript for video panels — `gemini_api.log`'s new
+  `params` is the complete, structured, per-call request (covers image
+  calls too, which have no equivalent per-scene prompt file) and pairs with
+  the existing `model`/`backend`/`outcome` fields for a single source of
+  truth on exactly what was sent to Gemini/Veo and what came back.
 - **Revision agent (`python -m reel.cli revise`, `reel/agents/revision.py` +
   `reel/artifact_diff.py` + `reel/revision_merge.py`):** a standalone,
   post-hoc loop over a completed (or paused) run's `output/` checkpoints —

@@ -161,7 +161,7 @@ def _gen_auto1111(prompt: str, out_path: Path) -> bool:
     return True
 
 
-def _gen_gemini(prompt: str, out_path: Path) -> bool:
+def _gen_gemini(prompt: str, out_path: Path, *, dry_run: bool = False) -> bool:
     c = _cfg()
     return gemini.generate_image(
         prompt, Path(out_path),
@@ -169,19 +169,30 @@ def _gen_gemini(prompt: str, out_path: Path) -> bool:
         aspect_ratio=c.get("aspect_ratio"),
         image_size=c.get("image_size"),
         timeout=c.get("timeout_seconds", 300) or 300,
+        dry_run=dry_run,
     )
 
 
 # ── public entry point ───────────────────────────────────────────────────────
 
-def generate_image(prompt: str, out_path: Path) -> bool:
-    """Render `prompt` to `out_path` (PNG). Returns success; never raises fatally."""
+def generate_image(prompt: str, out_path: Path, *, dry_run: bool = False) -> bool:
+    """Render `prompt` to `out_path` (PNG). Returns success; never raises fatally.
+
+    `dry_run=True` (e.g. `--no-render`) is only meaningful for the `gemini`
+    backend — it logs the exact request params to `gemini_api.log` (see
+    `gemini.generate_image`'s dry_run docstring) without spending API quota.
+    The local backends (`diffusers`/`auto1111`) have no external API call to
+    log, so `dry_run` just skips them entirely, same as today's `--no-render`
+    behavior — either way, out_path is never written and this returns False.
+    """
     if not prompt:
         return False
     try:
         b = backend()
         if b == "gemini":
-            return _gen_gemini(prompt, out_path)
+            return _gen_gemini(prompt, out_path, dry_run=dry_run)
+        if dry_run:
+            return False
         if b == "diffusers":
             return _gen_diffusers(prompt, out_path)
         if b == "auto1111":

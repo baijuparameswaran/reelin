@@ -335,7 +335,8 @@ class TestRenderSceneFramesOnlyExtendsWhenCastUnchanged(unittest.TestCase):
         prev_clips = {}
 
         def fake_generate_clip(images, prompt, clip, *, prev_clip=None,
-                               duration_seconds=None, reference_images=None):
+                               duration_seconds=None, reference_images=None,
+                               dry_run=False):
             prev_clips[clip.name] = prev_clip
             clip.write_bytes(b"clip")
             return True
@@ -416,7 +417,8 @@ class TestRerenderPanelsUsesReferencesAtABoundary(unittest.TestCase):
         calls = {}
 
         def fake_generate_clip(images, prompt, clip, *, prev_clip=None,
-                               duration_seconds=None, reference_images=None):
+                               duration_seconds=None, reference_images=None,
+                               dry_run=False):
             calls[clip.name] = reference_images
             clip.write_bytes(b"new-clip")
             return True

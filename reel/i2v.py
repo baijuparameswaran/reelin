@@ -153,7 +153,8 @@ def _veo_nearest_valid_duration(seconds: float, *, force_max: bool = False) -> i
 
 def _gen_gemini(images: list[Path], prompt: str, out_path: Path, *,
                 prev_clip: Path | None = None, duration_seconds: float | None = None,
-                reference_images: list[Path] | None = None) -> bool:
+                reference_images: list[Path] | None = None,
+                dry_run: bool = False) -> bool:
     """Veo image-to-video via the Gemini API. Seeds from the last keyframe (the
     reference image produced by the image stage); text-to-video if none given.
 
@@ -188,6 +189,13 @@ def _gen_gemini(images: list[Path], prompt: str, out_path: Path, *,
     Pre-flight: runs the Veo prompt through the guide verifier before sending to
     the API.  Issues are logged as warnings (generation always proceeds — the
     verifier is advisory, not a gate).
+
+    `dry_run=True` (e.g. `--no-render`) still runs every decision below
+    (reference-images vs. extend vs. plain seed, duration rounding, the
+    guide verifier) exactly as a real call would, so `gemini_api.log` gets
+    the actual params of whichever ONE call would have been made — just
+    without ever reaching the SDK/network (`gemini.*`'s own dry_run short-
+    circuits before that point). Always returns False.
     """
     from . import veo_guide
     full_prompt = _full_prompt(prompt)
@@ -222,6 +230,7 @@ def _gen_gemini(images: list[Path], prompt: str, out_path: Path, *,
                 full_prompt, Path(out_path), reference_images,
                 model=model, aspect_ratio=aspect_ratio, resolution=resolution,
                 poll_seconds=poll_seconds, timeout_seconds=timeout_seconds,
+                dry_run=dry_run,
             )
         except Exception as e:
             _log(f"      ⚠ Veo reference-image call failed ({type(e).__name__}: {e}) — "
@@ -243,6 +252,7 @@ def _gen_gemini(images: list[Path], prompt: str, out_path: Path, *,
                 Path(prev_clip), full_prompt, Path(out_path),
                 model=model, aspect_ratio=aspect_ratio, resolution=resolution,
                 poll_seconds=poll_seconds, timeout_seconds=timeout_seconds,
+                dry_run=dry_run,
             )
         except Exception as e:
             _log(f"      ⚠ Veo scene-extend failed ({type(e).__name__}: {e}) — "
@@ -257,6 +267,7 @@ def _gen_gemini(images: list[Path], prompt: str, out_path: Path, *,
         duration_seconds=dur,
         poll_seconds=poll_seconds,
         timeout_seconds=timeout_seconds,
+        dry_run=dry_run,
     )
 
 
@@ -336,12 +347,21 @@ def _gen_http(images: list[Path], prompt: str, out_path: Path, *,
 
 def generate_clip(images, prompt: str, out_path: Path, *, prev_clip: Path | None = None,
                   duration_seconds: float | None = None,
-                  reference_images: list[Path] | None = None) -> bool:
+                  reference_images: list[Path] | None = None,
+                  dry_run: bool = False) -> bool:
     """Render a clip to `out_path` (mp4) conditioned on one or more keyframe
     `images` (a Path or list — last is the start frame; a leading second image is
     used as the prior/last-frame anchor for continuity when the model supports it).
     `prev_clip` — the previous clip's mp4, used for Veo's native scene-extend
     continuity mode (gemini/veo backend only; ignored otherwise).
+
+    `dry_run=True` (e.g. `--no-render`) is only meaningful for the gemini/veo
+    backend — `_gen_gemini` still runs its full decision logic (refs vs.
+    extend vs. plain seed, duration rounding) and logs the actual params of
+    whichever call it would have made, just without ever reaching the SDK/
+    network. The other backends have no external API to log, so `dry_run`
+    just skips them entirely (same as today's `--no-render` behavior).
+    Either way, out_path is never written and this returns False.
 
     `reference_images` — 2+ character/location identity portraits for a
     multi-character "shot boundary" panel (gemini/veo backend only, via
@@ -370,13 +390,17 @@ def generate_clip(images, prompt: str, out_path: Path, *, prev_clip: Path | None
     # (reference_images is gemini/veo-only — silently ignored by them, so
     # it doesn't substitute for a seed here).
     if not imgs and b not in ("gemini", "veo"):
+        if dry_run:
+            return False
         _log(f"      ⚠ clip skipped — no seed image available and {b!r} backend requires one")
         return False
     try:
         if b in ("gemini", "veo"):
             return _gen_gemini(imgs, prompt, out_path, prev_clip=prev_clip,
                                duration_seconds=duration_seconds,
-                               reference_images=reference_images)
+                               reference_images=reference_images, dry_run=dry_run)
+        if dry_run:
+            return False
         if b == "diffusers":
             return _gen_diffusers(imgs, prompt, out_path, duration_seconds=duration_seconds)
         if b in ("comfyui", "http"):
