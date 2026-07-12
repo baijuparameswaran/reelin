@@ -14,7 +14,8 @@ Usage:
         [--out PATH]                             #   output .mp4 (default: output/gen_video_<ts>.mp4)
         [--model NAME] [--aspect-ratio 16:9]     #   override model / aspect ratio
         [--duration N]                           #   clip duration in seconds
-    python -m reel.cli revise [--out DIR] [--render]  # revise a completed/paused run: pick any
+    python -m reel.cli revise [--out DIR] [--render] [--render-images] [--render-video]
+                                                 # revise a completed/paused run: pick any
                                                  # stage (or the raw source text) to hand-edit —
                                                  # modify existing content, add a new scene/
                                                  # character/location, or delete one — then
@@ -24,9 +25,14 @@ Usage:
                                                  # downstream (design artifacts + video manifest),
                                                  # not just from scenes.json itself.
                                                  # Casting + all image/video rendering are SKIPPED
-                                                 # by default (cheap text-only iteration); pass
-                                                 # --render to include them, or type 'render on'/
-                                                 # 'render off' inside the loop to toggle anytime.
+                                                 # by default (cheap text-only iteration). Image
+                                                 # rendering (casting + casting images + moodboard
+                                                 # tiles) and video rendering (scene_render) can be
+                                                 # enabled INDEPENDENTLY: --render-images / --render-video,
+                                                 # or --render for both; inside the loop, 'render
+                                                 # images on/off' / 'render video on/off' toggle
+                                                 # each separately, or 'render on'/'render off' for
+                                                 # both at once.
                                                  # Always operates as if --max-scenes all had been
                                                  # used, regardless of the original run's cap —
                                                  # only the diff-identified scenes actually get
@@ -612,12 +618,64 @@ def _apply_scene_render_revision(out, source_stage: str, revise_keys, panel_targ
 # regen and _revise_source's full regen) — casting.json regeneration and
 # every image/video rendering step are the only PAID-API-cost stages
 # `revise` can trigger, so a text-only iteration session shouldn't pay that
-# cost on every single round. Pass --render (standalone `revise` command) or
-# type 'render on' inside the loop to include them; the skipped stage's
-# existing checkpoint is left untouched (not deleted), so anything
-# downstream that requires it (e.g. storyboard requires casting) still
-# resolves — just against the last rendered/cast state, not a fresh one.
-RENDER_SKIP_STAGES = {"casting", "casting_images", "moodboard_tiles", "scene_render"}
+# cost on every single round. Split into two independently toggleable
+# categories — IMAGE_RENDER_STAGES (Gemini image spend: casting itself,
+# since it's what casting_images renders from, plus casting_images/
+# moodboard_tiles) and VIDEO_RENDER_STAGES (Veo spend: scene_render) — so an
+# operator can include one without paying for the other (e.g. re-cast a
+# character's look and see the portrait update without also re-rendering
+# every video clip that references it, or vice versa). `--render-images`/
+# `--render-video` (standalone `revise` command), or 'render images on/off'/
+# 'render video on/off' inside the loop, toggle each independently;
+# `--render`/'render on'/'render off' remain a shorthand for both at once.
+# A skipped stage's existing checkpoint is left untouched (not deleted), so
+# anything downstream that requires it (e.g. storyboard requires casting)
+# still resolves — just against the last rendered/cast state, not a fresh one.
+IMAGE_RENDER_STAGES = {"casting", "casting_images", "moodboard_tiles"}
+VIDEO_RENDER_STAGES = {"scene_render"}
+RENDER_SKIP_STAGES = IMAGE_RENDER_STAGES | VIDEO_RENDER_STAGES
+
+
+def _render_stage_skipped(dname: str, render_images: bool, render_video: bool) -> bool:
+    """Whether `dname` should be skipped this round, per its own category —
+    the fine-grained replacement for a single `dname in RENDER_SKIP_STAGES
+    and not render` check, now that image and video rendering can be
+    enabled independently. A stage in neither category (every non-render
+    stage) is never skipped by this check at all."""
+    if dname in IMAGE_RENDER_STAGES:
+        return not render_images
+    if dname in VIDEO_RENDER_STAGES:
+        return not render_video
+    return False
+
+
+def _render_status_message(render_images: bool, render_video: bool) -> str:
+    """One-line summary of what this round's `render_images`/`render_video`
+    flags will actually do, printed right before the confirm prompt in
+    `_revise_source` — shared so the scoped and drastic-fallback paths
+    can't describe the same flags differently."""
+    if render_images and render_video:
+        return "casting + all image/video rendering will be re-invoked"
+    if render_images:
+        return ("image rendering (casting/casting_images/moodboard_tiles) will be "
+                "re-invoked; video rendering (scene_render) stays skipped — pass "
+                "--render-video, or 'render video on' in the loop, to include it")
+    if render_video:
+        return ("video rendering (scene_render) will be re-invoked; image rendering "
+                "(casting/casting_images/moodboard_tiles) stays skipped — pass "
+                "--render-images, or 'render images on' in the loop, to include it")
+    return ("casting/rendering stages will be SKIPPED by default — pass "
+            "--render-images/--render-video (or --render for both), or "
+            "'render images on'/'render video on' in the loop, to include them")
+
+
+def _render_skip_suffix(render_images: bool, render_video: bool) -> str:
+    """Trailing note for the "revision applied" summary line — blank when
+    both categories are enabled (nothing was skipped), otherwise points back
+    at the fuller `_render_status_message` printed earlier."""
+    if render_images and render_video:
+        return ""
+    return " (image/video rendering as configured above — see the note before the confirm)"
 
 
 def _gate_summary(name: str, result: dict) -> str | None:
@@ -752,8 +810,8 @@ def _gate_stage_result(gate, name: str, result: dict, *, out, profile: str | Non
 def _run_downstream_revision(out, stage_name: str, downstream: list[str], revise_keys,
                              edited_artifact: dict, panel_targets: dict, *,
                              profile: str | None, max_scenes: int | None,
-                             target_duration: int | None, render: bool,
-                             gate=None) -> None:
+                             target_duration: int | None, render_images: bool,
+                             render_video: bool, gate=None) -> None:
     """Selectively re-run every stage in `downstream` (already computed by
     the caller via `stages.downstream_of(stage_name)`), scoped to
     `revise_keys`. Shared by `_revise_one` (any directly hand-edited stage)
@@ -775,7 +833,8 @@ def _run_downstream_revision(out, stage_name: str, downstream: list[str], revise
     downstream stage right before it runs (`regenerating [...]` for a
     scoped subset, `full regen` when no scoped translation applies,
     `nothing to regenerate` for an empty-but-known scope, or a skip notice
-    for a render stage while `render=False`) — a companion to the
+    for a render stage whose category — image or video — is disabled) —
+    a companion to the
     "evaluation" printout `_revise_one`/`_revise_source` already print as
     soon as the affected scenes/names are identified, so the operator sees
     both WHAT was identified and WHAT each downstream stage is actually
@@ -806,9 +865,11 @@ def _run_downstream_revision(out, stage_name: str, downstream: list[str], revise
     from .stages import REGISTRY, _load, run_stage
 
     for dname in downstream:
-        if dname in RENDER_SKIP_STAGES and not render:
-            print(f"[reel]   {dname}: skipped (casting/rendering disabled by default — "
-                 "pass --render, or type 'render on' in the revise loop, to include it)")
+        if _render_stage_skipped(dname, render_images, render_video):
+            adjective, flag = ("image", "images") if dname in IMAGE_RENDER_STAGES else ("video", "video")
+            print(f"[reel]   {dname}: skipped ({adjective} rendering disabled by default — "
+                 f"pass --render-{flag}, or type 'render {flag} on' in the revise "
+                 "loop, to include it)")
             continue
         if dname == "scene_render":
             render_keys = revise_keys
@@ -996,8 +1057,8 @@ def _strip_removed_scenes_from_video_manifest(out, scenes_after: dict) -> None:
 
 def _revise_source(out, *, edited_override: dict | None = None, auto_confirm: bool = False,
                    profile: str | None = None, max_scenes: int | None = 1,
-                   target_duration: int | None = None, render: bool = False,
-                   gate=None) -> bool:
+                   target_duration: int | None = None, render_images: bool = False,
+                   render_video: bool = False, gate=None) -> bool:
     """Revise the raw ingested story text — SCOPED to the scenes actually
     affected, when possible, instead of always falling back to a full regen.
 
@@ -1030,8 +1091,9 @@ def _revise_source(out, *, edited_override: dict | None = None, auto_confirm: bo
     `run_stage` call so a regen doesn't silently revert to `run_stage`'s
     own bare default of `max_scenes=1` either.
 
-    `render` (default `False`) gates `RENDER_SKIP_STAGES` (casting +
-    every image/video render stage) — see that constant's docstring."""
+    `render_images`/`render_video` (each default `False`) independently gate
+    `IMAGE_RENDER_STAGES`/`VIDEO_RENDER_STAGES` — see those constants'
+    docstring."""
     from .stages import STAGES, _load, _save_artifact, run_stage, downstream_of
     from .agents.ingest import chunk_text
     from .gate import edit_in_editor
@@ -1075,12 +1137,7 @@ def _revise_source(out, *, edited_override: dict | None = None, auto_confirm: bo
         changed_scene_numbers = set(analysis["changed_scene_numbers"])
         print(f"[reel] evaluation — source text: scene(s) {sorted(changed_scene_numbers)} affected"
              + (f" — {analysis['summary']}" if analysis.get("summary") else ""))
-        if render:
-            print("[reel]   casting + all image/video rendering will be re-invoked "
-                 "for the affected scene(s)")
-        else:
-            print("[reel]   casting/rendering stages will be SKIPPED by default — pass "
-                 "--render, or type 'render on' in the loop, to include them")
+        print(f"[reel]   {_render_status_message(render_images, render_video)}")
         if not (auto_confirm or input(
                 f"[reel] proceed with scoped revision (scene(s) {sorted(changed_scene_numbers)} "
                 "+ downstream)? [y/N] ").strip().lower() == "y"):
@@ -1098,12 +1155,13 @@ def _revise_source(out, *, edited_override: dict | None = None, auto_confirm: bo
         downstream = downstream_of("scenes")
         _run_downstream_revision(out, "scenes", downstream, changed_scene_numbers, new_scenes, {},
                                  profile=profile, max_scenes=max_scenes,
-                                 target_duration=target_duration, render=render, gate=gate)
+                                 target_duration=target_duration, render_images=render_images,
+                                 render_video=render_video, gate=gate)
         _align_scene_keyed_stages(out, profile=profile, max_scenes=max_scenes,
                                   target_duration=target_duration, gate=gate)
         print(f"[reel] source revision applied — scoped to scene(s) "
              f"{sorted(changed_scene_numbers)}"
-             + ("" if render else " (casting/rendering stages skipped — see above)"))
+             + _render_skip_suffix(render_images, render_video))
         return True
 
     # Drastic (or no scenes.json to scope against yet) — full regen fallback.
@@ -1114,11 +1172,7 @@ def _revise_source(out, *, edited_override: dict | None = None, auto_confirm: bo
     else:
         print(f"[reel] ⚠ {diff['reason']}")
     print("[reel]   falling back to a full regen of every stage (this may take a while)")
-    if render:
-        print("[reel]   casting + all image/video rendering will be re-invoked")
-    else:
-        print("[reel]   casting/rendering stages will be SKIPPED by default — pass "
-             "--render, or type 'render on' in the loop, to include them")
+    print(f"[reel]   {_render_status_message(render_images, render_video)}")
     if not (auto_confirm or input("[reel] proceed? [y/N] ").strip().lower() == "y"):
         print("[reel] revision cancelled")
         return False
@@ -1128,9 +1182,11 @@ def _revise_source(out, *, edited_override: dict | None = None, auto_confirm: bo
     for s in STAGES:
         if s.name == "ingest":
             continue
-        if s.name in RENDER_SKIP_STAGES and not render:
-            print(f"[reel]   {s.name}: skipped (casting/rendering disabled by default — "
-                 "pass --render, or type 'render on' in the revise loop, to include it)")
+        if _render_stage_skipped(s.name, render_images, render_video):
+            adjective, flag = ("image", "images") if s.name in IMAGE_RENDER_STAGES else ("video", "video")
+            print(f"[reel]   {s.name}: skipped ({adjective} rendering disabled by default — "
+                 f"pass --render-{flag}, or type 'render {flag} on' in the revise "
+                 "loop, to include it)")
             continue
         extra = {"prior_scene_count": prior_scene_count} if s.name == "scenes" else {}
         s_max_scenes = _effective_max_scenes(s.name, max_scenes)
@@ -1144,14 +1200,15 @@ def _revise_source(out, *, edited_override: dict | None = None, auto_confirm: bo
     _align_scene_keyed_stages(out, profile=profile, max_scenes=max_scenes,
                               target_duration=target_duration, gate=gate)
     print("[reel] source revision applied — every downstream stage regenerated"
-         + ("" if render else " (casting/rendering stages skipped — see above)"))
+         + _render_skip_suffix(render_images, render_video))
     return True
 
 
 def _revise_one(stage_name: str, out, *, edited_override: dict | None = None,
                 auto_confirm: bool = False, profile: str | None = None,
                 max_scenes: int | None = 1, target_duration: int | None = None,
-                render: bool = False, gate=None) -> bool:
+                render_images: bool = False, render_video: bool = False,
+                gate=None) -> bool:
     """One revision round: edit `stage_name`'s current artifact via $EDITOR
     (or the raw source text if `stage_name == "source"`), figure out what
     actually changed, propose a downstream re-run plan (falling back to a
@@ -1181,9 +1238,9 @@ def _revise_one(stage_name: str, out, *, edited_override: dict | None = None,
     downstream that still references the deleted name only stops seeing it
     in FUTURE regenerations, not retroactively cleaned up.
 
-    `render` (default `False`) gates `RENDER_SKIP_STAGES` (casting +
-    every image/video render stage) in the downstream re-run loop below —
-    see that constant's docstring for why these are skipped by default.
+    `render_images`/`render_video` (each default `False`) independently gate
+    `IMAGE_RENDER_STAGES`/`VIDEO_RENDER_STAGES` in the downstream re-run loop
+    below — see those constants' docstring for why they're skipped by default.
 
     `edited_override`/`auto_confirm` are testing hooks — bypass the
     interactive $EDITOR / confirm prompt with a canned value, so this
@@ -1201,7 +1258,7 @@ def _revise_one(stage_name: str, out, *, edited_override: dict | None = None,
         # generic path below, which has no idea those derived fields exist.
         return _revise_source(out, edited_override=edited_override, auto_confirm=auto_confirm,
                               profile=profile, max_scenes=max_scenes, target_duration=target_duration,
-                              render=render, gate=gate)
+                              render_images=render_images, render_video=render_video, gate=gate)
 
     from .stages import REGISTRY, _load, _save_artifact, downstream_of
     from .gate import edit_in_editor
@@ -1322,7 +1379,8 @@ def _revise_one(stage_name: str, out, *, edited_override: dict | None = None,
         _strip_removed_scenes_from_video_manifest(out, edited)
     _run_downstream_revision(out, stage_name, downstream, revise_keys, edited, panel_targets,
                              profile=profile, max_scenes=max_scenes,
-                             target_duration=target_duration, render=render, gate=gate)
+                             target_duration=target_duration, render_images=render_images,
+                             render_video=render_video, gate=gate)
     _align_scene_keyed_stages(out, profile=profile, max_scenes=max_scenes,
                               target_duration=target_duration, gate=gate)
 
@@ -1331,7 +1389,7 @@ def _revise_one(stage_name: str, out, *, edited_override: dict | None = None,
     return True
 
 
-def _revise_loop(out, *, render: bool = False) -> None:
+def _revise_loop(out, *, render_images: bool = False, render_video: bool = False) -> None:
     """The interactive stage-picker/edit/selective-rerun loop: pick any stage
     (or 'source' for the raw ingested text) to hand-edit in $EDITOR, review
     the proposed downstream re-run plan, and selectively apply it — repeat as
@@ -1342,11 +1400,15 @@ def _revise_loop(out, *, render: bool = False) -> None:
     'running' across every round; it's only marked 'complete'/'paused' here
     when you type 'quit'/'exit' or 'pause' (or Ctrl-C).
 
-    `render` (default `False`) gates `RENDER_SKIP_STAGES` (casting + every
-    image/video rendering stage) for the whole session — skipped by default
-    so text-only iteration doesn't pay their API cost every round. Type
-    'render on' / 'render off' at the stage prompt to toggle it mid-session
-    without restarting; the current setting is echoed in the menu header.
+    `render_images`/`render_video` (each default `False`) independently gate
+    `IMAGE_RENDER_STAGES`/`VIDEO_RENDER_STAGES` for the whole session —
+    skipped by default so text-only iteration doesn't pay their API cost
+    every round. Each can be toggled separately mid-session, without
+    restarting: 'render images on'/'render images off' for image rendering
+    (casting/casting_images/moodboard_tiles — Gemini spend) and 'render
+    video on'/'render video off' for video rendering (scene_render — Veo
+    spend); 'render on'/'render off' remain a shorthand that toggles both at
+    once. The current setting of both is echoed in the menu header.
 
     Restores the ORIGINAL run's attributes before any regeneration happens:
     `_restore_direction` re-applies the genre/moodboard creative-direction
@@ -1392,10 +1454,10 @@ def _revise_loop(out, *, render: bool = False) -> None:
 
     try:
         while True:
-            render_note = "ON — casting/rendering WILL run" if render \
-                else "off — casting/rendering skipped (type 'render on' to include them)"
+            images_note = "ON" if render_images else "off"
+            video_note = "ON" if render_video else "off"
             print(f"\n[reel] revise — {out}/  (session: {session.current(out)})  "
-                 f"[render: {render_note}]")
+                 f"[render: images={images_note}, video={video_note}]")
             src_mark = "✓" if (out / "source.json").exists() else " "
             print(f"  [{src_mark}] source")
             for s in STAGES:
@@ -1404,7 +1466,8 @@ def _revise_loop(out, *, render: bool = False) -> None:
                 mark = "✓" if _load(out, s.artifact()) is not None else " "
                 print(f"  [{mark}] {s.name}")
             choice = input("\npick a stage to edit ('quit'/'exit' to finish, 'pause' to stop "
-                           "for now, 'render on'/'render off' to toggle rendering): ").strip().lower()
+                           "for now, 'render images on/off', 'render video on/off', or "
+                           "'render on/off' for both, to toggle rendering): ").strip().lower()
             if not choice:
                 continue
             if choice in ("quit", "q", "exit", "e"):
@@ -1415,19 +1478,38 @@ def _revise_loop(out, *, render: bool = False) -> None:
                 session.finish(out, "paused")
                 print(f"[reel] revision session paused → {out}/session.json")
                 return
+            if choice in ("render images on", "render images:on", "render image on"):
+                render_images = True
+                print("[reel] image rendering enabled — casting/casting_images/moodboard_tiles "
+                     "will run when affected")
+                continue
+            if choice in ("render images off", "render images:off", "render image off"):
+                render_images = False
+                print("[reel] image rendering disabled — casting/casting_images/moodboard_tiles "
+                     "will be skipped")
+                continue
+            if choice in ("render video on", "render video:on"):
+                render_video = True
+                print("[reel] video rendering enabled — scene_render will run when affected")
+                continue
+            if choice in ("render video off", "render video:off"):
+                render_video = False
+                print("[reel] video rendering disabled — scene_render will be skipped")
+                continue
             if choice in ("render on", "render:on", "render enable"):
-                render = True
-                print("[reel] rendering enabled — casting/image/video stages will run when affected")
+                render_images = render_video = True
+                print("[reel] image + video rendering enabled — both will run when affected")
                 continue
             if choice in ("render off", "render:off", "render disable"):
-                render = False
-                print("[reel] rendering disabled — casting/image/video stages will be skipped")
+                render_images = render_video = False
+                print("[reel] image + video rendering disabled — both will be skipped")
                 continue
             if choice != "source" and choice not in names():
                 print(f"[reel] unknown stage {choice!r}")
                 continue
             _revise_one(choice, out, profile=profile, max_scenes=max_scenes,
-                       target_duration=target_duration, render=render, gate=gate)
+                       target_duration=target_duration, render_images=render_images,
+                       render_video=render_video, gate=gate)
     except KeyboardInterrupt:
         session.finish(out, "paused")
         print("\n[reel] revision loop paused.")
@@ -1477,9 +1559,17 @@ def _revise(argv: list[str]) -> int:
                                              "selectively re-run what's affected")
     ap.add_argument("--out", default="output")
     ap.add_argument("--render", action="store_true",
-                    help="also re-run casting + image/video rendering when affected by an "
-                         "edit (skipped by default — text-only iteration is free; toggle "
-                         "anytime inside the loop with 'render on'/'render off')")
+                    help="also re-run BOTH casting/image rendering and video rendering when "
+                         "affected by an edit (both skipped by default — text-only iteration "
+                         "is free; shorthand for --render-images --render-video)")
+    ap.add_argument("--render-images", action="store_true",
+                    help="re-run casting/casting_images/moodboard_tiles (Gemini image spend) "
+                         "when affected by an edit — independent of --render-video; toggle "
+                         "anytime inside the loop with 'render images on'/'render images off'")
+    ap.add_argument("--render-video", action="store_true",
+                    help="re-run scene_render (Veo video spend) when affected by an edit — "
+                         "independent of --render-images; toggle anytime inside the loop with "
+                         "'render video on'/'render video off'")
     a = ap.parse_args(argv)
     out = Path(a.out)
 
@@ -1488,7 +1578,8 @@ def _revise(argv: list[str]) -> int:
         return 2
 
     session.start(out, fresh=False)
-    _revise_loop(out, render=a.render)
+    _revise_loop(out, render_images=a.render or a.render_images,
+                render_video=a.render or a.render_video)
     return 0
 
 

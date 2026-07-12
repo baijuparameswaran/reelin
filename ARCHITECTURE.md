@@ -594,24 +594,35 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
   `_revise_loop` the same way `cli.main` already catches it for a fresh
   `pipeline.run()` — the revision session is marked `"paused"` and the
   loop exits, with every stage completed so far left saved.
-- **`revise` skips casting + all image/video rendering by default** —
-  `cli.RENDER_SKIP_STAGES = {"casting", "casting_images", "moodboard_tiles",
-  "scene_render"}` — since those are the only stages `revise` can trigger
-  that cost real Gemini/Veo API spend; every other stage is local-LLM-only
-  and free. Both `_revise_one`'s scoped downstream regen and
-  `_revise_source`'s full regen check this set before calling `run_stage`/
-  `_apply_scene_render_revision`, printing a one-line skip notice per stage
-  rather than silently doing nothing. A skipped stage's existing checkpoint
-  is left untouched (never deleted), so anything downstream that REQUIRES
-  it (e.g. `storyboard` requires `casting`) still resolves — just against
-  the last rendered/cast state, not a fresh one; that staleness is the
-  accepted tradeoff for free text-only iteration. Opt in three ways: the
-  standalone command's `--render` flag (sets the default for the whole
-  session), typing `render on`/`render off` inside the interactive loop at
-  any point (no restart needed — the menu header always echoes the current
-  setting), or directly picking `casting` from the menu to hand-edit it
-  yourself (that edit always happens regardless of the flag — only its OWN
-  downstream `casting_images`/`scene_render` respect it).
+- **`revise` skips casting + all image/video rendering by default, with
+  image rendering and video rendering enable-able INDEPENDENTLY** —
+  `cli.IMAGE_RENDER_STAGES = {"casting", "casting_images", "moodboard_tiles"}`
+  (Gemini image spend) and `cli.VIDEO_RENDER_STAGES = {"scene_render"}` (Veo
+  spend), with `RENDER_SKIP_STAGES` kept as their union for anything that
+  only needs "is this a render stage at all." These are the only stages
+  `revise` can trigger that cost real API spend; every other stage is
+  local-LLM-only and free. `cli._render_stage_skipped(name, render_images,
+  render_video)` is the single per-stage check both `_revise_one`'s scoped
+  downstream regen and `_revise_source`'s full regen call before
+  `run_stage`/`_apply_scene_render_revision`, printing a one-line skip
+  notice naming the specific category (`"image"`/`"video"`) disabled rather
+  than silently doing nothing. A skipped stage's existing checkpoint is
+  left untouched (never deleted), so anything downstream that REQUIRES it
+  (e.g. `storyboard` requires `casting`) still resolves — just against the
+  last rendered/cast state, not a fresh one; that staleness is the accepted
+  tradeoff for free text-only iteration. Independent toggling matters
+  because the two spend different budgets for different reasons — e.g.
+  re-casting a character's look and checking the portrait shouldn't also
+  force a full video re-render, or vice versa. Opt in three ways: the
+  standalone command's `--render-images`/`--render-video` flags (each sets
+  its own default for the whole session; `--render` remains a shorthand for
+  both), typing `render images on/off` or `render video on/off` inside the
+  interactive loop at any point (no restart needed — the menu header always
+  echoes both current settings — `render on`/`render off` remain a
+  shorthand for both at once), or directly picking `casting` from the menu
+  to hand-edit it yourself (that edit always happens regardless of the
+  flags — only its OWN downstream `casting_images`/`scene_render` respect
+  them, independently).
 - **`revise` inherits the original run's attributes** — profile, max_scenes,
   target_duration, and genre/moodboard creative-direction steering —
   instead of silently reverting to bare defaults. `revise` is a SEPARATE

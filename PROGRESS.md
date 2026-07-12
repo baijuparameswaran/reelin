@@ -200,6 +200,58 @@
   final cut phase.
 
 ## Session log
+- 2026-07-11 (later 9) — **`revise`'s render skip is now two INDEPENDENT
+  toggles — image rendering and video rendering — instead of one combined
+  on/off switch, per direct request.** Previously `RENDER_SKIP_STAGES`
+  (casting/casting_images/moodboard_tiles/scene_render) was gated by a
+  single `render: bool`, so there was no way to include one media-cost
+  category without the other — e.g. re-casting a character and checking
+  the rendered portrait always dragged along a full video re-render too
+  (or vice versa), even though the two spend entirely separate API
+  budgets (Gemini image vs. Veo video) for entirely separate reasons.
+
+  Split `RENDER_SKIP_STAGES` into `IMAGE_RENDER_STAGES = {"casting",
+  "casting_images", "moodboard_tiles"}` and `VIDEO_RENDER_STAGES =
+  {"scene_render"}` (kept as their union, for any check that only cares
+  "is this a render stage at all" — none remained, but harmless to keep).
+  New `cli._render_stage_skipped(name, render_images, render_video)`
+  replaces the single `name in RENDER_SKIP_STAGES and not render` check
+  everywhere it appeared (`_run_downstream_revision`'s cascade loop and
+  `_revise_source`'s drastic full-STAGES-replay loop), and two new
+  message-builder helpers (`_render_status_message`/`_render_skip_suffix`)
+  keep the pre-confirm and post-apply printouts consistent across both
+  call sites without duplicating the "what will/won't run" phrasing.
+  Every `render: bool` parameter across the whole chain
+  (`_run_downstream_revision`, `_revise_source`, `_revise_one`,
+  `_revise_loop`) became a `render_images: bool` + `render_video: bool`
+  pair.
+
+  Three ways to opt in, each now split in two: the standalone command's
+  `--render-images`/`--render-video` flags (each sets its own default for
+  the session; `--render` stays as a shorthand enabling both, for anyone
+  not asking for the split); `render images on/off` and `render video
+  on/off` inside the interactive loop, toggleable independently at any
+  point without restarting (`render on`/`render off` remain a shorthand
+  for both at once); or directly picking `casting` from the menu to
+  hand-edit it (unaffected either way — only its own downstream
+  `casting_images`/`scene_render` respect the two flags, independently).
+  The menu header now echoes both settings separately (`[render:
+  images=ON, video=off]`) instead of one combined status.
+
+  Rewrote `tests/test_revise_render_skip.py` (15 tests, up from 5) to
+  cover the new granularity directly: the two stage sets partition
+  `RENDER_SKIP_STAGES` with no overlap; `_render_stage_skipped` checks the
+  right category per stage; `_revise_one`/`_revise_source` under all four
+  `(render_images, render_video)` combinations (confirming images-only
+  includes casting_images but not scene_render, and vice versa for
+  video-only); and `_revise_loop`'s four toggle command pairs each flip
+  the right flag(s) before reaching `_revise_one` (including toggling one
+  category on then the other off independently, confirming they don't
+  interfere). Updated the render-related call sites in
+  `tests/test_revise_scoped_source.py`, `tests/test_revise_scene_
+  delete_add.py`, and `tests/test_revise_scene_alignment_backfill.py` for
+  the renamed parameters. Full suite now 195 tests (was 185), still fully
+  offline, `py_compile` clean.
 - 2026-07-11 (later 8) — **`revise`'s downstream cascade now gets the SAME
   per-stage review gate a fresh `pipeline.run()` uses, per direct request
   ("can the revise do gating like normal pipeline run").** Previously every

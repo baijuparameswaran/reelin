@@ -140,7 +140,7 @@ class TestAlignSceneKeyedStages(unittest.TestCase):
             with mock.patch("reel.stages.run_stage", side_effect=fake_run_stage), \
                  mock.patch("reel.stages.downstream_of", return_value=[]):
                 applied = cli._revise_one("characters", out, edited_override=edited_characters,
-                                          auto_confirm=True, render=False)
+                                          auto_confirm=True, render_images=False, render_video=False)
 
             self.assertTrue(applied)
             self.assertIn(("screenplay", {2}), run_stage_calls)

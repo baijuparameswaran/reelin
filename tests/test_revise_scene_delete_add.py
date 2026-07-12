@@ -158,7 +158,7 @@ class TestReviseOneScenesDeletion(unittest.TestCase):
             with mock.patch("reel.stages.run_stage", side_effect=fake_run_stage), \
                  mock.patch("reel.pipeline._assemble_movie", return_value=None):
                 applied = cli._revise_one("scenes", out, edited_override=edited_scenes,
-                                          auto_confirm=True, render=True)
+                                          auto_confirm=True, render_images=True, render_video=True)
 
             self.assertTrue(applied)
 
@@ -203,7 +203,7 @@ class TestReviseOneScenesDeletion(unittest.TestCase):
             with mock.patch("reel.stages.run_stage", return_value={}), \
                  mock.patch("reel.pipeline._assemble_movie", return_value=None):
                 applied = cli._revise_one("scenes", out, edited_override=edited_scenes,
-                                          auto_confirm=True, render=True)
+                                          auto_confirm=True, render_images=True, render_video=True)
             self.assertTrue(applied)
 
     def test_adding_a_scene_scopes_the_new_number_downstream(self):
@@ -224,7 +224,7 @@ class TestReviseOneScenesDeletion(unittest.TestCase):
             with mock.patch("reel.stages.run_stage", side_effect=fake_run_stage), \
                  mock.patch("reel.pipeline._assemble_movie", return_value=None):
                 applied = cli._revise_one("scenes", out, edited_override=edited_scenes,
-                                          auto_confirm=True, render=True)
+                                          auto_confirm=True, render_images=True, render_video=True)
 
             self.assertTrue(applied)
             soundscape_call = next(rk for n, rk in run_stage_calls if n == "soundscape")
@@ -254,7 +254,7 @@ class TestReviseOneScenesDeletion(unittest.TestCase):
                  mock.patch("reel.pipeline._assemble_movie", return_value=None), \
                  redirect_stdout(buf):
                 applied = cli._revise_one("scenes", out, edited_override=edited_scenes,
-                                          auto_confirm=True, render=True)
+                                          auto_confirm=True, render_images=True, render_video=True)
             self.assertTrue(applied)
             output = buf.getvalue()
 

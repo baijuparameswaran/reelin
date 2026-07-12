@@ -172,7 +172,7 @@ class TestReviseSourceScopedPath(unittest.TestCase):
                            return_value={"drastic": False, "changed_scene_numbers": [1],
                                         "summary": "Marcel now orders a cigar too"}):
                 applied = cli._revise_source(out, edited_override=edited_source,
-                                             auto_confirm=True, render=True)
+                                             auto_confirm=True, render_images=True, render_video=True)
 
             self.assertTrue(applied)
             called_names = [name for name, _ in run_stage_calls]
@@ -206,7 +206,7 @@ class TestReviseSourceScopedPath(unittest.TestCase):
                                         "reason": "a new opening event has no matching scene",
                                         "changed_scene_numbers": []}):
                 applied = cli._revise_source(out, edited_override=edited_source,
-                                             auto_confirm=True, render=True)
+                                             auto_confirm=True, render_images=True, render_video=True)
 
             self.assertTrue(applied)
             # Full regen: every non-render-skip STAGES entry should have run.
@@ -240,7 +240,7 @@ class TestReviseSourceScopedPath(unittest.TestCase):
                                         "reason": "a new opening event has no matching scene",
                                         "changed_scene_numbers": []}):
                 applied = cli._revise_source(out, edited_override=edited_source,
-                                             auto_confirm=True, render=True)
+                                             auto_confirm=True, render_images=True, render_video=True)
 
             self.assertTrue(applied)
             self.assertEqual(run_stage_kwargs["scenes"].get("prior_scene_count"), 2)
@@ -265,7 +265,7 @@ class TestReviseSourceScopedPath(unittest.TestCase):
                  mock.patch("reel.agents.revision.identify_source_text_changes",
                            side_effect=fake_identify):
                 applied = cli._revise_source(out, edited_override=edited_source,
-                                             auto_confirm=True, render=True)
+                                             auto_confirm=True, render_images=True, render_video=True)
 
             self.assertTrue(applied)
             self.assertEqual(analysis_calls, [],
