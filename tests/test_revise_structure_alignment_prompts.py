@@ -67,15 +67,17 @@ class TestScenesStructureNote(unittest.TestCase):
 class TestScenesRevisionReminderNote(unittest.TestCase):
     """Distinct from `_structure_alignment_note` (scoped-revision-only,
     "keep the same count"): this note fires for a DRASTIC, fully unscoped
-    regen where the count is EXPECTED to change, but rule 9 (MINIMIZE SCENE
-    COUNT) must still apply in full — see `cli._revise_source`'s fallback."""
+    regen where the count is EXPECTED to change — purely informational
+    (states the prior count as context), deferring to rule 9 (CAPTURE THE
+    STORY FULLY) for how the edited text should actually be segmented — see
+    `cli._revise_source`'s fallback."""
 
     def test_states_prior_count_and_reinforces_rule_9(self):
         note = scenes_agent._revision_reminder_note(2)
         self.assertIn("REVISION", note)
         self.assertIn("2 scene(s)", note)
-        self.assertIn("MINIMIZE SCENE COUNT", note)
-        self.assertIn("paragraph break", note)
+        self.assertIn("CAPTURE THE STORY FULLY", note)
+        self.assertNotIn("MINIMIZE SCENE COUNT", note)
 
     def test_empty_for_none_or_zero(self):
         self.assertEqual(scenes_agent._revision_reminder_note(None), "")

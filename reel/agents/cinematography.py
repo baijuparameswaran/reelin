@@ -83,10 +83,14 @@ smash-cut | wipe | jump-cut (empty string for final scene)"
 }}
 
 Rules:
-- A scene needs at least 1 shot; most scenes benefit from more for real \
-coverage, but a single decisive shot is fine when the beat is that simple \
-(a brief insert, a single reaction) — don't pad out a shot list just to hit \
-a count. Aim for a realistic coverage plan{duration_rule}
+- Give every scene the FULL shot coverage a director would actually want to \
+tell it well — establishing shots, reaction coverage for each character who \
+matters in the beat, inserts on anything dramatically significant. Don't \
+under-shoot a scene just to keep the shot count low; a scene needs at least \
+1 shot, but a single shot is appropriate ONLY when the beat is genuinely \
+that simple (a brief insert, a single reaction), never as a default to save \
+time. Any runtime/shot-count guidance below is a soft target, secondary to \
+real coverage — never a reason to skip shots a scene actually needs{duration_rule}
 - Shot types and movement should reflect the genre \
 (thriller → tight, handheld; drama → measured, Steadicam; horror → Dutch tilts, \
 low angles; romance → soft telephoto, slow dolly)

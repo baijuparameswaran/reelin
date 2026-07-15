@@ -3,10 +3,11 @@
 call (see that module's docstring). The log already has everything needed
 to reconstruct cost (model, outcome, and the full request `params` —
 including `duration_seconds` for video); nothing aggregated it into an
-actual dollar figure until now, despite this project's own prompting
-explicitly steering toward FEWER scenes specifically to control the cost
-those calls represent (`scenes.py`'s "MINIMIZE SCENE COUNT" rule) — a
-run's operator had no way to see the dollar consequence of that tradeoff.
+actual dollar figure until now, so a run's operator had no way to see the
+real dollar consequence of how many scenes/shots a story ended up needing
+(scene/shot COUNT is now driven purely by what the story needs — see
+`scenes.py`'s rule 9, "CAPTURE THE STORY FULLY" — not by a cost-minimization
+bias, so this module matters more than ever for keeping spend visible).
 
 Pricing below is a snapshot (fetched live from ai.google.dev/gemini-api/docs/pricing,
 2026-07-14) of each model's STANDARD tier at this project's configured

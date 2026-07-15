@@ -9,7 +9,7 @@ suite is fully offline and fast:
      "Sandwiched?" column) actually contains its reminder block, positioned
      at the true end of the rendered string with no leftover unresolved
      `{placeholder}`s; every prompt's highest-stakes rule keywords (SOURCE
-     FIDELITY, ISOLATION, MINIMIZE SCENE COUNT, TIE-BREAKER, SOURCE OVER
+     FIDELITY, ISOLATION, CAPTURE THE STORY FULLY, TIE-BREAKER, SOURCE OVER
      COVERAGE, ...) are actually present in the text sent to the model, not
      just described in a docstring.
 
@@ -99,9 +99,10 @@ class TestScenesPrompt(SandwichAssertionsMixin, unittest.TestCase):
     def test_source_is_the_only_authority_rule_present(self):
         self.assertIn("SOURCE TEXT IS THE ONLY AUTHORITY", self._render())
 
-    def test_minimize_scene_count_rule_present(self):
+    def test_capture_the_story_fully_rule_present(self):
         out = self._render()
-        self.assertIn("MINIMIZE SCENE COUNT", out)
+        self.assertIn("CAPTURE THE STORY FULLY", out)
+        self.assertNotIn("MINIMIZE SCENE COUNT", out)
         # Reinforced in both the task-intro line and the rules list, not just once.
         self.assertGreaterEqual(out.count("scene"), 10)
 
@@ -399,7 +400,7 @@ class TestDurationBudgetShotFloor(unittest.TestCase):
 
     def test_short_target_floors_at_one_not_two(self):
         guidance = duration_budget.suggest_shots_per_scene(10, 10)
-        self.assertIn("about 1 shot", guidance)
+        self.assertIn("roughly 1 shot", guidance)
 
     def test_empty_when_no_scenes(self):
         self.assertEqual(duration_budget.suggest_shots_per_scene(45, 0), "")

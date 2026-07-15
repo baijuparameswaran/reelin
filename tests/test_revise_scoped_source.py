@@ -215,10 +215,10 @@ class TestReviseSourceScopedPath(unittest.TestCase):
             self.assertIn("scenes", run_stage_calls)
 
     def test_drastic_fallback_passes_prior_scene_count_to_the_scenes_stage(self):
-        # A drastic source-text edit still needs to remind the model that
-        # MINIMIZE SCENE COUNT applies in full — not a license to fragment
-        # just because the fallback regen is unscoped. Only the "scenes"
-        # stage call should receive `prior_scene_count`; every other stage
+        # A drastic source-text edit still passes the prior count through
+        # as informational context (see _revision_reminder_note) even
+        # though the fallback regen is unscoped. Only the "scenes" stage
+        # call should receive `prior_scene_count`; every other stage
         # ignores it via its own **_ catch-all.
         with tempfile.TemporaryDirectory() as tmpdir:
             out = Path(tmpdir)

@@ -112,9 +112,9 @@ class TestGateApprovalAndPersistence(unittest.TestCase):
             self.assertEqual(saved, reran)
 
     def test_extra_kwargs_survive_a_feedback_rerun(self):
-        # A drastic "scenes" regen carries prior_scene_count (the MINIMIZE
-        # SCENE COUNT reminder) — a feedback-driven rerun must not silently
-        # drop it.
+        # A drastic "scenes" regen carries prior_scene_count (feeds the
+        # revision reminder note) — a feedback-driven rerun must not
+        # silently drop it.
         with tempfile.TemporaryDirectory() as tmpdir:
             out = Path(tmpdir)
             gate = Gate(enabled=True, timeout_seconds=0)

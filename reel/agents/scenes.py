@@ -3,15 +3,19 @@
 The source text is the ONLY authority — every scene must correspond to an actual
 event in the source. Structural beats are a secondary ordering scaffold only.
 
-This is the single most consequential stage for downstream cost: every scene
-becomes a separate rendered video clip (or several, one per shot) further down
-the pipeline, so the prompt actively steers toward the FEWEST scenes that can
-still tell the story faithfully — merging continuous beats that share a
-location and continuous time into one scene, splitting only on a real
-location/time/purpose change (see STRICT RULE 9, "MINIMIZE SCENE COUNT",
-below). This is a cost/pacing bias, not a fidelity relaxation: the existing
-"never invent scenes to hit a count" / "no unnecessary repeats" rules already
-prevent the opposite failure mode (dropping real events to save a scene).
+This is the single most consequential stage for how completely the film
+captures the story: every scene becomes a separate rendered video clip (or
+several, one per shot) further down the pipeline, so how the story gets
+segmented here directly determines what a viewer actually sees. The prompt
+steers toward a DIRECTOR'S-EYE segmentation (see STRICT RULE 9, "CAPTURE THE
+STORY FULLY", below) — give a distinct scene to every beat that carries its
+own dramatic or visual weight, rather than compressing the story to hit a
+lower scene count. This deliberately replaces an earlier version of this
+rule that steered toward the FEWEST scenes as a cost-minimization bias —
+removed per direct instruction, since it was under-serving the story. The
+existing "never invent scenes to hit a count" / "no unnecessary repeats"
+rules still prevent the opposite failure mode (inventing or duplicating
+scenes that aren't really there).
 
 Each scene also carries a `location` — the plain name of its physical setting,
 identical across every scene set in the same place (independent of the DAY/NIGHT
@@ -75,11 +79,11 @@ SYSTEM = (
 )
 
 PROMPT = """\
-Break the story below into filmable scenes. Aim for {target}. Never invent
-scenes to hit a count — but every scene below becomes a separate rendered
-video clip downstream, so also never split what can be told as ONE continuous
-scene; prefer the FEWEST scenes that still tell the story faithfully (see
-STRICT RULE 9 below).
+Break the story below into filmable scenes the way a director breaks down a
+shooting script: give every beat that carries its own dramatic or visual
+weight its own scene, so the film actually does the story justice (see
+STRICT RULE 9 below). Never invent scenes to hit a count, and never split a
+single continuous beat into two just to inflate the count either — {target}.
 {structure_note}
 STRICT RULES:
 1. SOURCE TEXT IS THE ONLY AUTHORITY. Every scene must correspond to an actual
@@ -110,18 +114,20 @@ STRICT RULES:
    anchor a later stage uses to keep that location visually consistent, so
    inconsistent naming of the same place defeats the purpose. A location need not
    recur to deserve its own name; name it precisely either way.
-9. MINIMIZE SCENE COUNT: each scene here becomes a separate rendered video clip
-   (often several, one per camera shot) further down the pipeline — more scenes
-   directly means more render time and cost. Merge consecutive beats that share
-   the same `location` and continuous, uninterrupted time into ONE scene rather
-   than splitting them across several, as long as the combined action can still
-   read clearly through continuous coverage. Only start a NEW scene when the
-   location changes, there's a real time jump (a scene break, not just the next
-   sentence), or the dramatic purpose genuinely shifts — not for every new beat,
-   line of dialogue, or minor action within an otherwise continuous moment. This
-   does not license dropping or compressing away real events (rules 1-2 above
-   still apply in full) — it only means telling everything that happens in one
-   place at one time as a single scene instead of several redundant ones.
+9. CAPTURE THE STORY FULLY — DIRECTOR'S EYE: think like a director breaking
+   the story into a shot list, not like someone trying to keep the scene
+   count down. Give a DISTINCT scene to every beat that carries its own
+   dramatic or visual weight — a turning point, a shift in who's present or
+   what they want, a change in emotional register, a meaningful pause or
+   reaction — even when it shares a `location` and roughly continuous time
+   with what comes before or after it. Only fold two moments into ONE scene
+   when they are genuinely the SAME continuous beat with nothing
+   dramatically distinct happening between them (e.g. a character simply
+   crossing a room mid-conversation is not its own scene; a character
+   deciding something and acting on it usually is). If a scene-count target
+   is given above, treat it as a soft, secondary guide — never merge or
+   compress distinct beats just to land inside it; what the story itself
+   needs always wins over any count.
 10. `props` lists notable PHYSICAL OBJECTS explicitly present or mentioned in
     the source text for this scene (e.g. "a brass diving bell", "a tarnished
     pocket watch", "an unopened letter" — generic illustrations of the level
@@ -168,9 +174,10 @@ just read, not just what you remember from the rules list):
   exactly, if one was given.
 - Every `location` string is byte-identical across every scene set in that
   same place.
-- No two adjacent scenes share the same `location` AND continuous time without
-  a real reason they're split (MINIMIZE SCENE COUNT, rule 9) — if you find one,
-  merge them before responding.
+- Every distinct dramatic beat in the source material above has its own
+  scene (CAPTURE THE STORY FULLY, rule 9) — check for two different turning
+  points or emotional shifts hiding inside one merged scene just because
+  they share a location, and split them if you find one.
 - Every entry in `props` is an object the source material above actually names
   — not one you inferred would look good on screen.
 """
@@ -242,28 +249,27 @@ def _revision_reminder_note(prior_scene_count: int | None) -> str:
     change, so `_structure_alignment_note`'s "keep the same count" framing
     would be actively wrong here.
 
-    But "the count may change" is not the same as "fragment freely" — rule
-    9 (MINIMIZE SCENE COUNT) already applies to every segmentation, fresh or
-    not, yet a full regen triggered by a text EDIT carries a specific risk
-    the generic rule doesn't call out: the edited prose's own paragraph
-    breaks can bias the model toward treating each rewritten beat as its
-    own scene, even when location and time both stay continuous — exactly
-    the failure this note exists to head off. Empty (no-op) for a genuinely
-    fresh, non-revision segmentation (`prior_scene_count` is only ever
-    passed by the reel.cli revise flow, never a first-time pipeline run)."""
+    Purely informational — states the prior count as context, nothing more.
+    An earlier version of this note enforced "MINIMIZE SCENE COUNT" here
+    specifically, on the theory that an edited passage's own paragraph
+    breaks could bias the model toward over-fragmenting; now that rule 9 is
+    "capture the story fully" rather than "minimize," that concern doesn't
+    apply — a rewritten passage calling for more distinct beats than before
+    is a correct outcome, not a failure mode to guard against. Empty (no-op)
+    for a genuinely fresh, non-revision segmentation (`prior_scene_count` is
+    only ever passed by the reel.cli revise flow, never a first-time
+    pipeline run)."""
     if not prior_scene_count:
         return ""
     return (
         f"\nNOTE: this is a REVISION regenerating the scene breakdown for an "
         f"edited story, not a first-time segmentation — the previous version "
-        f"told this story in {prior_scene_count} scene(s). MINIMIZE SCENE "
-        f"COUNT (rule 9) still applies IN FULL here: new or rewritten prose "
-        f"is not itself a reason for more scenes, and a paragraph break in "
-        f"the edited text is not automatically a scene break. Only introduce "
-        f"a new scene where the edit genuinely changes location, causes a "
-        f"real time jump, or shifts the dramatic purpose — merge everything "
-        f"else exactly as rule 9 already requires, the same as you would for "
-        f"a fresh segmentation.\n"
+        f"told this story in {prior_scene_count} scene(s). That count is "
+        f"informational only, not a target: segment the edited text the same "
+        f"way you would a fresh story, rule 9 (CAPTURE THE STORY FULLY) in "
+        f"full — a rewritten passage may now call for more distinct scenes "
+        f"than before, or fewer, purely based on what the story now needs, "
+        f"not on matching the old count.\n"
     )
 
 
@@ -401,7 +407,8 @@ def _map_chunks(scenes: list[dict], source: dict) -> list[dict]:
 def segment_scenes(
     source: dict,
     structure: dict,
-    target: str = "as few scenes as the story can be told in — often 3-6 for a short story",
+    target: str = "as many scenes as the story's own beats call for — segment "
+                  "like a director breaking down a shooting script, not for brevity",
     profile: str | None = None,
     feedback: str | None = None,
     existing: dict | None = None,

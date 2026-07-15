@@ -28,13 +28,19 @@ ASSUMED_SHOTS_PER_SCENE = 2.5
 
 def suggest_scene_target(target_seconds: int) -> str:
     """A scene-count-range string for scenes.py's own `target` prompt param
-    (its existing default is the plain literal "8-14 scenes") — sized so
-    roughly `target_seconds` worth of ~6s shots at ~2.5 shots/scene fits,
-    with a floor of 1 scene."""
+    — sized so roughly `target_seconds` worth of ~6s shots at ~2.5
+    shots/scene fits, with a floor of 1 scene. Deliberately worded as a
+    SOFT, SECONDARY hint (explicitly deferring to scenes.py's own rule 9,
+    "CAPTURE THE STORY FULLY") — an earlier version of this text read as a
+    firmer target, which combined with scenes.py's own then-current
+    "minimize scene count" rule to under-serve the story; that rule was
+    removed per direct instruction, and this text was reworded to match."""
     est_shots = max(1, round(target_seconds / ASSUMED_SECONDS_PER_SHOT))
     est_scenes = max(1, round(est_shots / ASSUMED_SHOTS_PER_SCENE))
     lo, hi = max(1, est_scenes - 1), est_scenes + 1
-    return f"{lo}-{hi} scenes (aiming for a total runtime near {target_seconds}s)"
+    return (f"roughly {lo}-{hi} scenes if the story naturally fits that runtime "
+           f"(a soft runtime budget near {target_seconds}s, secondary to rule 9 "
+           "below — never compress the story's own beats to fit this range)")
 
 
 def suggest_shots_per_scene(target_seconds: int, scene_count: int) -> str:
@@ -43,16 +49,18 @@ def suggest_shots_per_scene(target_seconds: int, scene_count: int) -> str:
     planning assumption — lands near `target_seconds`. Empty string when
     there's nothing to compute (`scene_count <= 0`). Floor of 1 shot/scene,
     not 2 — a scene needs only one decisive shot when the beat is that
-    simple; this is a budget hint, not a coverage-count minimum."""
+    simple; this is a soft budget hint, not a coverage-count minimum OR
+    maximum — cinematography.py's own coverage rule takes priority over it."""
     if scene_count <= 0:
         return ""
     est_total_shots = max(scene_count, round(target_seconds / ASSUMED_SECONDS_PER_SHOT))
     per_scene = max(1, round(est_total_shots / scene_count))
-    return (f"the film has a target total runtime of about {target_seconds}s; at roughly "
-           f"{ASSUMED_SECONDS_PER_SHOT}s per shot, that's about {est_total_shots} shot(s) "
-           f"total across {scene_count} scene(s) — aim for about {per_scene} shot(s) per "
-           "scene on average (some scenes can carry more, others fewer, as the story needs; "
-           "this is a budget to aim near, not a hard per-scene quota)")
+    return (f"the film has a soft target total runtime of about {target_seconds}s; at "
+           f"roughly {ASSUMED_SECONDS_PER_SHOT}s per shot, that's about {est_total_shots} "
+           f"shot(s) total across {scene_count} scene(s) — roughly {per_scene} shot(s) per "
+           "scene on average IF that's enough for real coverage (some scenes need more, "
+           "some need fewer — this is a budget to lean toward, never a reason to under-shoot "
+           "a scene that needs more coverage than this average suggests)")
 
 
 def parse_duration_seconds(text: str | None) -> int:

@@ -78,14 +78,17 @@ provider-policy bullet.
   render-ready `tiles` are capped to `--max-scenes` since they're an actual
   media-generation step (unlike its film-wide aesthetic fields).
 - **`scenes.py`** — segments the story into a numbered scene list; the single
-  most consequential stage for downstream render cost, since every scene
-  becomes at least one rendered video clip. Source text is the *only*
-  authority (rule 1), structural beats are a secondary ordering hint that
-  loses on conflict (rule 6), and rule 9 (MINIMIZE SCENE COUNT) actively
-  steers toward the fewest scenes that can still tell the story faithfully —
-  merging consecutive beats that share a location and continuous time,
-  splitting only on a real location/time/purpose change. Every scene also
-  carries a `location` string, identical across every scene set in the same
+  most consequential stage for how completely the film captures the story,
+  since every scene becomes at least one rendered video clip. Source text is
+  the *only* authority (rule 1), structural beats are a secondary ordering
+  hint that loses on conflict (rule 6), and rule 9 (CAPTURE THE STORY
+  FULLY — DIRECTOR'S EYE) steers toward giving every beat that carries its
+  own dramatic or visual weight its own scene, the way a director would
+  break down a shooting script — a scene-count target, if given, is a soft,
+  secondary guide the story's own shape always wins over. (An earlier
+  version of this rule minimized scene count as a cost-control bias;
+  removed per direct instruction for under-serving the story.) Every scene
+  also carries a `location` string, identical across every scene set in the same
   place — the anchor `casting.py` uses to cast locations — and a
   deterministically-computed (no LLM) `source_excerpt` + `word_count`
   (`_attach_source_excerpts`): the actual contiguous portion of the story

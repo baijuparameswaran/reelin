@@ -222,6 +222,90 @@
   boundary panel.
 
 ## Session log
+- 2026-07-15 (later) — **Removed the "MINIMIZE SCENE COUNT" bias from
+  scene/shot segmentation entirely, replaced with a director's-eye
+  completeness principle, per direct instruction ("Remove the minimize
+  scene!! Make sure enough scenes and shots are captured to do justice to
+  the story from a directors perspective").** This reverses a deliberate
+  cost-control decision made in an earlier session (2026-07-10) — that
+  rule actively steered `scenes.py` toward merging beats into the fewest
+  possible scenes to control downstream render cost; the operator judged
+  it was under-serving the story and asked for the opposite: capture
+  every scene/shot a director would actually want.
+
+  Investigated the FULL mechanism before editing anything, since two
+  separate layers were both suppressing count: (1) `scenes.py`'s STRICT
+  RULE 9 ("MINIMIZE SCENE COUNT" — explicit prose telling the model to
+  merge beats), and (2) `duration_budget.py`'s `suggest_scene_target`/
+  `suggest_shots_per_scene`, ALWAYS active by default (not just when
+  `--target-duration` is explicitly passed — `pipeline.run()` falls back
+  to config `duration.target_seconds`, itself defaulting to
+  `DEFAULT_TARGET_SECONDS = 45`), which independently computed a
+  scene/shot-count RANGE from a 45-second assumption and fed it directly
+  into `scenes.py`'s `target` prompt slot and `cinematography.py`'s
+  `shots_guidance` — meaning even removing rule 9's text alone would have
+  left the real, numerically dominant constraint in place.
+
+  Fixed both layers: (1) `scenes.py` — rule 9 renamed and rewritten to
+  "CAPTURE THE STORY FULLY — DIRECTOR'S EYE": give a distinct scene to
+  every beat carrying its own dramatic/visual weight (a turning point, a
+  shift in who's present or what they want, an emotional change), fold
+  two moments into one scene ONLY when they're genuinely the same
+  continuous beat with nothing distinct happening between them; a
+  scene-count target, if given, is explicitly demoted to "a soft,
+  secondary guide — never merge or compress distinct beats just to land
+  inside it." The task-intro line, the "before you respond" reminder
+  bullet (now checks for missed distinct beats instead of un-merged
+  adjacent scenes), the module docstring, and the `target` parameter's
+  default string were all updated to match — none of them say "minimize"
+  or "fewest" anymore. `_revision_reminder_note` (fires only for a
+  DRASTIC/unscoped regen after a source-text edit) was neutralized to
+  purely informational — states the prior scene count as context, no
+  longer directs the model to keep it low or treats a paragraph break as
+  a fragmentation risk to guard against (that concern only existed
+  because of the old minimize bias; a rewritten passage genuinely needing
+  more distinct scenes is now a correct outcome, not a failure mode).
+  (2) `cinematography.py` — rule 1 rewritten from "don't pad out a shot
+  list just to hit a count" to "give every scene the FULL shot coverage a
+  director would actually want... don't under-shoot a scene just to keep
+  the shot count low"; a single shot is now framed as appropriate ONLY
+  for a genuinely simple beat, never as a default. (3) `duration_budget.py`
+  — both guidance-text functions reworded to be explicitly SOFT and
+  SECONDARY to the agents' own new coverage rules ("secondary to rule 9
+  below — never compress the story's own beats to fit this range" /
+  "never a reason to under-shoot a scene that needs more coverage than
+  this average suggests") — the numeric mechanism (`ASSUMED_SECONDS_PER_
+  SHOT`/`DEFAULT_TARGET_SECONDS`) is untouched (still a legitimate,
+  separate runtime-budgeting knob via `--target-duration`), only its
+  WEIGHT relative to story completeness changed.
+
+  **Deliberately did NOT touch scoped-revision structure-alignment** — a
+  completely separate, unrelated mechanism the operator's own follow-up
+  message ("revision may still keep alignment with original") confirmed
+  should stay exactly as-is: `_structure_alignment_note` (scenes.py) and
+  the equivalent notes in `cinematography.py`/`screenplay.py`/
+  `storyboard.py` all enforce "keep the same count/numbering for any
+  scene/shot/panel NOT in this round's `revise_keys`" during a SCOPED
+  revision — a structural-integrity guard against an unrelated edit
+  silently drifting the story's shape, not a scene-count philosophy;
+  verified untouched by grepping all four files for "STRUCTURE ALIGNMENT"
+  and confirming each note's own text is unchanged.
+
+  Verified via direct `.format()` smoke tests of the real rendered prompt
+  text (confirmed "MINIMIZE"/"FEWEST" appear nowhere in scenes.py's or
+  cinematography.py's output, "CAPTURE THE STORY FULLY" and "FULL shot
+  coverage" do), plus the existing test suite: `tests/test_prompt_rules.py`'s
+  `test_minimize_scene_count_rule_present` renamed to
+  `test_capture_the_story_fully_rule_present` (now also asserts the old
+  text is ABSENT, not just that new text is present) with one incidental
+  wording-match fix (`suggest_shots_per_scene`'s "aim for about N" →
+  "roughly N", caught by the existing floor-test);
+  `tests/test_revise_structure_alignment_prompts.py`'s
+  `TestScenesRevisionReminderNote` updated to match the neutralized note
+  text; comment-only references in `test_revise_gating.py`/
+  `test_revise_scoped_source.py` updated for accuracy. Full suite still
+  294 tests, all passing, ~1s, `ollama ps` confirmed empty throughout
+  (no accidental live calls from this session's edits).
 - 2026-07-15 — **Acted on the architecture review's two open asks: brought
   `fountain.py`'s standalone `render` path to parity with the main
   pipeline's prompt construction, and completed the review's three
