@@ -198,8 +198,133 @@
   investigation); moodboard tile auto-render (opt-in); richer ingest
   (PDF/EPUB/.fdx); draft all scenes (not just first N); edit / sound mix /
   final cut phase.
+- **TBD (deferred, not a bug fix yet — explicit instruction to note for
+  later):** at a character-boundary panel, the FALLBACK single-image seed
+  (used only when reference-images end up NOT actually being sent that
+  call — disabled in config, fewer than 2 resolvable portraits, or the
+  reference-image API call itself fails) can reuse the PREVIOUS panel's
+  tail frame (the old cast) instead of a fresh anchor for the character(s)
+  actually entering this new panel. `pipeline._render_scene_frames`'s
+  `seed = prev_tail if (prev_tail and continuity) else _frame_char_anchor(...)`
+  (`reel/pipeline.py`, in the per-panel loop) doesn't check boundary status
+  the way the adjacent `effective_prev_clip = None if _char_set_changed(...)
+  else prev_clip_path` line (extend-mode continuity) already does — so the
+  IMAGE seed and the VIDEO-extend seed are inconsistently boundary-aware.
+  Confirmed real via re-verifying the underlying Veo constraint live
+  against the installed SDK (`GenerateVideosConfig.reference_images`'s own
+  field docstring: "the image, video, or last_frame field are not
+  supported" when reference_images is set) — a single API call genuinely
+  can't carry both, so this fallback path IS reachable whenever
+  reference-images can't be used for a boundary. Fix (if picked up): make
+  `seed` boundary-aware the same way `effective_prev_clip` already is —
+  fall back to `_frame_char_anchor` (scoped to `_panel_relevant_characters`,
+  per the same-session fix above) rather than `prev_tail` specifically at a
+  boundary panel.
 
 ## Session log
+- 2026-07-14 (later) — **Veo reference/seed images for a panel are now
+  scoped to that panel's own action/dialogue-relevant characters, not the
+  raw `characters_in_frame` list.** Direct follow-up request: "for each
+  panel entry in storyboard make sure only the relevant character is
+  included as reference image." Traced the actual gap:
+  `storyboard._panel_characters_in_frame` (its own docstring already says
+  "HEURISTIC, not a citation") defaults `characters_in_frame` to the
+  ENTIRE scene cast for any wide/establishing/full shot (or a close shot
+  with no dialogue) — a character present anywhere in the scene lands in
+  every wide-shot panel's list, whether or not that panel's own action
+  text actually depicts them. Downstream, `pipeline._frame_char_anchor`
+  and `_resolve_panel_references` only ever filtered on "does this name
+  have a resolvable casting portrait," never on "is this character
+  actually in this shot" — so a wide-shot panel's Veo reference images (up
+  to 3, a scarce budget) or single seed anchor could burn slots on
+  characters technically in the scene but absent from that specific panel,
+  at best wasting the budget, at worst producing a wrong identity-lock.
+
+  New `pipeline._panel_relevant_characters(fr)`: narrows a panel's
+  `characters_in_frame` down to names that either appear (word-boundary,
+  case-insensitive regex) in that panel's own `action`/`moment` text, or
+  are a dialogue speaker for that panel. Falls back to the FULL list when
+  nothing matches — a genuine group/establishing shot ("The crowd
+  gathers.") names no one individually, and losing every reference image
+  in that case would be worse than the over-inclusion this narrows.
+  Deliberately scoped ONLY to reference/seed image selection, not to
+  `characters_in_frame` itself or anything else that reads it (Subject
+  text still lists everyone `characters_in_frame` names — narrowing that
+  too was out of scope for this request; boundary/continuity tracking in
+  `_char_set_changed`/`_resolve_panel_references`'s own `char_key` still
+  uses the FULL raw list, unaffected, since continuity/extend-mode
+  eligibility is about whether the scene's cast context changed, not which
+  of them one panel happens to foreground). `_frame_char_anchor` now
+  iterates `_panel_relevant_characters(frame)` instead of the raw list;
+  `_resolve_panel_references` picks its up-to-3 reference candidates from
+  the same narrowed set. Both of `rerender_panels`' existing
+  `_frame_char_anchor` call sites inherit the fix automatically, no
+  separate change needed there.
+
+  Verified via a new `tests/test_panel_relevant_characters.py` (11 tests,
+  offline): the narrowing itself (action-text match, dialogue-speaker
+  match, group-shot fallback, no-action-text fallback, word-boundary
+  correctness — "Bob" doesn't false-match inside "Bobby" — case-
+  insensitivity, original list order preserved not match order, empty
+  input); and integration tests confirming `_resolve_panel_references`
+  excludes an irrelevant scene-cast member from the actual reference set
+  while its returned `char_key` still reflects the full cast, and
+  `_frame_char_anchor` picks the first RELEVANT character rather than the
+  first LISTED one. Composes correctly with the same-session Subject-
+  shortening feature above: since seed/reference_images now only ever
+  contain relevant characters' portraits, `_anchored_character_names`'
+  reverse path-mapping naturally never marks an irrelevant character as
+  anchored (their portrait was never sent), so they keep their full
+  physical-form text as before. Full suite now 219 tests (was 208), still
+  fully offline, `py_compile` clean.
+- 2026-07-14 — **Veo Subject text now references an attached seed/reference
+  image instead of re-describing the character in words, when one is
+  actually being sent in the same call.** User asked directly whether the
+  video prompt could reference a reference image rather than fully
+  detailing it, then confirmed implementing it. `_panel_subject`
+  (`reel/pipeline.py`) always wrote `character.physical_form` verbatim into
+  the Subject element regardless of whether a seed/reference image was also
+  attached — redundant when it was (the image already conveys appearance,
+  and the two could drift out of sync), and Veo's own image-to-video
+  guidance treats the image as the appearance anchor, expecting text to
+  focus on action/camera/style rather than restating what's visible.
+
+  New `_anchored_character_names(names, casting_lookup, out, seed,
+  reference_images)` reverse-maps the seed/reference-image Paths already
+  being sent this call against casting.json's own `image_path` (by resolved
+  path identity) to find which in-frame characters already have an actual
+  image of themselves attached — no new state, reuses what
+  `_frame_char_anchor`/`_resolve_panel_references` already resolved rather
+  than a second name-resolution pass. A `seed` that isn't any character's
+  casting portrait (a continuity tail frame — the previous clip's last
+  frame) is presumed to still show every currently-listed character, since
+  continuity is only used when the cast hasn't changed panel to panel (see
+  `_char_set_changed`). `_panel_subject` gained an `anchored: set[str] |
+  None` param — an anchored character gets `"NAME (as shown in the
+  reference image)"` instead of the full physical-form text; an unanchored
+  one (no resolvable portrait, or simply not covered by what's attached
+  this call) still gets the full locked description, since for them the
+  text is the ONLY grounding Veo has. `_five_part_veo_prompt`/
+  `_panel_video_prompt` thread `anchored`/`out`/`seed`/`reference_images`
+  through (all default to `None`, so a caller with no image context — e.g.
+  a bare prompt build — reproduces the exact prior behavior unchanged).
+  Both real call sites updated: `_render_one_panel`'s prompt build (the
+  actual render path) and `rerender_panels`' cascade-stop bookkeeping
+  prompt recompute (reordered so `after_refs`/`new_end_path` are computed
+  BEFORE the prompt that now depends on them, for the same
+  hash-must-match-a-real-render reason that bookkeeping already existed).
+
+  Verified via a new `tests/test_subject_reference_shortening.py` (13
+  tests, offline): `_anchored_character_names`'s four cases (no image →
+  nobody anchored, seed matching a portrait → only that one, reference_images
+  → every matched name, continuity tail frame → everyone listed, an
+  unresolvable/never-rendered portrait never anchors); `_panel_subject`
+  shortening only the anchored character while keeping the unanchored one's
+  full description, and reproducing old behavior when no `anchored` set is
+  given at all; and `_panel_video_prompt` integration tests confirming the
+  shortened Subject still passes `veo_guide.verify_prompt`'s five-element
+  check. Full suite now 208 tests (was 195), still fully offline,
+  `py_compile` clean.
 - 2026-07-12 (later) — **`--no-render` now still logs every Gemini/Veo
   request's actual parameters — only the network/SDK call itself is
   disabled.** Direct follow-up to the `gemini_api.log` params work just

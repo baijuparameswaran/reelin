@@ -462,8 +462,21 @@ def _panel_video_prompt(panel: dict, audio_overview: dict | None = None, *,
                         voice_index: dict[str, str] | None = None,
                         no_bg_music: bool = True,
                         room_tone: bool = True,
-                        no_subtitles: bool = True) -> str:
+                        no_subtitles: bool = True,
+                        out: Path | None = None,
+                        seed: Path | None = None,
+                        reference_images: list[Path] | None = None) -> str:
     """Assemble a Veo-aligned prompt from a storyboard panel.
+
+    `out`/`seed`/`reference_images` — the image(s), if any, actually being
+    sent alongside this text in the same Veo call. When supplied (with
+    `out`, required to resolve casting.json's relative `image_path`s), the
+    Subject element shortens to a referential mention for any character
+    already covered by one of those images instead of restating their full
+    locked description in words — see `_anchored_character_names`. Omitted
+    by callers with no image context (e.g. a bare prompt build with no
+    render happening), in which case Subject always writes the full text,
+    matching this function's pre-existing behavior.
 
     Visual half ALWAYS follows this fixed five-part formula, in this order,
     assembled from an explicit dict (see _five_part_veo_prompt):
@@ -546,9 +559,14 @@ def _panel_video_prompt(panel: dict, audio_overview: dict | None = None, *,
     # available (the real render path always supplies it); otherwise fall
     # back to the storyboard agent's own free-text image_prompt.
     if casting_lookup is not None:
+        anchored = (_anchored_character_names(
+                        panel.get("characters_in_frame") or [], casting_lookup,
+                        out, seed, reference_images)
+                    if out is not None else None)
         visual = _five_part_veo_prompt(panel, casting_lookup=casting_lookup,
                                        location_desc=location_desc,
-                                       visual_overview=visual_overview or {})
+                                       visual_overview=visual_overview or {},
+                                       anchored=anchored)
     else:
         visual = (panel.get("image_prompt") or panel.get("action")
                  or panel.get("moment", "")).strip()
@@ -639,21 +657,80 @@ def _panel_cinematography(panel: dict) -> str:
     return ", ".join(b for b in bits if b)
 
 
-def _panel_subject(panel: dict, casting_lookup: dict[str, dict]) -> str:
-    """[Subject] — the locked on-screen look of every character in frame,
-    from casting.json's character.physical_form (falls back to the bare name
-    if casting has no matching entry, e.g. an uncast background figure)."""
+def _panel_subject(panel: dict, casting_lookup: dict[str, dict],
+                   anchored: set[str] | None = None) -> str:
+    """[Subject] — every character in frame. A character already grounded by
+    an actual seed/reference image THIS call (`anchored` — see
+    `_anchored_character_names`) gets a short referential mention instead of
+    the full `physical_form` text: Veo already sees the real image, so
+    restating the description in words is redundant and risks the text and
+    the image disagreeing. A character with no resolvable image this call
+    still gets the full locked description — for them, the text IS the only
+    grounding Veo has (falls back to the bare name if casting has no
+    matching entry at all, e.g. an uncast background figure)."""
     names = panel.get("characters_in_frame") or []
+    anchored = anchored or set()
     subjects: list[str] = []
     for name in names:
         entry = casting_lookup.get(name)
         if not entry:
             subjects.append(name)
             continue
+        if name in anchored:
+            subjects.append(f"{name} (as shown in the reference image)")
+            continue
         ch = entry.get("character", entry)
         form = (ch.get("physical_form") or "").strip()
         subjects.append(f"{name} ({form})" if form else name)
     return " and ".join(subjects)
+
+
+def _anchored_character_names(names: list[str], casting_lookup: dict[str, dict],
+                              out: Path, seed: Path | None,
+                              reference_images: list[Path] | None) -> set[str]:
+    """Which of THIS panel's in-frame characters already have an actual
+    image of themselves attached to this Veo call (`seed` and/or
+    `reference_images`) — so `_panel_subject` can skip re-describing their
+    appearance in words.
+
+    Reverse-maps `seed`/`reference_images` against casting.json's own
+    `image_path` by path identity, rather than threading name<->path
+    pairing through `_frame_char_anchor`/`_resolve_panel_references` — both
+    already resolve the same portraits for this exact call, so comparing
+    resolved paths here reuses that result instead of a second
+    name-resolution pass.
+
+    A `seed` that ISN'T any character's casting portrait is a continuity
+    tail frame (the previous clip's last frame, not a fresh identity
+    anchor) — continuity is only ever used when the in-frame cast hasn't
+    changed from the previous panel (see `_char_set_changed`), so that
+    image is presumed to still show every currently-listed character."""
+    if not names:
+        return set()
+    portrait_paths: dict[str, Path] = {}
+    for name in names:
+        entry = casting_lookup.get(name)
+        if not entry:
+            continue
+        ch = entry.get("character", entry)
+        rel = ch.get("image_path") or entry.get("image_path")
+        if rel:
+            portrait_paths[name] = (out / rel).resolve()
+
+    anchored: set[str] = set()
+    ref_resolved = {p.resolve() for p in (reference_images or [])}
+    for name, p in portrait_paths.items():
+        if p in ref_resolved:
+            anchored.add(name)
+
+    if seed is not None:
+        seed_resolved = seed.resolve()
+        matched = next((n for n, p in portrait_paths.items() if p == seed_resolved), None)
+        if matched:
+            anchored.add(matched)
+        elif not anchored:
+            anchored.update(names)
+    return anchored
 
 
 def _panel_context(panel: dict, location_desc: str, key_props: list | None = None,
@@ -715,7 +792,8 @@ def _panel_style_ambiance(visual_overview: dict) -> str:
 
 
 def _five_part_veo_prompt(panel: dict, *, casting_lookup: dict[str, dict],
-                          location_desc: str, visual_overview: dict) -> str:
+                          location_desc: str, visual_overview: dict,
+                          anchored: set[str] | None = None) -> str:
     """Assemble the VISUAL half of a Veo prompt as an explicit, fixed-order
     dict, per the five-part formula:
       [Cinematography] + [Subject] + [Action] + [Context] + [Style & Ambiance]
@@ -723,10 +801,15 @@ def _five_part_veo_prompt(panel: dict, *, casting_lookup: dict[str, dict],
     scene's visual_overview, the panel's own fields) rather than the
     storyboard agent's free-text image_prompt — the model's own prose has no
     guaranteed internal ordering, so reordering an opaque blob after the fact
-    isn't reliable; reconstructing from structured fields is."""
+    isn't reliable; reconstructing from structured fields is.
+
+    `anchored` — in-frame character names already covered by an actual
+    seed/reference image THIS call (see `_anchored_character_names`); passed
+    straight through to `_panel_subject`, which shortens their Subject text
+    instead of restating what the image already shows."""
     parts: dict[str, str] = {
         "cinematography": _panel_cinematography(panel),
-        "subject": _panel_subject(panel, casting_lookup),
+        "subject": _panel_subject(panel, casting_lookup, anchored),
         "action": (panel.get("action") or panel.get("moment") or "").strip(),
         "context": _panel_context(panel, location_desc, (visual_overview or {}).get("key_props"),
                                   casting_lookup),
@@ -735,9 +818,42 @@ def _five_part_veo_prompt(panel: dict, *, casting_lookup: dict[str, dict],
     return " ".join(f"{v.rstrip('.')}." for v in parts.values() if v.strip())
 
 
+def _panel_relevant_characters(fr: dict) -> list[str]:
+    """Which of this panel's `characters_in_frame` are actually relevant to
+    THIS panel specifically, for the purpose of picking Veo reference/seed
+    images. `characters_in_frame` itself is a HEURISTIC, not a citation —
+    see `storyboard._panel_characters_in_frame`'s own docstring: a wide/
+    establishing/full shot (or a close shot with no dialogue) defaults to
+    the ENTIRE scene cast, not just whoever this specific panel's action
+    actually depicts. Feeding that whole list into reference-image
+    selection means a wide shot could burn Veo's 3-reference budget (or the
+    single-seed slot) on a character technically in the scene but absent
+    from this panel's own description — wasted budget at best, a wrong
+    identity-lock at worst.
+
+    A name counts as relevant here when it appears (word-boundary,
+    case-insensitive) in the panel's own action/moment text, or is a
+    dialogue speaker for this panel. Falls back to the FULL
+    `characters_in_frame` list when nothing matches — a genuine group/
+    establishing shot ("The crowd gathers.") names no one individually, and
+    losing every reference image in that case would be worse than the
+    over-inclusion this is narrowing. Does NOT affect `characters_in_frame`
+    itself or anything else that reads it (Subject text, boundary/continuity
+    tracking) — scoped narrowly to reference/seed image selection only."""
+    names = list(dict.fromkeys(fr.get("characters_in_frame") or []))
+    if not names:
+        return names
+    text = " ".join(b for b in ((fr.get("action") or ""), (fr.get("moment") or "")) if b)
+    speakers = {(d.get("speaker") or "").strip() for d in (fr.get("dialogue") or [])}
+    relevant = [name for name in names
+               if name in speakers or re.search(rf"\b{re.escape(name)}\b", text, re.IGNORECASE)]
+    return relevant if relevant else names
+
+
 def _frame_char_anchor(frame: dict, cast_index: dict, out: Path) -> Path | None:
-    """The casting image of the first in-frame character — Veo identity seed."""
-    for name in frame.get("characters_in_frame", []):
+    """The casting image of the first RELEVANT in-frame character (see
+    `_panel_relevant_characters`) — Veo identity seed."""
+    for name in _panel_relevant_characters(frame):
         rel = cast_index.get(name)
         if rel and (out / rel).exists():
             return out / rel
@@ -790,13 +906,24 @@ def _resolve_panel_references(fr: dict, prev_char_key, cast_index: dict, out: Pa
     threads the second value back in as `prev_char_key` for its NEXT call
     (walking a scene panel-by-panel). A panel with no listed characters at
     all returns the caller's OWN `prev_char_key` unchanged (nothing here to
-    update boundary tracking with, and nothing to reference either)."""
+    update boundary tracking with, and nothing to reference either).
+
+    The actual reference images are picked from `_panel_relevant_characters`
+    (this panel's OWN action/dialogue-grounded subset), not the raw
+    `characters_in_frame` list — so a wide/establishing panel whose
+    `characters_in_frame` defaults to the entire scene cast doesn't burn the
+    3-reference budget on someone technically in the scene but absent from
+    this specific panel. `char_key` (boundary/continuity tracking, handed
+    back to the caller) is still computed from the FULL raw list —
+    deliberately unaffected by this narrowing, since continuity/extend-mode
+    eligibility is about whether the scene's cast context changed, not
+    about which of them this one panel happens to foreground."""
     names = list(dict.fromkeys(fr.get("characters_in_frame") or []))
     char_key = frozenset(names) if names else prev_char_key
     if not _char_set_changed(fr, prev_char_key) or not names:
         return [], char_key
     refs = []
-    for name in names[:3]:                # Veo 3.1 accepts at most 3 reference images
+    for name in _panel_relevant_characters(fr)[:3]:  # Veo 3.1 accepts at most 3
         rel = cast_index.get(name)
         if rel and (out / rel).exists():
             refs.append(out / rel)
@@ -855,7 +982,8 @@ def _render_one_panel(fr: dict, snum, sdir: Path, seed: Path | None,
                                  visual_overview=visual_overview,
                                  voice_index=voice_index,
                                  no_bg_music=no_bg_music, room_tone=room_tone,
-                                 no_subtitles=no_subtitles)
+                                 no_subtitles=no_subtitles,
+                                 out=out, seed=seed, reference_images=reference_images)
     # This panel's own requested clip length, from the storyboard's already-
     # estimated `duration` field (see storyboard._estimate_duration) — each
     # video backend is its own adaptor for what to actually do with the
@@ -1350,24 +1478,29 @@ def rerender_panels(storyboard: dict, casting: dict, out: Path, *,
                 new_end_path = (out / new_end) if new_end else None
                 new_clip = next_result["frame_record"].get("clip")
                 new_clip_path = (out / new_clip) if new_clip else None
-                after_prompt = _panel_video_prompt(after_fr, audio_overview,
-                                                   casting_lookup=casting_lookup,
-                                                   location_desc=location_desc,
-                                                   visual_overview=visual_overview,
-                                                   voice_index=voice_index,
-                                                   no_bg_music=no_bg_music, room_tone=room_tone,
-                                                   no_subtitles=no_subtitles)
                 # after_num's reference_images (if it's itself a boundary
                 # panel) depend on next_panel_num's NEW character set as
                 # prev_char_key — must be included here too, same reasoning
                 # as new_end_path/new_clip_path above: this bookkeeping has
                 # to match what _render_one_panel's own hash formula would
                 # produce for after_num, or a boundary after_num would be
-                # spuriously flagged stale (or not) on a later pass.
+                # spuriously flagged stale (or not) on a later pass. Computed
+                # BEFORE the prompt below, since the prompt's own Subject
+                # text depends on which images (new_end_path/after_refs) are
+                # actually attached — see _anchored_character_names.
                 next_fr = panels_by_num[next_panel_num]
                 next_names = list(dict.fromkeys(next_fr.get("characters_in_frame") or []))
                 next_char_key = frozenset(next_names) if next_names else _prev_char_key(next_panel_num)
                 after_refs, _ = _resolve_panel_references(after_fr, next_char_key, cast_index, out)
+                after_prompt = _panel_video_prompt(after_fr, audio_overview,
+                                                   casting_lookup=casting_lookup,
+                                                   location_desc=location_desc,
+                                                   visual_overview=visual_overview,
+                                                   voice_index=voice_index,
+                                                   no_bg_music=no_bg_music, room_tone=room_tone,
+                                                   no_subtitles=no_subtitles,
+                                                   out=out, seed=new_end_path,
+                                                   reference_images=after_refs or None)
                 # Same extend-eligibility rule as elsewhere: if after_num's
                 # own cast differs from next_panel_num's, a full re-chain
                 # would NOT have extended from new_clip_path either — must
