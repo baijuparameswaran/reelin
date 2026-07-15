@@ -222,6 +222,68 @@
   boundary panel.
 
 ## Session log
+- 2026-07-14 (later 2) — **`storyboard._panel_characters_in_frame` itself
+  now narrows a panel's characters down to whoever that panel's own action/
+  dialogue text actually names, instead of defaulting to the ENTIRE scene
+  cast for any wide/establishing/full shot — the SOURCE-level fix, not just
+  the render-time narrowing added in the entry just below.** Follow-up
+  request: "can storyboard generation be prudent and invoke interaction
+  with the model to identify what all characters make up the shot and
+  include only the needed ones... make sure only the characters required
+  in a panel are included in the rendering prompt... this might be done as
+  part of storyboard generation or actual prompt for video rendering."
+  Asked directly whether to add a real LLM call per panel for this (more
+  judgment, but reverses storyboard's deliberately zero-LLM-by-default
+  build path — see AGENTS.md's "Sandwiched prompt"/storyboard notes and the
+  module's own "BUILD PATH" docstring) or extend the same deterministic
+  text-matching already built for reference-image selection — user chose
+  the deterministic route.
+
+  Moved the SAME word-boundary/dialogue-speaker matching logic
+  (`pipeline._panel_relevant_characters`, from the entry below) into
+  `storyboard._panel_characters_in_frame` itself: a wide/establishing/full
+  shot (or now also a close shot with NO dialogue — previously always
+  defaulted to the full cast in that case too) narrows to characters
+  actually named in the panel's `action` text or who speak in it, falling
+  back to the full scene cast only when nothing matches (a genuine group
+  shot like "The crowd gathers." names no one individually). A close shot
+  WITH dialogue still prioritizes the speaker unchanged. `_build_panel`
+  reordered to compute `action` before calling `_panel_characters_in_frame`
+  (previously computed after, so the field it now depends on didn't exist
+  yet at that call site) and threads it through as a new `action=""`
+  keyword param.
+
+  This fixes `characters_in_frame` at the SOURCE, so every downstream
+  consumer benefits automatically — not just Veo reference images (already
+  fixed at render time in the entry below) but also Subject text
+  enumeration and dialogue-attribution context, which the render-time-only
+  fix couldn't reach since it only narrowed which images got sent, not the
+  field itself. `pipeline._panel_relevant_characters` (render-time) stays
+  in place as harmless defense-in-depth — for a freshly-generated
+  storyboard it now mostly re-derives the same already-narrowed list
+  (a no-op), but it still protects an OLDER storyboard.json checkpoint
+  generated before this fix, whose `characters_in_frame` may still be
+  over-inclusive.
+
+  Also addressed the "highlight the intended action" half of the request:
+  traced `_five_part_veo_prompt`'s Action element
+  (`panel.get("action") or panel.get("moment")`) — already a distinct,
+  always-included one of the five formula parts, and now more meaningfully
+  aligned with Subject since the (also narrowed) character list is derived
+  from that same action text. No separate code change needed there — it
+  was already structurally correct, just now consistent with an accurate
+  character list instead of an inflated one.
+
+  Verified via a new `tests/test_storyboard_characters_in_frame.py` (9
+  tests, offline, zero LLM calls): the heuristic directly (wide-shot
+  narrowing, group-shot fallback, no-action-text fallback, close-shot
+  dialogue priority preserved, close-shot-no-dialogue now also narrows,
+  dialogue-speaker relevance for a wide shot, list-order preservation,
+  word-boundary correctness); plus a full `_build_scene_board` integration
+  test (a 4-character scene cast, one WS panel whose action only names two
+  of them) confirming the narrowing actually reaches the final panel
+  output, not just the isolated helper. Full suite now 228 tests (was
+  219), still fully offline, `py_compile` clean.
 - 2026-07-14 (later) — **Veo reference/seed images for a panel are now
   scoped to that panel's own action/dialogue-relevant characters, not the
   raw `characters_in_frame` list.** Direct follow-up request: "for each

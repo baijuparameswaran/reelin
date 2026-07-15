@@ -560,25 +560,43 @@ def _panel_dialogue(scr: dict) -> list[dict]:
     return dialogue
 
 
-def _panel_characters_in_frame(cam: dict, dialogue: list[dict], scene_characters: list) -> list:
+def _panel_characters_in_frame(cam: dict, dialogue: list[dict], scene_characters: list,
+                               action: str = "") -> list:
     """HEURISTIC, not a citation — no artifact actually specifies who's
-    visually in a given shot. For a close-shot-family panel (CU/ECU/MCU/OTS/
-    POV) with dialogue, assume it's on whoever's speaking (a close-up
-    typically follows the speaker or their reaction). Otherwise — a wide/
-    establishing/full shot, or a close shot with no dialogue — default to
-    everyone present in the scene, since narrower shots are the exception,
-    not the rule."""
+    visually in a given shot. Deterministic (no LLM — see the module
+    docstring's "BUILD PATH" section on why the storyboard build stays
+    LLM-free by default), narrowed down through two passes:
+
+    1. A close-shot-family panel (CU/ECU/MCU/OTS/POV) WITH dialogue: assume
+       it's on whoever's speaking (a close-up typically follows the speaker
+       or their reaction) — takes priority over the text match below, since
+       dialogue attribution is a stronger signal than a name merely
+       appearing in the action text.
+    2. Otherwise (a wide/establishing/full shot, a 2-shot/insert, or a close
+       shot with no dialogue): narrow the scene's cast down to whoever this
+       panel's own `action` text actually names (word-boundary,
+       case-insensitive) or speaks in it. Without this, EVERY wide/
+       establishing panel defaulted to the entire scene cast regardless of
+       who that panel's action actually depicts — a real gap (see
+       PROGRESS.md's 2026-07-14 session log): downstream, that inflated
+       list drove Subject text, dialogue framing, AND Veo reference-image
+       selection for a shot that might only show one or two of them.
+       Falls back to the FULL scene cast when nothing in the action text
+       names anyone individually — a genuine group/establishing shot ("The
+       crowd gathers.") depicts everyone present, and narrowing to nobody
+       would be worse than the over-inclusion this fixes."""
     shot_type = (cam.get("type") or "").upper()
-    if shot_type in _CLOSE_SHOT_TYPES:
-        speakers, seen = [], set()
-        for d in dialogue:
-            sp = d.get("speaker")
-            if sp and sp not in seen:
-                seen.add(sp)
-                speakers.append(sp)
-        if speakers:
-            return speakers
-    return list(scene_characters)
+    speakers, seen = [], set()
+    for d in dialogue:
+        sp = d.get("speaker")
+        if sp and sp not in seen:
+            seen.add(sp)
+            speakers.append(sp)
+    if shot_type in _CLOSE_SHOT_TYPES and speakers:
+        return speakers
+    relevant = [name for name in scene_characters
+               if name in speakers or re.search(rf"\b{re.escape(name)}\b", action, re.IGNORECASE)]
+    return relevant if relevant else list(scene_characters)
 
 
 def _panel_sound(cam: dict, scr: dict, audio: dict) -> str:
@@ -656,8 +674,9 @@ def _build_panel(panel_num: int, cam: dict, scr: dict, bundle: dict, is_last: bo
     location_desc = (bundle.get("location") or {}).get("visual_prompt", "")
 
     dialogue = _panel_dialogue(scr)
-    characters_in_frame = _panel_characters_in_frame(cam, dialogue, bundle.get("characters_in_scene", []))
     action = scr.get("description") or cam.get("moment") or ""
+    characters_in_frame = _panel_characters_in_frame(
+        cam, dialogue, bundle.get("characters_in_scene", []), action)
     transition = (bundle.get("camera", {}).get("transition_to_next") if is_last else "") or "CUT TO"
 
     return {
