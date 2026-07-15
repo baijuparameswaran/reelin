@@ -221,8 +221,15 @@ class TestReviseOneScenesDeletion(unittest.TestCase):
                 run_stage_calls.append((name, revise_keys))
                 return existing if existing is not None else {}
 
+            # A non-empty added/changed scene set (scene 4 here) reaches
+            # revision_agent.suggest_ripple_scenes — a real LLM call
+            # (agent_profiles.revision: quality_high) that must be mocked
+            # like every other revise-flow test does, or this test silently
+            # blocks on a real Ollama generation instead of staying offline.
             with mock.patch("reel.stages.run_stage", side_effect=fake_run_stage), \
-                 mock.patch("reel.pipeline._assemble_movie", return_value=None):
+                 mock.patch("reel.pipeline._assemble_movie", return_value=None), \
+                 mock.patch("reel.agents.revision.suggest_ripple_scenes",
+                            return_value={"suggested_scenes": [], "confidence": "low"}):
                 applied = cli._revise_one("scenes", out, edited_override=edited_scenes,
                                           auto_confirm=True, render_images=True, render_video=True)
 
@@ -250,8 +257,13 @@ class TestReviseOneScenesDeletion(unittest.TestCase):
             ]}
 
             buf = io.StringIO()
+            # See test_adding_a_scene_scopes_the_new_number_downstream's
+            # comment above — scene 4 is "added", so this reaches the real
+            # suggest_ripple_scenes LLM call unless mocked.
             with mock.patch("reel.stages.run_stage", return_value={}), \
                  mock.patch("reel.pipeline._assemble_movie", return_value=None), \
+                 mock.patch("reel.agents.revision.suggest_ripple_scenes",
+                            return_value={"suggested_scenes": [], "confidence": "low"}), \
                  redirect_stdout(buf):
                 applied = cli._revise_one("scenes", out, edited_override=edited_scenes,
                                           auto_confirm=True, render_images=True, render_video=True)

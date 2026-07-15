@@ -222,6 +222,173 @@
   boundary panel.
 
 ## Session log
+- 2026-07-15 — **Acted on the architecture review's two open asks: brought
+  `fountain.py`'s standalone `render` path to parity with the main
+  pipeline's prompt construction, and completed the review's three
+  "structural (pays down compounding debt)" recommendations.** Direct
+  follow-up to the 2026-07-14 architecture review (see that entry's
+  findings). Four pieces of work, plus one real bug found and fixed along
+  the way while verifying none of it broke anything.
+
+  **1. Extracted `reel/veo_prompt.py`** — the pure five-part-formula/
+  Subject-anchoring/relevance-filtering/audio-cue-assembly logic
+  (`panel_cinematography`, `panel_subject`, `anchored_character_names`,
+  `panel_context`, `panel_style_ambiance`, `five_part_veo_prompt`,
+  `panel_relevant_characters`, `panel_video_prompt`, `panel_dialogue_lines`,
+  `VEO_FOCUS`/`VEO_SHOT_LABEL`) out of `pipeline.py` into its own
+  no-render-loop-state module. `pipeline.py` now imports and calls it
+  (`veo_prompt.panel_video_prompt(...)` etc.) instead of defining these
+  itself — `_frame_char_anchor`/`_char_set_changed`/`_resolve_panel_references`
+  (genuinely render-loop/filesystem-state logic, not prompt text) stayed in
+  `pipeline.py`, now calling `veo_prompt.panel_relevant_characters`.
+  **One splicing mistake caught immediately by the test suite**: the first
+  extraction pass accidentally deleted `_write_scene_prompt_log` too (it
+  fell inside the line range being removed but was never meant to move) —
+  caught by a `NameError` in `test_multi_character_references.py`, fixed by
+  restoring the function to `pipeline.py`. `reel/veo_guide.py`'s
+  `_CODE_LOCATIONS` tracking list updated to point at the new module.
+
+  **2. Rewrote `fountain.to_storyboard` for genuine shape parity** —
+  investigating "parity" turned out to reveal a bigger gap than the review
+  estimated. `cli._render_video` (the standalone `render` command) already
+  fed its board through the SAME shared `pipeline._render_scene_frames`
+  the main pipeline uses — so the five-part formula was never actually
+  duplicated where it mattered. The real bug: `fountain.to_storyboard`'s
+  board was missing several fields that shared formula reads
+  (`header.location`, `visual_overview`, `audio_overview`, structured
+  per-panel `dialogue`, `camera_angle`/`camera_movement`/`lens`/
+  `composition`), and its character resolution (`_resolve_character`)
+  only ever picked ONE character per beat — so a standalone render's
+  actual Veo prompt was silently much sparser than a full-pipeline run's
+  (no location grounding, no color/lighting/mood, dialogue text
+  discarded, never more than one character referenced). Fixed by
+  reworking `to_storyboard` to build a board shape-compatible with
+  `storyboard.py`'s own deterministic build: `_beat_characters` (multi-
+  character discovery via the same action-text/dialogue-speaker matching
+  this project already uses elsewhere), `_scene_context` (location/
+  visual_overview/audio_overview, field-mapped identically to
+  `storyboard._build_scene_board`'s own art/audio → visual_overview/
+  audio_overview mapping — verified by reading that mapping directly
+  rather than guessing), `_distribute_dialogue` (proportional dialogue-to-
+  beat spreading, the same technique `_camera` already uses for shot
+  distribution — documented as an approximation, since `parse()` itself
+  discards the original action/dialogue interleaving; a real fix would
+  need `parse()` reworked, out of scope here), and `_panel_sound`
+  (mirrors `storyboard._panel_sound`'s ambient/sfx construction). Each
+  panel's `image_prompt` preview is now built via the SAME shared
+  `veo_prompt.panel_video_prompt` the real render uses, so
+  `output/storyboard.json` is a truthful preview, not a separate,
+  staler approximation. `cli._render_video` now also loads `scenes.json`
+  (new `scenes_json` param) for authoritative per-scene `location`,
+  falling back to slugline extraction when absent — this command's own
+  "works purely off existing artifacts" contract stays intact.
+
+  **A real bug found via a full end-to-end smoke test** (deliberately
+  driving the real `pipeline._render_scene_frames` against a
+  fountain-built board with a mocked `i2v.generate_clip`, not just unit
+  tests of the isolated helpers): Fountain speaker cues are conventionally
+  ALL CAPS ("ALICE") while casting.json names are Title Case ("Alice") —
+  a case-sensitive comparison wrongly marked Alice's own dialogue line as
+  off-screen (O.S.) in the rendered prompt, and would have silently
+  failed her `characters.json` voice-index lookup too. Fixed with a new
+  `_canonical_name(spk, names)` helper (case-insensitive match, resolved
+  to casting.json's own casing) used both for `characters_in_frame`
+  membership and the dialogue `speaker`/`modifier` fields — since
+  `casting_lookup.get(name)` and `voice_index.get(speaker)` elsewhere in
+  the render path both do exact-string lookups keyed by casting.json's
+  casing.
+
+  Verified via `tests/test_fountain_to_storyboard.py` (24 tests, new file
+  — this module had ZERO prior test coverage despite being a real render
+  path) plus a manual end-to-end script (mocked `i2v.generate_clip`,
+  asserting the actual prompt string reaching it contains location/
+  visual_overview/multi-character reference content and — after the
+  case-sensitivity fix — correctly marks Alice on-screen).
+
+  **3. Config schema validation (`llm.validate_config`)** — a lightweight,
+  dependency-free shape check for `config/models.yaml`: unknown top-level/
+  one-level-deep-nested keys (catches a typo like `videos:` or
+  `mutli_character_references`) and a wrong type on a handful of
+  consequential fields (e.g. `hitl.enabled: "true"` — a truthy STRING that
+  a naive `.get(..., True)` check wouldn't even flag). Deliberately NOT a
+  full JSON-schema — this file's own established philosophy is "kept
+  intentionally minimal," so a schema library dependency for one config
+  file would be disproportionate. Never blocks anything — every
+  individual `.get(key, default)` read elsewhere in this codebase already
+  degrades gracefully regardless; this only makes an operator's typo
+  LOUD instead of silent. Wired into `cli.main()`'s very first line
+  (`_print_config_warnings()`, before any subcommand dispatch, so every
+  entry point gets it) — prints nothing when config validates clean
+  (confirmed against the real, checked-in `config/models.yaml`).
+  `tests/test_config_validation.py` (14 tests) + coverage in the new
+  CLI wiring test file below.
+
+  **4. Spend estimation (`reel/spend.py`)** — aggregates real-money
+  estimated cost from `gemini_api.log` (the persistent per-call record
+  `gemini._log_call` already writes, with full request params). Nothing
+  previously turned that log into an actual dollar figure, despite the
+  scenes agent's own prompting explicitly steering toward FEWER scenes
+  specifically to control the cost those calls represent ("MINIMIZE SCENE
+  COUNT") — an operator had no way to see the dollar consequence of that
+  tradeoff. Pricing is a live-fetched snapshot (ai.google.dev/gemini-api/
+  docs/pricing, fetched 2026-07-14 — not guessed, since a wrong guess here
+  would actively mislead about real spend) of each model's STANDARD tier
+  at this project's configured 720p video resolution — explicitly
+  documented as an ESTIMATE, not a reconciled bill. A model with no price
+  on file is counted separately as `unpriced` rather than silently
+  omitted or guessed at. `parse_log_lines` deliberately does NOT split on
+  the log's own double-space field delimiter for the `params=` JSON blob
+  — a Veo prompt can legitimately contain a literal double-space in its
+  text, which would truncate a naive split-based parse; uses
+  `json.JSONDecoder.raw_decode` instead, which parses by JSON syntax and
+  is immune to that. Wired in three places: `_print_spend_summary`
+  (best-effort, never raises) after every full pipeline run (success,
+  pause, interrupt, AND the exception path — spend can happen before a
+  crash) and after the standalone `render` command; a new `python -m
+  reel.cli spend [--out DIR]` subcommand for on-demand checking at any
+  time, since the log accumulates across every `--resume`/`revise` round
+  against the same `--out`, not just the most recent invocation.
+  `tests/test_spend.py` (20 tests, including the double-space-in-JSON
+  parsing edge case) + `tests/test_cli_spend_and_config_warnings.py`
+  (8 tests covering both this and item 3's CLI wiring, best-effort/
+  never-raises behavior included).
+
+  **Bonus: found and fixed a real, actively-manifesting bug while
+  verifying all of the above didn't break anything** — the full test
+  suite intermittently took 90-290+ seconds (vs. its normal ~1s) with
+  near-zero CPU time logged, which turned out to be `ollama ps` showing a
+  genuinely active `qwen3:30b` (the `agent_profiles.revision: quality_high`
+  tier) inference running for real. Traced to `tests/
+  test_revise_scene_delete_add.py`'s two scene-ADDITION tests
+  (`test_adding_a_scene_scopes_the_new_number_downstream`,
+  `test_evaluation_and_per_stage_printouts`): `cli._revise_one`'s
+  `_SCENE_KEYED_STAGES` branch calls `revision_agent.suggest_ripple_scenes`
+  (a real LLM call) whenever a scene-keyed edit's `changed_scene_numbers`
+  is non-empty — UNCONDITIONALLY, regardless of `auto_confirm` (that flag
+  only skips the FOLLOW-UP interactive accept/reject prompt, not the call
+  itself) — and this file, unlike every other `test_revise_*.py` file,
+  never mocked it. A scene ADDITION always has a non-empty
+  `changed_scene_numbers` (the new number itself), so both tests reliably
+  hit the real call; the file's two scene-DELETION-only tests correctly
+  stayed offline, since a pure deletion leaves `changed_scene_numbers`
+  empty (nothing "changed" or "added") and the ripple check is gated on
+  exactly that. Pinpointed by bisecting the test suite (alphabetical
+  file-range splits, then per-test timing with `ollama ps` polled before/
+  after) down to the exact two tests, confirmed by watching `ollama ps`
+  show `qwen3:30b` loaded and actively generating (69%/31% CPU/GPU) only
+  during those two tests' execution window. Fixed by adding the same
+  `mock.patch("reel.agents.revision.suggest_ripple_scenes", return_value=
+  {"suggested_scenes": [], "confidence": "low"})` pattern every other
+  revise-flow test already uses. Not something this session introduced —
+  a pre-existing gap in a test file from an earlier session that had
+  apparently never actually been exercised end-to-end since
+  `agent_profiles.revision` was bumped to `quality_high`. Full suite
+  confirmed clean afterward: 294 tests in ~1.1s, `ollama ps` empty
+  throughout.
+
+  Full suite now 294 tests (was 228 at the start of this entry — +66:
+  24 fountain, 14 config validation, 20 spend, 8 CLI wiring), still fully
+  offline, `py_compile` clean across every touched file.
 - 2026-07-14 (later 2) — **`storyboard._panel_characters_in_frame` itself
   now narrows a panel's characters down to whoever that panel's own action/
   dialogue text actually names, instead of defaulting to the ENTIRE scene

@@ -172,6 +172,141 @@ def host() -> str:
     return config().get("ollama_host", "http://localhost:11434")
 
 
+# ── config schema validation ─────────────────────────────────────────────────
+# A lightweight, dependency-free shape check for config/models.yaml — NOT a
+# full JSON-schema (this file's own philosophy is "kept intentionally
+# minimal," PyYAML is already the sole non-stdlib runtime dep, so a schema
+# library is disproportionate for one config file). Every block in
+# models.yaml is read elsewhere in this codebase via defensive `.get(key,
+# default)` calls, which is robust to a MISSING key but silent on a
+# MISSPELLED one — an operator typo (`mutli_character_references`,
+# `videos:` instead of `video:`) currently just silently falls back to the
+# default everywhere it's read, with no signal anything was wrong. This
+# only catches that class of mistake: unknown top-level/nested keys (one
+# level deep — deep enough for the flat-ish blocks this file actually has)
+# and a handful of the most consequential fields' basic types. It never
+# blocks anything — `validate_config` returns warnings, callers print and
+# continue, matching this codebase's established best-effort philosophy
+# everywhere else a config value is read.
+_KNOWN_TOP_KEYS = {
+    "ollama_host", "hitl", "image", "video", "fidelity", "genre", "moodboard",
+    "revision", "duration", "runtime", "min_ollama_version", "profiles",
+    "agent_profiles",
+}
+
+# Known sub-keys for each dict-valued top-level block, one level deep —
+# matches exactly the keys config/models.yaml itself documents and the keys
+# actually `.get()`-read elsewhere in this codebase (see ARCHITECTURE.md's
+# `image`/`video`/`fidelity`/`genre`/`moodboard`/`revision`/`duration`/
+# `runtime` blocks). `video.audio`/`video.overlays` are nested one level
+# further — checked separately below rather than folded into this flat map,
+# since this validator is deliberately one-level-deep, not fully recursive.
+_KNOWN_SUB_KEYS: dict[str, set[str]] = {
+    "hitl": {"enabled", "timeout_seconds"},
+    "image": {"enabled", "backend", "open_backend", "model", "timeout_seconds",
+             "host", "steps", "size", "width", "height", "guidance_scale",
+             "negative_prompt", "style_suffix", "img2img_strength"},
+    "video": {"enabled", "backend", "open_backend", "model", "aspect_ratio",
+             "resolution", "continuity", "continuity_mode",
+             "multi_character_references", "style_suffix", "poll_seconds",
+             "timeout_seconds", "audio", "pipeline_class", "host", "endpoint",
+             "seconds", "fps", "size", "overlays"},
+    "fidelity": {"per_stage", "min_score"},
+    "genre": {"value", "steer", "enforce", "min_score"},
+    "moodboard": {"enabled", "steer"},
+    "revision": {"identity_drift_threshold"},
+    "duration": {"target_seconds"},
+    "runtime": {"max_parallel_agents", "request_timeout_seconds", "think",
+               "num_gpu", "escalate_after", "escalate_score_gap"},
+}
+_KNOWN_VIDEO_AUDIO_KEYS = {"no_background_music", "room_tone", "no_subtitles"}
+_KNOWN_VIDEO_OVERLAY_KEYS = {"enabled", "subtitles", "shot_info", "font_size",
+                            "subtitle_color", "label_color"}
+
+# A handful of the most consequential fields' expected Python type(s) — not
+# exhaustive (this validator's whole point is catching typos/shape drift
+# cheaply, not replacing a real schema), just the fields most likely to
+# silently misbehave if given the wrong type via a YAML quoting mistake
+# (e.g. `enabled: "true"` — a non-empty STRING, which is truthy in Python,
+# so a `.get("enabled", True)` check wouldn't even flag it as falsy).
+_KNOWN_TYPES: dict[tuple[str, str], type | tuple[type, ...]] = {
+    ("hitl", "enabled"): bool,
+    ("hitl", "timeout_seconds"): (int, float),
+    ("image", "enabled"): bool,
+    ("video", "enabled"): bool,
+    ("video", "continuity"): bool,
+    ("video", "multi_character_references"): bool,
+    ("fidelity", "per_stage"): bool,
+    ("fidelity", "min_score"): (int, float),
+    ("genre", "steer"): bool,
+    ("genre", "enforce"): bool,
+    ("genre", "min_score"): (int, float),
+    ("moodboard", "enabled"): bool,
+    ("moodboard", "steer"): bool,
+    ("duration", "target_seconds"): (int, float),
+    ("runtime", "max_parallel_agents"): int,
+    ("runtime", "think"): bool,
+}
+
+
+def validate_config(cfg: dict | None = None) -> list[str]:
+    """Return a list of human-readable warnings for likely config mistakes
+    in `cfg` (defaults to the real `config()`) — unknown top-level or
+    nested keys, and a wrong type on the handful of fields in
+    `_KNOWN_TYPES`. Never raises; a malformed `cfg` (not even a dict) just
+    yields one warning describing that, rather than crashing whatever
+    caller invoked this as a startup sanity check."""
+    cfg = config() if cfg is None else cfg
+    warnings: list[str] = []
+    if not isinstance(cfg, dict):
+        return [f"config root is not a mapping (got {type(cfg).__name__}) — models.yaml may be malformed"]
+
+    for key in cfg:
+        if key not in _KNOWN_TOP_KEYS:
+            warnings.append(f"unknown top-level config key '{key}' — check for a typo")
+
+    for block, known in _KNOWN_SUB_KEYS.items():
+        value = cfg.get(block)
+        if value is None:
+            continue
+        if not isinstance(value, dict):
+            warnings.append(f"config '{block}' should be a mapping (got {type(value).__name__})")
+            continue
+        for sub in value:
+            if sub not in known:
+                warnings.append(f"unknown config key '{block}.{sub}' — check for a typo")
+
+    video = cfg.get("video")
+    if isinstance(video, dict):
+        for nested_block, known in (("audio", _KNOWN_VIDEO_AUDIO_KEYS),
+                                    ("overlays", _KNOWN_VIDEO_OVERLAY_KEYS)):
+            nested = video.get(nested_block)
+            if isinstance(nested, dict):
+                for sub in nested:
+                    if sub not in known:
+                        warnings.append(f"unknown config key 'video.{nested_block}.{sub}' — check for a typo")
+
+    for (block, sub), expected in _KNOWN_TYPES.items():
+        value = cfg.get(block, {})
+        if not isinstance(value, dict) or sub not in value:
+            continue
+        if not isinstance(value[sub], expected):
+            expected_name = (expected.__name__ if isinstance(expected, type)
+                            else "/".join(t.__name__ for t in expected))
+            warnings.append(f"config '{block}.{sub}' should be {expected_name} "
+                           f"(got {type(value[sub]).__name__}: {value[sub]!r})")
+
+    agent_profiles = cfg.get("agent_profiles")
+    profiles = cfg.get("profiles")
+    if isinstance(agent_profiles, dict) and isinstance(profiles, dict):
+        for stage, tier in agent_profiles.items():
+            if tier not in profiles:
+                warnings.append(f"agent_profiles.{stage} references undefined profile '{tier}' "
+                               f"— known profiles: {sorted(profiles)}")
+
+    return warnings
+
+
 # ── creative direction (e.g. genre steering) ─────────────────────────────────
 # A process-wide directive prepended to the system message of *steered* generations
 # so every creative stage leans the same way (set by the pipeline from the genre

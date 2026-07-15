@@ -269,7 +269,12 @@ def _render_video(argv: list[str]) -> int:
 
     By default renders the WHOLE drafted story — every scene the screenplay drafted
     and every action beat within it (camera grammar from cinematography.json) — no
-    artificial caps. Works purely off existing artifacts; no LLM stage runs."""
+    artificial caps. Works purely off existing artifacts; no LLM stage runs.
+    Also loads scenes.json (if present) for each scene's authoritative
+    `location` — see `fountain.to_storyboard`'s `scenes_json` param; this
+    command still runs without it (degraded location detection), since its
+    own contract is "works purely off existing artifacts" and scenes.json
+    isn't a hard requirement, just an accuracy improvement when available."""
     import json
     import shutil
     from pathlib import Path
@@ -308,9 +313,10 @@ def _render_video(argv: list[str]) -> int:
         _load_json(out / "casting.json"),
         out, max_scenes=a.max_scenes, max_shots=a.max_shots,
         cinematography=_load_json(out / "cinematography.json"),
+        scenes_json=_load_json(out / "scenes.json"),
     )
     (out / "storyboard.json").write_text(json.dumps(board, ensure_ascii=False, indent=2), encoding="utf-8")
-    nshots = sum(len(s["frames"]) for s in board["storyboard"])
+    nshots = sum(len(s["panels"]) for s in board["storyboard"])
     print(f"[reel] render plan: {len(board['storyboard'])} scene(s), {nshots} shot(s) "
           f"(story-defined, camera-directed from cinematography.json) → {out}/storyboard.json")
 
@@ -327,6 +333,7 @@ def _render_video(argv: list[str]) -> int:
     print(f"[reel] rendered {manifest.get('clips', 0)} new clip(s) → {out}/video/")
     if manifest.get("movie"):
         print(f"[reel] movie → {out}/{manifest['movie']}")
+    _print_spend_summary(out)
     return 0
 
 
@@ -1519,6 +1526,20 @@ def _revise_loop(out, *, render_images: bool = False, render_video: bool = False
              "(completed stages this round stay saved).")
 
 
+def _print_spend_summary(out) -> None:
+    """Print an estimated $ spend readout from `<out>/logs/gemini_api.log`
+    (see `spend.py`'s module docstring for the pricing-snapshot caveat).
+    Best-effort — never raises, since this is purely informational and must
+    never be the reason a run's actual completion/error path fails."""
+    from . import spend as _spend
+    try:
+        result = _spend.estimate_run_cost(out)
+        if result["priced_calls"] or result["unpriced_calls"]:
+            print(f"[reel] estimated spend this run: {_spend.format_summary(result)}")
+    except Exception:
+        pass
+
+
 def _offer_revise(out) -> None:
     """Right after a full pipeline run completes (video render included, if
     enabled), offer to jump straight into the revision loop without a
@@ -1583,12 +1604,58 @@ def _revise(argv: list[str]) -> int:
     return 0
 
 
+def _print_config_warnings() -> None:
+    """Best-effort startup sanity check for config/models.yaml — see
+    `llm.validate_config`'s own docstring for what it catches (unknown
+    keys, a wrong type on a handful of consequential fields) and why it's
+    deliberately shallow rather than a full schema. Never blocks — a
+    warning here is a hint to check for a typo, not an error; every
+    individual `.get(key, default)` call downstream already degrades
+    gracefully on its own regardless of what this prints."""
+    try:
+        warnings = llm.validate_config()
+    except Exception:
+        return  # config() itself failing surfaces its own clear error later
+    if warnings:
+        print("[reel] config/models.yaml — possible issues:")
+        for w in warnings:
+            print(f"  ⚠ {w}")
+
+
+def _cmd_spend(argv: list[str]) -> int:
+    """`python -m reel.cli spend [--out DIR]` — print an estimated $ spend
+    breakdown from `<out>/logs/gemini_api.log` at any time, not just right
+    after a run — the log accumulates across every `--resume`/`revise`
+    round against the same `--out`, so this reflects the run's TOTAL spend
+    to date, not just the most recent invocation. See `spend.py`'s module
+    docstring for the pricing-snapshot caveat (an estimate, not a
+    reconciled bill)."""
+    from pathlib import Path
+    from . import spend as _spend
+
+    ap = argparse.ArgumentParser(prog="reel spend",
+                                 description="estimate Gemini/Veo API spend from gemini_api.log")
+    ap.add_argument("--out", default="output")
+    a = ap.parse_args(argv)
+    out = Path(a.out)
+    result = _spend.estimate_run_cost(out)
+    print(f"[reel] {_spend.format_summary(result)}")
+    if result["by_model"]:
+        print("[reel] by model:")
+        for model, bucket in sorted(result["by_model"].items(), key=lambda kv: -kv[1]["usd"]):
+            print(f"    {model}: ~${bucket['usd']:.4f} ({bucket['calls']} call(s))")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     from pathlib import Path
 
+    _print_config_warnings()
     argv = sys.argv[1:] if argv is None else argv
     if argv and argv[0] == "stages":
         return _list_stages()
+    if argv and argv[0] == "spend":
+        return _cmd_spend(argv[1:])
     if argv and argv[0] == "stage":
         return _run_stage(argv[1:])
     if argv and argv[0] == "render":
@@ -1707,15 +1774,19 @@ def main(argv: list[str] | None = None) -> int:
         if not render:
             resume_cmd += " --no-render"
         print(f"[reel] resume:  {resume_cmd}")
+        _print_spend_summary(args.out)
         return 0
     except KeyboardInterrupt:
         session.finish(args.out, "paused")
         print("\n[reel] interrupted. Completed stages are saved; "
               "resume with --resume.")
+        _print_spend_summary(args.out)
         return 130
     except Exception:
         session.finish(args.out, "failed")
+        _print_spend_summary(args.out)
         raise
+    _print_spend_summary(args.out)
     _offer_revise(Path(args.out))
     return 0
 

@@ -25,12 +25,26 @@
   pre-flight prompt verifier via `veo_guide.verify_prompt`), `veo_guide.py` (Veo
   prompting guide snapshot + staleness check + `verify_prompt` — checks every
   prompt has a Subject/Action/Style/Camera/Focus-ish keyword present (order-
-  agnostic; distinct from `pipeline.py`'s five-PART assembly ORDER, see
+  agnostic; distinct from `veo_prompt.py`'s five-PART assembly ORDER, see
   Conventions & decisions below) before Gemini API submission; manual refresh
-  via `python -m reel.cli veo-sync`), `cli.py` (entry), `manifest.py` (model list
+  via `python -m reel.cli veo-sync`), `veo_prompt.py` (**the actual Veo prompt
+  builder** — the five-part `[Cinematography]+[Subject]+[Action]+[Context]+
+  [Style & Ambiance]` formula, Subject-anchoring for an attached seed/
+  reference image, action/dialogue-grounded character relevance filtering,
+  and audio-cue assembly; pure, no render-loop/filesystem state — shared by
+  `pipeline.py`'s main render path AND `fountain.py`'s standalone render
+  path, extracted so the two entry points can't silently drift apart; see
+  Conventions & decisions below), `cli.py` (entry), `manifest.py` (model list
   for the updater), `fountain.py` (Fountain parser + screenplay→storyboard/shot
-  builder for rendering; `to_storyboard` folds cinematography camera grammar into
-  Veo-aligned prompts using strict element ordering and Veo vocabulary),
+  builder for the standalone `render` command; `to_storyboard` builds a board
+  shape-compatible with `storyboard.py`'s own deterministic build — location/
+  visual_overview/audio_overview/structured dialogue/multi-character
+  `characters_in_frame` — so it feeds the SAME shared `pipeline.
+  _render_scene_frames`/`veo_prompt.py` formula the main pipeline uses, not a
+  separate approximation; see Conventions & decisions below), `spend.py`
+  (**estimated $ spend** from `gemini_api.log` — per-model/per-kind pricing
+  snapshot, `estimate_run_cost`/`format_summary`; `python -m reel.cli spend`
+  and printed after every render; see Conventions & decisions below),
   `session.py` (**session identity** — one story-to-video run's id, persisted to
   `output/session.json`; see Conventions & decisions below), `artifact_diff.py`
   (**deterministic keyed-list diff** — no LLM; compares two versions of a
@@ -47,7 +61,8 @@
   knobs, `genre` block (value/steer/enforce/min_score), `moodboard` block
   (enabled/steer), `fidelity` block, `image` block (backend/model — default
   Gemini), `video` block (image-to-video backend/model — default Gemini Veo),
-  runtime knobs.
+  runtime knobs. Validated at every CLI invocation (best-effort, non-blocking)
+  by `llm.validate_config` — see Conventions & decisions below.
 - **Gemini API key** (for image/video): read from env `GEMINIAPIKEY` (or
   `GEMINI_API_KEY`/`GOOGLE_API_KEY`). Without it, image/video stages no-op
   gracefully with a hint; the text pipeline is unaffected.
@@ -276,9 +291,69 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
   camera-directed render plan from `screenplay.fountain`+`cinematography.json` (every
   drafted scene, every shot — NO caps by default) via `fountain.to_storyboard`
   (cinematography camera grammar folded into each Veo prompt), then renders clips
-  with `i2v` — no LLM stage runs. `gemini.generate_video` retries HTTP 429/5xx AND
+  with `i2v` via the SAME `pipeline._render_scene_frames` the main pipeline
+  uses — no LLM stage runs. `gemini.generate_video` retries HTTP 429/5xx AND
   transient Veo **operation** errors (codes 8/13/14) with backoff (preview tier
   rate-limits hard).
+- **Veo prompt construction is one shared module (`reel/veo_prompt.py`), not
+  duplicated per entry point.** Originally `pipeline.py` defined the five-part
+  formula inline; `fountain.to_storyboard` had its own separate, staler prompt
+  builder that was largely DEAD for actual rendering purposes (both entry
+  points already fed `pipeline._render_scene_frames`, which always rebuilds
+  the real prompt from structured panel/scene fields — `fountain.py`'s own
+  `image_prompt` was never read at render time), but `fountain.to_storyboard`'s
+  BOARD SHAPE was missing several fields that formula needs
+  (`header.location`, `visual_overview`, `audio_overview`, structured
+  `dialogue`, `camera_angle`/`camera_movement`/`lens`/`composition`, and
+  multi-character `characters_in_frame` — it only ever resolved ONE
+  character per beat), so a standalone-rendered scene's actual Veo prompt
+  was silently much sparser than a full-pipeline run's. Fixed two ways: (1)
+  extracted the formula itself (`panel_cinematography`/`panel_subject`/
+  `anchored_character_names`/`panel_context`/`panel_style_ambiance`/
+  `five_part_veo_prompt`/`panel_relevant_characters`/`panel_video_prompt`)
+  into `veo_prompt.py`, a pure module with zero render-loop/filesystem
+  state, imported by `pipeline.py`; (2) reworked `fountain.to_storyboard` to
+  build a board shape-compatible with `storyboard.py`'s own deterministic
+  build (`_beat_characters` for multi-character discovery via action-text/
+  dialogue-speaker matching, `_scene_context` for location/visual/audio
+  fields — mapped identically to `storyboard._build_scene_board`'s own
+  art/audio → visual_overview/audio_overview mapping, `_distribute_dialogue`
+  for proportional dialogue-to-beat spreading since `fountain.parse()`
+  itself discards the original action/dialogue interleaving — documented as
+  an approximation, not exact attribution). Each panel's `image_prompt` is
+  now built via `veo_prompt.panel_video_prompt` directly, so
+  `output/storyboard.json`'s preview is truthful, not a separate guess.
+  `cli._render_video` now also loads `scenes.json` (best-effort — falls back
+  to slugline extraction like `"INT. BAR - NIGHT"` → `"BAR"` when absent) for
+  authoritative per-scene `location`. Fountain-parsed speaker cues are
+  conventionally ALL CAPS (`"ALICE"`) while casting.json names are Title
+  Case (`"Alice"`) — `fountain._canonical_name` resolves this case-
+  insensitively to casting.json's own casing everywhere a dialogue speaker
+  is compared against `characters_in_frame` or looked up in `voice_index`,
+  since both do exact-string matches; a case-sensitive comparison here would
+  silently mark an on-screen speaking character as off-screen.
+- **Config schema validation (`llm.validate_config`) and estimated $ spend
+  tracking (`reel/spend.py`) are both best-effort, non-blocking checks
+  layered on top of existing state, not new sources of truth.**
+  `validate_config` is a lightweight, dependency-free shape check for
+  `config/models.yaml` — unknown top-level/one-level-deep-nested keys (a
+  typo like `videos:` or `mutli_character_references`) and a wrong type on
+  a handful of consequential fields — printed once at the top of every
+  `cli.main()` invocation (`_print_config_warnings`), never blocking, since
+  every individual `.get(key, default)` read elsewhere already degrades
+  gracefully; this only makes a typo LOUD instead of silent. `spend.py`
+  aggregates real-money cost estimates purely by re-reading
+  `gemini_api.log`'s already-logged per-call params (`gemini._log_call`) —
+  no new tracking mechanism, just a reader — against a pricing snapshot
+  (live-fetched from ai.google.dev/gemini-api/docs/pricing, not guessed) at
+  each model's STANDARD tier / this project's configured 720p resolution,
+  explicitly documented as an ESTIMATE. An unrecognized model is counted as
+  `unpriced` rather than silently omitted or guessed at. Printed after every
+  full pipeline run and standalone `render` invocation
+  (`cli._print_spend_summary`, best-effort/never-raises), and available
+  on-demand via `python -m reel.cli spend [--out DIR]` since the log
+  accumulates across every `--resume`/`revise` round against the same
+  `--out`, not just the most recent invocation.
 - **Per-stage abstraction + independent invocation (`reel/stages.py`):** every
   stage of processing is declared once as a `Stage` (name, the input artifacts it
   depends on, the agent it runs, what it `produces`). The registry lets the

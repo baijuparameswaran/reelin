@@ -7,7 +7,9 @@ regardless of who that specific panel's action text actually depicts.
 Feeding that unfiltered list into reference-image selection wasted Veo's
 3-reference budget (or the single-seed slot) on characters technically in
 the scene but absent from the panel, at best, or produced a wrong
-identity-lock at worst. See `pipeline._panel_relevant_characters`.
+identity-lock at worst. See `veo_prompt.panel_relevant_characters` (the
+narrowing logic itself) and `pipeline._resolve_panel_references`/
+`_frame_char_anchor` (the render-loop callers that use it).
 
 Pure logic — no live Ollama/Gemini/Veo calls anywhere.
 
@@ -19,7 +21,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from reel import pipeline
+from reel import pipeline, veo_prompt
 
 
 def _touch(p: Path) -> Path:
@@ -32,23 +34,23 @@ class TestPanelRelevantCharacters(unittest.TestCase):
     def test_narrows_to_characters_named_in_action_text(self):
         panel = {"characters_in_frame": ["Alice", "Bob", "Carol", "Dave"],
                  "action": "Alice and Bob argue quietly by the window."}
-        self.assertEqual(pipeline._panel_relevant_characters(panel), ["Alice", "Bob"])
+        self.assertEqual(veo_prompt.panel_relevant_characters(panel), ["Alice", "Bob"])
 
     def test_dialogue_speaker_counts_as_relevant_even_if_not_named_in_action(self):
         panel = {"characters_in_frame": ["Alice", "Bob", "Carol"],
                  "action": "Someone laughs across the room.",
                  "dialogue": [{"speaker": "Carol", "line": "Ha!"}]}
-        self.assertEqual(pipeline._panel_relevant_characters(panel), ["Carol"])
+        self.assertEqual(veo_prompt.panel_relevant_characters(panel), ["Carol"])
 
     def test_falls_back_to_full_list_when_action_names_no_one(self):
         # A genuine group/establishing shot — narrowing to nobody would be
         # worse than the over-inclusion this function exists to fix.
         panel = {"characters_in_frame": ["Alice", "Bob", "Carol"], "action": "The crowd gathers."}
-        self.assertEqual(pipeline._panel_relevant_characters(panel), ["Alice", "Bob", "Carol"])
+        self.assertEqual(veo_prompt.panel_relevant_characters(panel), ["Alice", "Bob", "Carol"])
 
     def test_falls_back_to_full_list_when_no_action_text_at_all(self):
         panel = {"characters_in_frame": ["Alice", "Bob"]}
-        self.assertEqual(pipeline._panel_relevant_characters(panel), ["Alice", "Bob"])
+        self.assertEqual(veo_prompt.panel_relevant_characters(panel), ["Alice", "Bob"])
 
     def test_word_boundary_avoids_false_positive_substring_match(self):
         # "Bob" must not match inside "Bobby" — a different, unlisted person.
@@ -56,20 +58,20 @@ class TestPanelRelevantCharacters(unittest.TestCase):
         # if the substring match wrongly fired, Bob would incorrectly appear.
         panel = {"characters_in_frame": ["Bob", "Alice"],
                  "action": "Bobby waves while Alice smiles."}
-        self.assertEqual(pipeline._panel_relevant_characters(panel), ["Alice"])
+        self.assertEqual(veo_prompt.panel_relevant_characters(panel), ["Alice"])
 
     def test_case_insensitive_match(self):
         panel = {"characters_in_frame": ["Alice"], "action": "ALICE storms out of the room."}
-        self.assertEqual(pipeline._panel_relevant_characters(panel), ["Alice"])
+        self.assertEqual(veo_prompt.panel_relevant_characters(panel), ["Alice"])
 
     def test_empty_characters_in_frame_returns_empty(self):
-        self.assertEqual(pipeline._panel_relevant_characters({"characters_in_frame": []}), [])
-        self.assertEqual(pipeline._panel_relevant_characters({}), [])
+        self.assertEqual(veo_prompt.panel_relevant_characters({"characters_in_frame": []}), [])
+        self.assertEqual(veo_prompt.panel_relevant_characters({}), [])
 
     def test_preserves_original_list_order_not_match_order(self):
         panel = {"characters_in_frame": ["Alice", "Bob", "Carol"],
                  "action": "Bob turns to Alice."}
-        self.assertEqual(pipeline._panel_relevant_characters(panel), ["Alice", "Bob"])
+        self.assertEqual(veo_prompt.panel_relevant_characters(panel), ["Alice", "Bob"])
 
 
 class TestReferenceResolutionUsesRelevantSubset(unittest.TestCase):
