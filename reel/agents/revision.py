@@ -43,11 +43,12 @@ import json
 from .. import models
 
 IDENTIFY_SYSTEM = (
-    "You are a script continuity analyst determining the SCOPE of a hand-edit "
-    "to a story's raw text — which existing scene numbers it actually affects, "
-    "and whether the edit can be handled in place or requires adding/removing "
-    "a scene entirely. You are precise and conservative: when genuinely unsure, "
-    "you say so rather than guessing. You always respond with valid JSON."
+    "You are one of the industry's sharpest script continuity analysts, "
+    "determining the SCOPE of a hand-edit to a story's raw text — which "
+    "existing scene numbers it actually affects, and whether the edit can be "
+    "handled in place or requires adding/removing a scene entirely. You are "
+    "precise and conservative: when genuinely unsure, you say so rather than "
+    "guessing. You always respond with valid JSON."
 )
 
 IDENTIFY_CHANGES_PROMPT = """\
@@ -73,7 +74,15 @@ own reading says its content is materially unchanged; conversely a real
 content change your reading catches should be included even if the
 pre-filter missed it: {candidates}
 
-Respond with JSON in exactly this shape:
+Do NOT:
+- include a scene number just because it's mentioned or adjacent to the
+  change — only genuinely different content counts
+- call something drastic just because the wording changed a lot — only a
+  genuinely ADDED or REMOVED event is drastic
+- add commentary, preamble, or markdown code fences before or after the JSON
+
+Respond with ONLY a single JSON object matching EXACTLY this shape — every
+key present, no extra top-level keys, no missing keys:
 {{
   "drastic": false,
   "reason": "if drastic: one sentence why (a new event with no matching scene, or a removed event a scene depends on); empty string otherwise",
@@ -99,12 +108,13 @@ just what you remember from the pre-filter hint):
 """
 
 SYSTEM = (
-    "You are a script continuity analyst reviewing a targeted revision to one "
-    "part of an adaptation. Given exactly what changed and the full original "
-    "story, you flag any OTHER scene that might need re-examination because it "
-    "depends on what changed — a plot detail, a prop, a relationship, a piece "
-    "of information one scene sets up and another pays off. You are advisory "
-    "only: you never claim certainty, and you always respond with valid JSON."
+    "You are one of the industry's sharpest script continuity analysts, "
+    "reviewing a targeted revision to one part of an adaptation. Given "
+    "exactly what changed and the full original story, you flag any OTHER "
+    "scene that might need re-examination because it depends on what changed "
+    "— a plot detail, a prop, a relationship, a piece of information one "
+    "scene sets up and another pays off. You are advisory only: you never "
+    "claim certainty, and you always respond with valid JSON."
 )
 
 RIPPLE_PROMPT = """\
@@ -120,7 +130,14 @@ learns there that they act on elsewhere. Do NOT suggest a scene just because it
 mentions the same characters or location in passing — only suggest it if the
 SPECIFIC thing that changed plausibly affects that scene's content.
 
-Respond with JSON in exactly this shape:
+Do NOT:
+- suggest a scene just because it shares a character or location in passing —
+  only suggest it if the SPECIFIC thing that changed plausibly affects it
+- force a suggestion when nothing else plausibly depends on this change
+- add commentary, preamble, or markdown code fences before or after the JSON
+
+Respond with ONLY a single JSON object matching EXACTLY this shape — every
+key present, no extra top-level keys, no missing keys:
 {{
   "suggested_scenes": [
     {{"scene_number": 7, "reason": "one sentence - what depends on the change"}}

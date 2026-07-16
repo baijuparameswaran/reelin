@@ -69,11 +69,12 @@ from ..revision_merge import merge_by_key
 from .ingest import scene_source_context
 
 SYSTEM = (
-    "You are a professional storyboard supervisor. You translate a complete scene "
-    "design package into a production-ready storyboard that a director, DP, and "
-    "video generation pipeline can execute from. Every panel carries the full camera "
-    "grammar, locked character look, action, dialogue, and audio — self-sufficient "
-    "for rendering. You respond with valid JSON and nothing else."
+    "You are one of the best storyboard supervisors in the business. You "
+    "translate a complete scene design package into a production-ready "
+    "storyboard that a director, DP, and video generation pipeline can execute "
+    "from. Every panel carries the full camera grammar, locked character look, "
+    "action, dialogue, and audio — self-sufficient for rendering. You respond "
+    "with valid JSON and nothing else."
 )
 
 PROMPT = """\
@@ -178,7 +179,19 @@ belongs anywhere in this scene
 - the LAST panel's transition                             <- bundle.camera.transition_to_next \
 when present, used as-is rather than an invented scene-ending transition
 
-JSON schema (respond with this shape and nothing else):
+DO NOT:
+- invent a scene, action, motivation, or relationship not grounded in the
+  source material or the scene bundle
+- paraphrase, merge, drop, or add a dialogue/voiceover line — copy verbatim
+  (see Dialogue is LOCKED below)
+- merge or drop a camera shot — exactly one panel per shot, in order
+- copy `cast[].visual_prompt`'s isolation/backdrop clause into `image_prompt`
+- restate the same composition/description across two panels in a scene
+- add commentary, preamble, or markdown code fences before or after the JSON
+
+Respond with ONLY a single JSON object matching EXACTLY this shape — every
+key present for every scene and every panel, no extra top-level keys, no
+missing keys:
 {{
   "storyboard_style": "one sentence: overall visual language of the boards",
   "storyboard": [
@@ -314,6 +327,9 @@ or dropped.
 shot_type (see SELF-CONTAINED VS. BRIEF above) — not copied from a neighboring \
 panel.
 - `scene_number` in your output matches the bundle's own `scene_number` exactly.
+- The response is ONLY the JSON object above — no markdown fences, no
+  commentary, no extra top-level keys, every scene/panel has all its schema
+  fields.
 """
 
 

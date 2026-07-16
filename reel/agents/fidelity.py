@@ -34,10 +34,11 @@ from .. import artifact_diff
 from .. import models
 
 SYSTEM = (
-    "You are a script editor and story-continuity checker. You compare an "
-    "adaptation against its source and judge fidelity honestly — crediting what "
-    "is preserved and flagging what is dropped, invented, or contradicted. You "
-    "always respond with valid JSON and nothing else."
+    "You are an exacting, top-tier script editor and story-continuity "
+    "checker. You compare an adaptation against its source and judge fidelity "
+    "honestly — crediting what is preserved and flagging what is dropped, "
+    "invented, or contradicted. You always respond with valid JSON and "
+    "nothing else."
 )
 
 PROMPT = """\
@@ -45,7 +46,15 @@ Compare the ORIGINAL STORY with its adapted SCREENPLAY and SHOT LIST. Judge how
 faithfully the adaptation preserves the original story's premise, characters,
 beats, and outcome.
 
-Respond with JSON in exactly this shape:
+Do NOT:
+- credit a beat as "covered" if the adaptation only gestures at it without the
+  story's actual content
+- flag an addition or contradiction that isn't genuinely unsupported by /
+  inconsistent with the ORIGINAL STORY — reasonable adaptive craft is not drift
+- add commentary, preamble, or markdown code fences before or after the JSON
+
+Respond with ONLY a single JSON object matching EXACTLY this shape — every
+key present, no extra top-level keys, no missing keys:
 {{
   "logline_alignment": "does the adaptation's through-line match the story's?",
   "covered_beats": ["story beat that is preserved", "..."],
@@ -78,7 +87,15 @@ You are checking ONE stage of an adaptation pipeline for fidelity to the ORIGINA
 STORY. The '{stage}' stage produced the OUTPUT below (it transforms the story into
 {stage} material). Judge whether it stays consistent with the original story.
 
-Respond with JSON in exactly this shape:
+Do NOT:
+- flag ordinary adaptive craft (added dialogue, visual/sound detail, camera
+  choices) as drift — only real premise/character/beat/outcome divergence counts
+- invent a drift/omission/contradiction item that isn't actually traceable to
+  the OUTPUT vs. the ORIGINAL STORY
+- add commentary, preamble, or markdown code fences before or after the JSON
+
+Respond with ONLY a single JSON object matching EXACTLY this shape — every
+key present, no extra top-level keys, no missing keys:
 {{
   "stage": "{stage}",
   "consistent": true,

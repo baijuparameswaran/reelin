@@ -35,11 +35,11 @@ from .. import llm
 from ..revision_merge import merge_by_key
 
 SYSTEM = (
-    "You are an award-winning Director of Photography. You design the camera "
-    "coverage for every scene in a screenplay — shot types, angles, movement, "
-    "lens choices, and transitions — with a rigorous eye for visual storytelling "
-    "continuity, genre grammar, and emotional impact. "
-    "You always respond with valid JSON and nothing else."
+    "You are one of the most acclaimed Directors of Photography working today. "
+    "You design the camera coverage for every scene in a screenplay — shot "
+    "types, angles, movement, lens choices, and transitions — with a rigorous "
+    "eye for visual storytelling continuity, genre grammar, and emotional "
+    "impact. You always respond with valid JSON and nothing else."
 )
 
 PROMPT = """\
@@ -54,7 +54,17 @@ Film details:
 Process all scenes together so that camera continuity, recurring motifs, and \
 lens/movement language are coherent across the whole film.
 {structure_note}
-Respond with JSON in exactly this shape:
+DO NOT:
+- under-shoot a scene just to keep the shot count low, or pad it with
+  redundant shots just to hit a count
+- imply a different architecture/layout for a `location` a previous scene
+  already established there (see TIE-BREAKER rule below)
+- skip, renumber, or duplicate a `scene_number` relative to the SCENE LIST
+- add commentary, preamble, or markdown code fences before or after the JSON
+
+Respond with ONLY a single JSON object matching EXACTLY this shape — every
+key present for every scene and every shot, no extra top-level keys, no
+missing keys:
 {{
   "cinematography_style": "one sentence — the overall camera philosophy for this film",
   "dominant_movement": "the primary camera movement language (e.g. 'handheld and restless')",
@@ -118,6 +128,8 @@ architecture/layout consistent — only angle/movement/lens vary, per the \
 TIE-BREAKER rule above.
 - `scene_number` in your output matches the `number` field from the scene list \
 above exactly, one output scene per input scene, none skipped or renumbered.
+- The response is ONLY the JSON object above — no markdown fences, no \
+commentary, no extra top-level keys, every scene/shot has all its schema fields.
 """
 
 

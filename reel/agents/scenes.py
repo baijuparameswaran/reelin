@@ -73,9 +73,9 @@ from ..revision_merge import merge_by_key
 from .ingest import chunk_text, CHUNK_SIZE
 
 SYSTEM = (
-    "You are a screenwriter breaking a story into filmable scenes. Each scene "
-    "happens in one location and continuous time. You always respond with valid "
-    "JSON and nothing else."
+    "You are one of the best screenwriters working today, breaking a story "
+    "into filmable scenes. Each scene happens in one location and continuous "
+    "time. You always respond with valid JSON and nothing else."
 )
 
 PROMPT = """\
@@ -140,7 +140,17 @@ STRICT RULES:
     this scene's action are BOTH valid — don't filter either out; a later
     stage decides which is which.
 
-Respond with JSON in exactly this shape (no extra keys, no commentary):
+DO NOT:
+- invent a scene, character, location, or prop the source text doesn't
+  actually contain (rules 1-2 above)
+- merge two genuinely distinct dramatic beats into one scene just to keep
+  the count down, or split one continuous beat into two just to inflate it
+- leave `source_line` paraphrased instead of a real verbatim quote
+- produce duplicate or non-sequential `number` values
+- add commentary, preamble, or markdown code fences before or after the JSON
+
+Respond with ONLY a single JSON object matching EXACTLY this shape — every
+key present for every scene, no extra top-level keys, no missing keys:
 {{
   "scenes": [
     {{
@@ -180,6 +190,8 @@ just read, not just what you remember from the rules list):
   they share a location, and split them if you find one.
 - Every entry in `props` is an object the source material above actually names
   — not one you inferred would look good on screen.
+- The response is ONLY the JSON object above — no markdown fences, no
+  commentary, no extra top-level keys, every scene has all 8 schema fields.
 """
 
 

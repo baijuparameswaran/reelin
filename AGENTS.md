@@ -23,6 +23,16 @@
   lost-in-the-middle effect (Liu et al. 2023) for prompts with a large data
   block and many rules. See the 2026-07-09 "Prompt-pitfall audit" entry in
   PROGRESS.md for which prompts needed this and why.
+- **DO NOT list + strict structure** = every agent prompt (creative and
+  grader alike) states an explicit "DO NOT:" bullet list of known failure
+  modes for that stage (inventing content beyond source, dropping/paraphrasing
+  locked fields, skipping/renumbering keyed entries, etc.) immediately before
+  its JSON schema, plus a "Respond with ONLY a single JSON object matching
+  EXACTLY this shape — no extra top-level keys, no missing keys, no markdown
+  fences or commentary" structure-strictness instruction. For the seven
+  sandwiched prompts, both are reinforced a second time in the closing
+  "Before you respond" block too. See the 2026-07-16 "DO NOT + strict
+  structure" entry in PROGRESS.md.
 
 ## Pipeline order
 
@@ -49,6 +59,7 @@ see ARCHITECTURE.md's "Conventions & decisions" for the constraint.)
 | screenplay | `screenplay.py` | yes (open) | yes | yes (fidelity + scene-alignment) | yes (`number`, per-scene loop) | **yes** |
 | storyboard | `storyboard.py` | only if `feedback` given | yes (LLM path only) | yes (fidelity + scene-alignment) | yes (`scene_number`, per-scene loop) | **yes** (LLM path) |
 | fidelity | `fidelity.py` | yes (open, qualitative check) + deterministic (scene-alignment check) | no (neutral grader) | — (is the grader) | n/a | no (short, data-last) |
+| critique | `critique.py` | yes (open) | no (neutral grader) | — (is a grader) | n/a | no (short, data-last) |
 | revision | `revision.py` | yes (`suggest_ripple_scenes`) + deterministic (`is_drastic_identity_change`) | no (neutral) | — | n/a | no (short, data-last) |
 
 Every LLM call in this table routes through the **open** Ollama models
@@ -178,6 +189,18 @@ provider-policy bullet.
   deterministic — does this stage's scene-keyed data actually match
   `scenes.json`) which self-heals automatically inside `pipeline.run_group`
   before the operator ever sees the gate.
+- **`critique.py`** — a THIRD check distinct from fidelity (source
+  consistency) and genre (genre fit): given a stage's own governing
+  SYSTEM/PROMPT template (not the fully-interpolated text — story content
+  isn't needed to judge craft), is the response genuinely strong, or does
+  it show gaps a single generation pass can miss? Runs once, automatically,
+  right after a stage's scene-structure self-heal and before the operator
+  ever sees the gate; a `needs_improvement` verdict triggers exactly one
+  re-run of the same stage via the same `feedback` mechanism a human's
+  typed gate feedback uses. Neutral grader (`models.text`, never Gemini),
+  best-effort (any failure falls back to the pre-critique result). Scoped
+  to `pipeline.run()` only — `revise`'s own gate doesn't pass
+  `agent_module`, so critique doesn't fire there.
 - **`revision.py`** — powers `python -m reel.cli revise`. `identify_source_text_changes`
   scopes a raw story-TEXT edit down to the scene numbers it actually
   affects (given `artifact_diff`'s deterministic candidate pre-filter +
@@ -209,3 +232,7 @@ provider-policy bullet.
 5. If its prompt has more than ~5 rules ahead of a large data block, sandwich
    it (see the "Sandwiched prompt" note above) — cheaper to do at write time
    than to rediscover the need later.
+6. Give the PROMPT a "DO NOT:" list of that stage's known failure modes and a
+   "Respond with ONLY a single JSON object matching EXACTLY this shape" line
+   right before its schema (see the "DO NOT list + strict structure" note
+   above) — every existing agent prompt already follows this.

@@ -190,8 +190,8 @@ def host() -> str:
 # everywhere else a config value is read.
 _KNOWN_TOP_KEYS = {
     "ollama_host", "hitl", "image", "video", "fidelity", "genre", "moodboard",
-    "revision", "duration", "runtime", "min_ollama_version", "profiles",
-    "agent_profiles",
+    "revision", "critique", "duration", "runtime", "min_ollama_version",
+    "profiles", "agent_profiles",
 }
 
 # Known sub-keys for each dict-valued top-level block, one level deep —
@@ -215,6 +215,7 @@ _KNOWN_SUB_KEYS: dict[str, set[str]] = {
     "genre": {"value", "steer", "enforce", "min_score"},
     "moodboard": {"enabled", "steer"},
     "revision": {"identity_drift_threshold"},
+    "critique": {"enabled"},
     "duration": {"target_seconds"},
     "runtime": {"max_parallel_agents", "request_timeout_seconds", "think",
                "num_gpu", "escalate_after", "escalate_score_gap"},

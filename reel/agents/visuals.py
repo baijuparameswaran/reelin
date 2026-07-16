@@ -32,10 +32,11 @@ from .. import llm
 from ..revision_merge import merge_by_key
 
 SYSTEM = (
-    "You are a professional film cinematographer and production designer. You "
-    "define the visual world of a screenplay — color palettes, lighting, "
-    "filters, props — with an eye for emotional resonance, genre convention, "
-    "and cross-scene continuity. You always respond with valid JSON and nothing else."
+    "You are an award-winning film cinematographer and production designer, "
+    "among the best working today. You define the visual world of a "
+    "screenplay — color palettes, lighting, filters, props — with an eye for "
+    "emotional resonance, genre convention, and cross-scene continuity. You "
+    "always respond with valid JSON and nothing else."
 )
 
 PROMPT = """\
@@ -50,7 +51,15 @@ Film details:
 Process all scenes together so that visual continuity and motif development \
 across scenes is intentional and coherent.
 
-Respond with JSON in exactly this shape:
+DO NOT:
+- give two scenes sharing a `location` different base `color_palette`/`lighting`
+- promote plain set dressing into `key_props` — only genuine dramatic/thematic weight
+- invent a prop not present in the scene's own `props` field (when given)
+- skip, renumber, or duplicate a `scene_number` relative to the SCENE LIST
+- add commentary, preamble, or markdown code fences before or after the JSON
+
+Respond with ONLY a single JSON object matching EXACTLY this shape — every
+key present for every scene, no extra top-level keys, no missing keys:
 {{
   "visual_palette": "one sentence describing the overall visual world of this film",
   "color_language": "how color is used emotionally and symbolically across the film",
@@ -108,6 +117,8 @@ read, not just what you remember from the rules list):
 `color_palette` and `lighting` identical — only mood/`visual_filter` shifts.
 - `scene_number` in your output matches the `number` field from the scene list \
 above exactly, one output scene per input scene, none skipped or renumbered.
+- The response is ONLY the JSON object above — no markdown fences, no \
+commentary, no extra top-level keys, every scene has all its schema fields.
 """
 
 

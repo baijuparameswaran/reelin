@@ -22,11 +22,11 @@ import json
 from .. import models
 
 SYSTEM = (
-    "You are a film production designer and visual director assembling a "
-    "moodboard. From a story's structure and genre you define ONE coherent "
-    "aesthetic — color, light, texture, atmosphere, influences — that every "
-    "department will work toward. You always respond with valid JSON and nothing "
-    "else."
+    "You are an acclaimed film production designer and visual director "
+    "assembling a moodboard. From a story's structure and genre you define ONE "
+    "coherent aesthetic — color, light, texture, atmosphere, influences — that "
+    "every department will work toward. You always respond with valid JSON "
+    "and nothing else."
 )
 
 PROMPT = """\
@@ -40,7 +40,15 @@ Film:
 - Tone: {tone}
 - Themes: {themes}
 {genre_block}{story_block}
-Respond with JSON in exactly this shape:
+Do NOT:
+- describe a generic, story-agnostic aesthetic that could belong to any film
+  in this genre — ground every choice in THIS story's logline/tone/themes
+- contradict the genre direction given above
+- produce more or fewer than exactly {tiles} tile(s)
+- add commentary, preamble, or markdown code fences before or after the JSON
+
+Respond with ONLY a single JSON object matching EXACTLY this shape — every
+key present, no extra top-level keys, no missing keys:
 {{
   "overall_aesthetic": "1-2 sentence statement of the film's visual vision",
   "color_story": "how the palette is used and evolves across the film",

@@ -94,7 +94,7 @@ class TestScenesPrompt(SandwichAssertionsMixin, unittest.TestCase):
         return scenes.PROMPT.format(**kwargs)
 
     def test_sandwiched(self):
-        self.assert_sandwiched(self._render(), "not one you inferred would look good on screen.")
+        self.assert_sandwiched(self._render(), "every scene has all 8 schema fields.")
 
     def test_source_is_the_only_authority_rule_present(self):
         self.assertIn("SOURCE TEXT IS THE ONLY AUTHORITY", self._render())
@@ -233,7 +233,7 @@ class TestCastingPrompt(SandwichAssertionsMixin, unittest.TestCase):
         return casting.PROMPT.format(**kwargs)
 
     def test_sandwiched(self):
-        self.assert_sandwiched(self._render(), "generic description.")
+        self.assert_sandwiched(self._render(), "every entry has all its schema fields.")
 
     def test_isolation_rule_covers_person_and_prop(self):
         out = self._render()
@@ -334,7 +334,7 @@ class TestSoundscapePrompt(SandwichAssertionsMixin, unittest.TestCase):
     def test_sandwiched(self):
         rendered = soundscape.PROMPT.format(
             logline="L", genre="G", tone="T", themes="x", scenes="[]")
-        self.assert_sandwiched(rendered, "renumbered.")
+        self.assert_sandwiched(rendered, "every scene has all its schema fields.")
 
     def test_location_consistency_rule_present(self):
         rendered = soundscape.PROMPT.format(
@@ -354,7 +354,7 @@ class TestVisualsPrompt(SandwichAssertionsMixin, unittest.TestCase):
     def test_sandwiched(self):
         rendered = visuals.PROMPT.format(
             logline="L", genre="G", tone="T", themes="x", scenes="[]")
-        self.assert_sandwiched(rendered, "renumbered.")
+        self.assert_sandwiched(rendered, "every scene has all its schema fields.")
 
     def test_location_consistency_rule_present(self):
         rendered = visuals.PROMPT.format(
@@ -375,7 +375,7 @@ class TestCinematographyPrompt(SandwichAssertionsMixin, unittest.TestCase):
         return cinematography.PROMPT.format(**kwargs)
 
     def test_sandwiched(self):
-        self.assert_sandwiched(self._render(), "renumbered.")
+        self.assert_sandwiched(self._render(), "every scene/shot has all its schema fields.")
 
     def test_shot_floor_is_one_not_two(self):
         out = self._render()
@@ -419,7 +419,7 @@ class TestScreenplayPrompt(SandwichAssertionsMixin, unittest.TestCase):
         return screenplay.PROMPT.format(**kwargs)
 
     def test_sandwiched(self):
-        self.assert_sandwiched(self._render(), "names given above.")
+        self.assert_sandwiched(self._render(), "every shot has all its schema fields.")
 
     def test_source_over_coverage_tie_breaker_present(self):
         out = self._render()
@@ -444,7 +444,7 @@ class TestStoryboardPrompt(SandwichAssertionsMixin, unittest.TestCase):
         return storyboard.PROMPT.format(**kwargs)
 
     def test_sandwiched(self):
-        self.assert_sandwiched(self._render(), "exactly.")
+        self.assert_sandwiched(self._render(), "every scene/panel has all its schema\n  fields.")
 
     def test_self_contained_vs_brief_clarification_present(self):
         self.assertIn("SELF-CONTAINED VS. BRIEF", self._render())

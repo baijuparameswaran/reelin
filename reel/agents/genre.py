@@ -22,17 +22,26 @@ import json
 from .. import models
 
 SYSTEM = (
-    "You are a genre-savvy showrunner and development executive. You identify a "
-    "story's most fitting genre and hold every department to its conventions — "
-    "tone, structure, imagery, sound, pacing, dialogue. You always respond with "
-    "valid JSON and nothing else."
+    "You are one of the most genre-savvy showrunners and development "
+    "executives working today. You identify a story's most fitting genre and "
+    "hold every department to its conventions — tone, structure, imagery, "
+    "sound, pacing, dialogue. You always respond with valid JSON and nothing "
+    "else."
 )
 
 DETERMINE_PROMPT = """\
 Decide the single best GENRE for adapting the STORY below into a film, and spell
 out the conventions every department should honor. {hint}
 
-Respond with JSON in exactly this shape:
+Do NOT:
+- pick a genre the story can't actually support just because it's popular or
+  commercially safe
+- pad "conventions" with generic, story-agnostic filler that would apply to
+  any story in the genre
+- add commentary, preamble, or markdown code fences before or after the JSON
+
+Respond with ONLY a single JSON object matching EXACTLY this shape — every
+key present, no extra top-level keys, no missing keys:
 {{
   "genre": "primary genre (one or two words)",
   "subgenre": "optional more specific genre, or empty",
@@ -60,7 +69,15 @@ honors the genre's tone and conventions.
 GENRE DIRECTION:
 {genre}
 
-Respond with JSON in exactly this shape:
+Do NOT:
+- flag a stylistic choice as off-genre just because you'd have made a
+  different one — only flag genuine tonal/convention drift
+- let the genre direction bias you toward inventing praise or criticism the
+  OUTPUT doesn't actually support
+- add commentary, preamble, or markdown code fences before or after the JSON
+
+Respond with ONLY a single JSON object matching EXACTLY this shape — every
+key present, no extra top-level keys, no missing keys:
 {{
   "stage": "{stage}",
   "genre": "{genre_name}",

@@ -68,11 +68,11 @@ from .. import llm
 from ..revision_merge import merge_by_key
 
 SYSTEM = (
-    "You are a film casting director working hand-in-hand with a costume "
-    "designer, an animal wrangler, and a concept artist. You turn a character "
-    "breakdown — humans, animals, birds, creatures — into a single, committed, "
-    "visually concrete casting that will appear on screen. You always respond "
-    "with valid JSON and nothing else."
+    "You are one of the most sought-after film casting directors working today, "
+    "working hand-in-hand with a costume designer, an animal wrangler, and a "
+    "concept artist. You turn a character breakdown — humans, animals, birds, "
+    "creatures — into a single, committed, visually concrete casting that will "
+    "appear on screen. You always respond with valid JSON and nothing else."
 )
 
 PROMPT = """\
@@ -86,7 +86,19 @@ Film details:
 Cast an ACTOR for each role (their own intrinsic look), then describe the
 TRANSFORMATION that turns that actor into the character. Keep the two separate.
 
-Respond with JSON in exactly this shape:
+DO NOT:
+- bake a scene, location, prop, other character, mood, or time-of-day into
+  any `visual_prompt` or `physical_form` (see ISOLATION rule below)
+- add a physical attribute (face shape, eye colour, hair texture, skin tone,
+  body proportions) the character breakdown doesn't state or clearly imply
+- default or guess a gender the breakdown doesn't establish
+- name or imitate a real, identifiable person for the invented actor
+- omit an entry for any input character, distinct location, or distinct
+  recurring prop, or add one that isn't in the input
+- add commentary, preamble, or markdown code fences before or after the JSON
+
+Respond with ONLY a single JSON object matching EXACTLY this shape — every
+key present for every entry, no extra top-level keys, no missing keys:
 {{
   "casting": [
     {{
@@ -267,6 +279,8 @@ just what you remember from the rules list):
 - PROPS: every prop's `visual_prompt` is specific enough (material, color, size,
   condition, marks) to render as the SAME object every time it recurs — not a
   generic description.
+- The response is ONLY the JSON object above — no markdown fences, no
+  commentary, no extra top-level keys, every entry has all its schema fields.
 """
 
 

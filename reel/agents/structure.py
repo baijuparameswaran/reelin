@@ -9,15 +9,24 @@ from .. import llm
 from ..llm import MAX_CHARS
 
 SYSTEM = (
-    "You are a veteran story analyst and screenwriter. You read source material "
-    "and distill its dramatic structure precisely and concisely. You always "
-    "respond with valid JSON and nothing else."
+    "You are one of the most respected story analysts and screenwriters "
+    "working today. You read source material and distill its dramatic "
+    "structure precisely and concisely. You always respond with valid JSON "
+    "and nothing else."
 )
 
 PROMPT = """\
 Analyze the following source material and return its dramatic structure.
 
-Respond with JSON in exactly this shape:
+Do NOT:
+- invent beats, themes, a conflict, or a genre the source material doesn't
+  actually support
+- pad the three_act lists with filler or restated beats just to seem thorough
+- add any commentary, preamble, or markdown code fences before or after the
+  JSON object
+
+Respond with ONLY a single JSON object matching EXACTLY this shape — every
+key present, no extra top-level keys, no missing keys:
 {{
   "logline": "one vivid sentence capturing protagonist, goal, and conflict",
   "genre": "primary genre",

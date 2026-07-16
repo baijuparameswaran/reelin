@@ -53,17 +53,28 @@ from pathlib import Path
 
 from .agents.ingest import ingest
 from .agents.structure import analyze_structure
+from .agents import structure as structure_agent
 from .agents.characters import extract_characters
+from .agents import characters as characters_agent
 from .agents.scenes import segment_scenes
+from .agents import scenes as scenes_agent
 from .agents.casting import cast_characters
+from .agents import casting as casting_agent
 from .agents.soundscape import design_soundscape
+from .agents import soundscape as soundscape_agent
 from .agents.visuals import design_visuals
+from .agents import visuals as visuals_agent
 from .agents.cinematography import plan_cinematography
+from .agents import cinematography as cinematography_agent
 from .agents.storyboard import plan_storyboard
+from .agents import storyboard as storyboard_agent
 from .agents.screenplay import draft_screenplay, to_fountain
+from .agents import screenplay as screenplay_agent
 from .agents import fidelity
 from .agents import genre as genre_agent
+from .agents import critique as critique_agent
 from .agents.moodboard import design_moodboard, guidance as moodboard_guidance
+from .agents import moodboard as moodboard_agent
 from .gate import Gate
 from . import llm
 from . import imagegen
@@ -1181,7 +1192,7 @@ def _checkpoint_load(out: Path, name: str) -> dict | None:
 
 
 def _spec(name: str, compute: Callable, summarize: Callable, rerun: Callable,
-          realign: Callable | None = None) -> dict:
+          realign: Callable | None = None, agent_module=None) -> dict:
     """Describe one stage: how to compute it, summarize it, re-run it on
     feedback, and (for scene-keyed stages) reiterate it to fix scene-structure
     alignment. `realign(result, revise_keys) -> dict` calls the SAME agent
@@ -1189,8 +1200,19 @@ def _spec(name: str, compute: Callable, summarize: Callable, rerun: Callable,
     — distinct from `rerun`, which always regenerates from scratch on operator
     feedback. `None` for stages with no scene-keyed structure to align
     (structure, characters, casting, moodboard) — see run_group's use of it,
-    and reel.agents.fidelity.check_scene_alignment for what "aligned" means."""
-    return {"name": name, "compute": compute, "summarize": summarize, "rerun": rerun, "realign": realign}
+    and reel.agents.fidelity.check_scene_alignment for what "aligned" means.
+
+    `agent_module` (optional) — the agent module whose `SYSTEM`/`PROMPT`
+    constants describe what this stage was actually asked to do. When given,
+    `_gated` runs one automatic self-critique-and-refine pass
+    (`reel.agents.critique`, using `rerun` as the refine mechanism) BEFORE
+    the operator ever sees the review gate — see `_gated`'s docstring.
+    `None` for stages critique doesn't apply to (there are none among the
+    creative stages currently, but a future non-text/render-only stage
+    added to this registry should pass `None` here, same as it already
+    would for `realign`)."""
+    return {"name": name, "compute": compute, "summarize": summarize, "rerun": rerun,
+            "realign": realign, "agent_module": agent_module}
 
 
 # ── gate loop helper ──────────────────────────────────────────────────────────
@@ -1269,6 +1291,8 @@ def _gated(
     profile: str | None = None,     # resolved profile name (display + escalation)
     escalate_after: int = 3,        # consecutive low-score reruns before gradual escalation
     escalate_score_gap: int = 20,   # escalate immediately when score is this far below threshold
+    agent_module=None,              # module with SYSTEM/PROMPT — enables the self-critique pass
+    critique_enabled: bool = True,  # config critique.enabled — no-ops the pass below when False
 ) -> tuple[dict, dict | None, dict | None]:
     """Show gate for initial_result; re-run with feedback until approved.
 
@@ -1293,12 +1317,45 @@ def _gated(
     the automatic fix has already been attempted; it's surfaced here purely
     so the operator can see when that attempt still left a gap.
 
+    Self-critique (`agent_module`, `critique_enabled`): ONE automatic pass,
+    BEFORE the while loop below and thus before the operator ever sees the
+    gate at all — `reel.agents.critique.critique_stage` reviews
+    `initial_result` against `agent_module.SYSTEM`/`PROMPT` (what this stage
+    was actually asked to do), and if it finds real issues, `rerun_fn` is
+    called ONCE with the critique's `improvement_note` as feedback — the
+    exact same mechanism a human's typed gate feedback already uses, just
+    fired automatically first. Runs only for a genuinely fresh compute (the
+    caller — run_group — never re-invokes this for a stage loaded from a
+    `--resume` checkpoint), and only ONCE — a critique-driven refine is not
+    itself re-critiqued, so this can't loop. Best-effort: any exception here
+    is logged and treated as "solid" (no refine), never blocks the pipeline.
+    The PRE-critique `initial_result` is preserved by the caller as
+    `output/<name>.0.json` regardless of what happens here.
+
     Returns (approved_result, fidelity_report, genre_report). Raises PipelineStopped.
     """
     result = initial_result
     current_profile = profile
     low_score_run = 0
     iteration = 0
+
+    if agent_module is not None and critique_enabled:
+        try:
+            crit = critique_agent.critique_stage(
+                name, agent_module.SYSTEM, agent_module.PROMPT, result, profile=current_profile)
+        except Exception as e:
+            crit = None
+            _log(f"      critique[{name}] skipped ({type(e).__name__})")
+        if crit and crit.get("verdict") == "needs_improvement" and crit.get("improvement_note"):
+            _log(f"      [{name}] self-critique found room to improve — refining once …")
+            for issue in (crit.get("issues") or [])[:5]:
+                _log(f"        - {issue}")
+            try:
+                result = rerun_fn(crit["improvement_note"], current_profile)
+            except Exception as e:
+                _log(f"      [{name}] self-critique refine failed ({type(e).__name__}) — "
+                     "keeping the pre-critique result")
+                result = initial_result
 
     while True:
         report = fidelity_fn(result) if fidelity_fn else None
@@ -1475,6 +1532,11 @@ def run(
     fid_reports: dict = {}
     _FID_STAGES = FIDELITY_GATED_STAGES
 
+    # Self-critique: one automatic critique-and-refine pass per freshly-computed
+    # stage, before the operator ever sees the gate — see _gated's docstring.
+    # Toggle via config `critique.enabled`.
+    crit_on = bool(llm.config().get("critique", {}).get("enabled", True))
+
     def fidelity_report(name: str, result: dict) -> dict | None:
         """Score this stage's output against the original story (open model).
         Computed BEFORE the gate so the operator sees the score when deciding
@@ -1589,6 +1651,9 @@ def run(
             gen_fn = (lambda res, _nm=nm: genre_report(_nm, res)) \
                 if (gen_enforce and nm in _GENRE_STAGES) else None
 
+            _save_initial_response(out, nm, raws[nm],
+                                   crit_on and s.get("agent_module") is not None)
+
             # Scene-structure alignment: self-heal BEFORE the gate is shown,
             # since a misaligned scene isn't a judgment call for the operator
             # to weigh in on — it's an objective structural bug (see
@@ -1619,7 +1684,9 @@ def run(
                                   genre_fn=gen_fn, genre_min=gen_min,
                                   alignment_rep=align_rep,
                                   profile=stage_profile, escalate_after=escalate_after,
-                                  escalate_score_gap=escalate_score_gap)
+                                  escalate_score_gap=escalate_score_gap,
+                                  agent_module=s.get("agent_module"),
+                                  critique_enabled=crit_on)
             save(nm, r)
             save_fidelity(nm, rep)
             save_genre(nm, grep)
@@ -1671,11 +1738,13 @@ def run(
         _spec("structure",
               lambda: analyze_structure(source, profile_override),
               _summarize_structure,
-              lambda fb, p=None: analyze_structure(source, p or profile_override, feedback=fb)),
+              lambda fb, p=None: analyze_structure(source, p or profile_override, feedback=fb),
+              agent_module=structure_agent),
         _spec("characters",
               lambda: extract_characters(source, profile_override),
               _summarize_characters,
-              lambda fb, p=None: extract_characters(source, p or profile_override, feedback=fb)),
+              lambda fb, p=None: extract_characters(source, p or profile_override, feedback=fb),
+              agent_module=characters_agent),
     ])
     structure, characters = g["structure"], g["characters"]
     _log(f"      logline: {structure.get('logline', '(parse failed)')[:80]}")
@@ -1690,7 +1759,8 @@ def run(
                   _summarize_moodboard,
                   lambda fb, p=None: design_moodboard(structure, source.get("text", ""), genre_spec,
                                                        max_scenes=max_scenes, profile=p or profile_override,
-                                                       feedback=fb)),
+                                                       feedback=fb),
+                  agent_module=moodboard_agent),
         ])
         moodboard = g["moodboard"]
         _log(f"      moodboard: {moodboard.get('overall_aesthetic', '?')[:80]}")
@@ -1708,7 +1778,8 @@ def run(
               _summarize_scenes,
               lambda fb, p=None: segment_scenes(source, structure, target=scene_target,
                                                 profile=p or profile_override,
-                                                feedback=fb, characters=characters)),
+                                                feedback=fb, characters=characters),
+              agent_module=scenes_agent),
     ])
     scenes = g["scenes"]
     n_dropped = len(scenes.get("dropped_scenes") or [])
@@ -1722,7 +1793,8 @@ def run(
               lambda: cast_characters(structure, characters, profile_override, scenes=scenes),
               _summarize_casting,
               lambda fb, p=None: cast_characters(structure, characters, p or profile_override,
-                                                 feedback=fb, scenes=scenes)),
+                                                 feedback=fb, scenes=scenes),
+              agent_module=casting_agent),
     ])
     casting = g["casting"]
     _log(f"      cast {len(casting.get('casting', []))}")
@@ -1761,13 +1833,15 @@ def run(
               _summarize_soundscape,
               lambda fb, p=None: design_soundscape(structure, scenes, p or profile_override, feedback=fb),
               realign=lambda result, keys: design_soundscape(structure, scenes, profile_override,
-                                                              existing=result, revise_keys=keys)),
+                                                              existing=result, revise_keys=keys),
+              agent_module=soundscape_agent),
         _spec("visuals",
               lambda: design_visuals(structure, scenes, profile_override),
               _summarize_visuals,
               lambda fb, p=None: design_visuals(structure, scenes, p or profile_override, feedback=fb),
               realign=lambda result, keys: design_visuals(structure, scenes, profile_override,
-                                                           existing=result, revise_keys=keys)),
+                                                           existing=result, revise_keys=keys),
+              agent_module=visuals_agent),
         _spec("cinematography",
               lambda: plan_cinematography(structure, scenes, profile_override, shots_guidance=shots_guidance),
               _summarize_cinematography,
@@ -1775,7 +1849,8 @@ def run(
                                                       shots_guidance=shots_guidance),
               realign=lambda result, keys: plan_cinematography(structure, scenes, profile_override,
                                                                 existing=result, revise_keys=keys,
-                                                                shots_guidance=shots_guidance)),
+                                                                shots_guidance=shots_guidance),
+              agent_module=cinematography_agent),
     ])
     soundscape, visuals, cinematography = g["soundscape"], g["visuals"], g["cinematography"]
 
@@ -1798,7 +1873,8 @@ def run(
             existing=result, revise_keys=keys,
         )
     g = run_group("8/10 screenplay (all scenes)", "draft", [
-        _spec("screenplay", lambda: _draft(), _summarize_screenplay, _draft, realign=_draft_realign),
+        _spec("screenplay", lambda: _draft(), _summarize_screenplay, _draft, realign=_draft_realign,
+              agent_module=screenplay_agent),
     ])
     draft = g["screenplay"]
     fountain = to_fountain(source, structure, draft)
@@ -1824,7 +1900,8 @@ def run(
         )
     g = run_group("9/10", "storyboard", [
         _spec("storyboard", lambda: _board(),
-              lambda r: _summarize_storyboard(r, target_seconds), _board, realign=_board_realign),
+              lambda r: _summarize_storyboard(r, target_seconds), _board, realign=_board_realign,
+              agent_module=storyboard_agent),
     ])
     storyboard = g["storyboard"]
 
@@ -1934,3 +2011,18 @@ def run(
 
 def _write_json(path: Path, data) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _save_initial_response(out: Path, name: str, raw: dict, enabled: bool) -> None:
+    """Write `raw` — the VERY FIRST result a stage produced this run, before
+    scene-alignment self-heal, self-critique refinement, or any operator
+    feedback touches it — to `output/<name>.0.json`, for reference (see
+    `_gated`'s "Self-critique" docstring section and PROGRESS.md's session
+    log). No-op when `enabled` is False: `run_group` passes
+    `crit_on and s.get("agent_module") is not None` — i.e. skip writing this
+    file when critique is disabled globally (config `critique.enabled`), OR
+    when this particular stage has no `agent_module` (nothing would ever
+    critique it, so the file would be a pointless, unused artifact)."""
+    if not enabled:
+        return
+    _write_json(out / f"{name}.0.json", raw)

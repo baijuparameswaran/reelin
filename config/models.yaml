@@ -194,6 +194,18 @@ moodboard:
 revision:
   identity_drift_threshold: 0.55
 
+# Self-critique. After each creative pipeline stage computes its result, a
+# neutral open-model call (reel/agents/critique.py) reviews it against the
+# stage's OWN governing role/rules (not source fidelity or genre — those are
+# separate checks) — is this a genuinely strong piece of craft, or does it
+# show gaps a second look would catch? If it finds real issues, the stage is
+# automatically re-run ONCE with the critique folded in as feedback, before
+# the operator ever sees the review gate. The pre-critique response is always
+# preserved at output/<stage>.0.json for reference. Set `enabled: false` to
+# skip this entirely (faster runs, no extra model calls).
+critique:
+  enabled: true
+
 # Target total runtime for the rendered movie. Engine-independent planning
 # guidance (see reel/duration_budget.py) fed to the scenes/cinematography
 # prompts as an explicit budget hint — scene/shot counts stay a creative
@@ -321,18 +333,19 @@ profiles:
 # reasoning (structure, storyboard). Screenplay is creative writing + Fountain
 # formatting — quality prose wins over chain-of-thought there.
 agent_profiles:
-  structure:       synthesis
-  characters:      fast
-  casting:         quality
-  scenes:          quality
-  soundscape:      fast
-  visuals:         fast
-  cinematography:  fast
-  storyboard:      synthesis
-  screenplay:      quality
-  fidelity:        quality
-  genre:           quality
-  moodboard:       quality
+  structure:       quality_high
+  characters:      quality_high
+  casting:         quality_high
+  scenes:          quality_high
+  soundscape:      quality_high
+  visuals:         quality_high
+  cinematography:  quality_high
+  storyboard:      quality_high
+  screenplay:      quality_high
+  fidelity:        quality_high
+  genre:           quality_high
+  moodboard:       quality_high
+  critique:        quality_high
   # quality_high (largest local tier — qwen3:30b) so identify_source_text_changes
   # can reliably correlate a diff against every existing scene's content — slow
   # (~7-9 tok/s on this host) but this call is infrequent (once per source-text
