@@ -33,6 +33,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from . import panel_grouping
 from . import veo_guide
 
 # Veo prompting guide — lens/framing terms by shot type. "portrait" enhances
@@ -296,6 +297,65 @@ def panel_relevant_characters(fr: dict) -> list[str]:
     return relevant if relevant else names
 
 
+def panel_ambient_sfx_cues(panel: dict, audio_overview: dict | None, *,
+                           room_tone: bool = True) -> tuple[str, str]:
+    """This panel's own (ambient, sfx) text. `panel.sound` (`" | "`-split
+    into an ambient half and an sfx half) OVERRIDES the scene-wide
+    `audio_overview.ambient` when given; falls back to the scene-wide
+    ambient when the panel has no override of its own. Anchors ambient to
+    consistent room-tone acoustics (`room_tone=True`) so it doesn't drift
+    shot to shot within the same scene.
+
+    Extracted from `panel_video_prompt` so `multi_panel_video_prompt` can
+    call it once PER SEGMENT — a panel's own sound override must never be
+    lost just because its panel is panel 2+ of a merged multi-panel group
+    (ambient/SFX are per-panel data, not something the scene-wide prefix
+    can safely absorb)."""
+    ao = audio_overview or {}
+    panel_sound_raw = (panel.get("sound") or "").strip()
+    if " | " in panel_sound_raw:
+        panel_ambient, panel_sfx = [s.strip() for s in panel_sound_raw.split(" | ", 1)]
+    else:
+        panel_ambient, panel_sfx = "", panel_sound_raw
+
+    ambient = panel_ambient or ao.get("ambient", "")
+    sfx = panel_sfx
+    if sfx and ambient and sfx.strip(".") == ambient.strip("."):
+        sfx = ""
+
+    # Anchor the room tone to consistent acoustics so it doesn't drift between
+    # clips of the same scene (e.g. a sudden echo that wasn't there a shot ago).
+    if room_tone and ambient and not any(
+        t in ambient.lower() for t in ("echo", "reverb", "acoustic", "muffled", "hollow")
+    ):
+        ambient = f"{ambient.rstrip('.')}, dry acoustics, no echo"
+    return ambient, sfx
+
+
+def panel_dialogue_cues(panel: dict, *, voice_index: dict[str, str] | None = None) -> list[str]:
+    """This panel's own spoken lines as guide-aligned cues (see
+    `veo_guide.dialogue_cue`) — extracted from `panel_video_prompt` for
+    reuse by `multi_panel_video_prompt`'s per-segment construction."""
+    voice_index = voice_index or {}
+    dialogue_cues: list[str] = []
+    for d in (panel.get("dialogue") or []):
+        line = (d.get("line") or "").strip()
+        if not line:
+            continue
+        modifier = (d.get("modifier") or "").strip().upper()
+        speaker = (d.get("speaker") or "").strip()
+        cue = veo_guide.dialogue_cue(
+            speaker, line,
+            voice=voice_index.get(speaker, ""),
+            tone=(d.get("parenthetical") or "").strip().strip("()"),
+            vo=bool(d.get("vo")),
+            off_screen="O.S." in modifier,
+        )
+        if cue:
+            dialogue_cues.append(cue)
+    return dialogue_cues
+
+
 def panel_video_prompt(panel: dict, audio_overview: dict | None = None, *,
                        casting_lookup: dict[str, dict] | None = None,
                        location_desc: str = "",
@@ -348,47 +408,9 @@ def panel_video_prompt(panel: dict, audio_overview: dict | None = None, *,
     has no cross-generation voice cloning; this is the manual substitute)."""
     voice_index = voice_index or {}
     ao = audio_overview or {}
-
-    # Ambient (environment) and score/music are kept as two SEPARATE cues (not
-    # merged) — folding a score cue into "ambient" makes both drift together
-    # when Veo hallucinates; keeping them apart lets the no-music directive
-    # below cleanly override just the music half.
-    panel_sound_raw = (panel.get("sound") or "").strip()
-    if " | " in panel_sound_raw:
-        panel_ambient, panel_sfx = [s.strip() for s in panel_sound_raw.split(" | ", 1)]
-    else:
-        panel_ambient, panel_sfx = "", panel_sound_raw
-
-    ambient = panel_ambient or ao.get("ambient", "")
-    sfx = panel_sfx
-    if sfx and ambient and sfx.strip(".") == ambient.strip("."):
-        sfx = ""
-
-    # Anchor the room tone to consistent acoustics so it doesn't drift between
-    # clips of the same scene (e.g. a sudden echo that wasn't there a shot ago).
-    if room_tone and ambient and not any(
-        t in ambient.lower() for t in ("echo", "reverb", "acoustic", "muffled", "hollow")
-    ):
-        ambient = f"{ambient.rstrip('.')}, dry acoustics, no echo"
-
+    ambient, sfx = panel_ambient_sfx_cues(panel, ao, room_tone=room_tone)
     score = (ao.get("score_cue") or "").strip()
-
-    dialogue_cues: list[str] = []
-    for d in (panel.get("dialogue") or []):
-        line = (d.get("line") or "").strip()
-        if not line:
-            continue
-        modifier = (d.get("modifier") or "").strip().upper()
-        speaker = (d.get("speaker") or "").strip()
-        cue = veo_guide.dialogue_cue(
-            speaker, line,
-            voice=voice_index.get(speaker, ""),
-            tone=(d.get("parenthetical") or "").strip().strip("()"),
-            vo=bool(d.get("vo")),
-            off_screen="O.S." in modifier,
-        )
-        if cue:
-            dialogue_cues.append(cue)
+    dialogue_cues = panel_dialogue_cues(panel, voice_index=voice_index)
 
     # Visual half — always the fixed five-part formula when casting_lookup is
     # available (the real render path always supplies it); otherwise fall
@@ -417,6 +439,97 @@ def panel_video_prompt(panel: dict, audio_overview: dict | None = None, *,
         audio_bits.append(veo_guide.no_subtitles_directive())
 
     return (visual + (" " + " ".join(audio_bits) if audio_bits else "")).strip()
+
+
+def multi_panel_video_prompt(panels: list[dict], segments: list[tuple[float, float]],
+                             audio_overview: dict | None = None, *,
+                             casting_lookup: dict[str, dict] | None = None,
+                             location_desc: str = "",
+                             visual_overview: dict | None = None,
+                             voice_index: dict[str, str] | None = None,
+                             no_bg_music: bool = True,
+                             room_tone: bool = True,
+                             no_subtitles: bool = True,
+                             out: Path | None = None,
+                             seed: Path | None = None,
+                             reference_images: list[Path] | None = None) -> str:
+    """Assemble ONE Veo prompt covering MULTIPLE consecutive same-cast panels
+    (see `reel.panel_grouping.group_panels`) via Google's documented
+    timestamp-segment technique — a shared Subject/Context/Style&Ambiance
+    prefix (stated once, since cast/location are constant across the group
+    by construction), followed by one `[MM:SS-MM:SS]` line per panel giving
+    its OWN Cinematography + Action + ambient/SFX/dialogue cues. Those
+    genuinely vary shot to shot even with a fixed subject — a wide shot then
+    a close-up of the same two people is exactly the case this exists for.
+
+    `segments` — this group's (start_seconds, end_seconds) boundaries, one
+    per panel, already rescaled (see `panel_grouping.segment_boundaries`) to
+    sum exactly to the actual duration this call will request — the
+    timestamps written into the prompt must always match what Veo is
+    actually asked to render, never an independent estimate.
+
+    Ambient/SFX/dialogue are computed PER PANEL (once per segment, via
+    `panel_ambient_sfx_cues`/`panel_dialogue_cues`), not hoisted to the
+    shared prefix — a panel's own `sound` field can override the scene-wide
+    ambient/SFX independent of `audio_overview`, and hoisting to group-level
+    would silently drop that override for every panel after the first. Only
+    the music directive and the trailing no-subtitles directive are
+    genuinely group-wide/duration-independent, so those are stated once.
+
+    `seed`/`reference_images` — the image(s), if any, attached to this ONE
+    call (only the group's first panel can carry a fresh identity anchor —
+    see `pipeline._render_panel_group`); passed straight through to the
+    shared Subject builder exactly as `panel_video_prompt` already does for
+    a single panel."""
+    if not panels:
+        return ""
+    casting_lookup = casting_lookup or {}
+    visual_overview = visual_overview or {}
+    voice_index = voice_index or {}
+    ao = audio_overview or {}
+    first = panels[0]
+
+    anchored = (anchored_character_names(
+                    first.get("characters_in_frame") or [], casting_lookup,
+                    out, seed, reference_images)
+                if (out is not None and casting_lookup) else None)
+
+    prefix_bits = [
+        panel_subject(first, casting_lookup, anchored),
+        panel_context(first, location_desc, visual_overview.get("key_props"), casting_lookup),
+        panel_style_ambiance(visual_overview),
+    ]
+    score = (ao.get("score_cue") or "").strip()
+    music = veo_guide.music_directive(score, no_background_music=no_bg_music)
+    if music:
+        prefix_bits.append(music)
+    prefix = " ".join(f"{b.rstrip('.')}." for b in prefix_bits if b.strip())
+
+    any_dialogue = False
+    segment_lines: list[str] = []
+    for panel, (start, end) in zip(panels, segments):
+        cine = panel_cinematography(panel)
+        action = (panel.get("action") or panel.get("moment") or "").strip()
+        ambient, sfx = panel_ambient_sfx_cues(panel, ao, room_tone=room_tone)
+        dialogue_cues = panel_dialogue_cues(panel, voice_index=voice_index)
+        if dialogue_cues:
+            any_dialogue = True
+
+        line = " ".join(f"{b.rstrip('.')}." for b in (cine, action) if b.strip())
+        audio_bits: list[str] = []
+        for cue in (veo_guide.ambient_cue(ambient), veo_guide.sfx_cue(sfx)):
+            if cue:
+                audio_bits.append(cue)
+        audio_bits.extend(dialogue_cues)
+        if audio_bits:
+            line = (line + " " + " ".join(audio_bits)).strip()
+        segment_lines.append(
+            f"[{panel_grouping.format_timestamp(start)}-{panel_grouping.format_timestamp(end)}] {line}")
+
+    if any_dialogue and no_subtitles:
+        segment_lines.append(veo_guide.no_subtitles_directive())
+
+    return prefix + "\n\n" + "\n\n".join(segment_lines)
 
 
 def panel_dialogue_lines(panel: dict) -> list[str]:

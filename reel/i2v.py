@@ -151,6 +151,42 @@ def _veo_nearest_valid_duration(seconds: float, *, force_max: bool = False) -> i
     return min(_VEO_VALID_DURATIONS, key=lambda v: abs(v - seconds))
 
 
+# Public names — `panel_grouping.py`/`pipeline.py` need to pick, BEFORE a
+# render call is made, the exact same target duration `_gen_gemini` would
+# pick internally (so a multi-panel group's prompt timestamps can never
+# drift from what Veo is actually asked to render). Exposed rather than
+# duplicating the (4, 6, 8) knowledge in another module.
+VEO_MAX_DURATION = max(_VEO_VALID_DURATIONS)
+
+
+def nearest_valid_duration(seconds: float, *, force_max: bool = False) -> int:
+    """Public alias of `_veo_nearest_valid_duration` — see its docstring."""
+    return _veo_nearest_valid_duration(seconds, force_max=force_max)
+
+
+def forced_group_duration(*, use_references: bool = False, use_extend: bool = False) -> int | None:
+    """The ONE duration a merged multi-panel group's Veo call would be
+    FORCED to, regardless of what it requests — or `None` when nothing
+    forces it, meaning the group is free to request whatever
+    `nearest_valid_duration` picks via the plain image-seed path.
+
+    `use_references=True` — the call would go through
+    `gemini.generate_video_with_references`, which hardcodes
+    `duration_seconds=8` unconditionally (see that function; the value
+    passed to `_gen_gemini` is silently discarded on this path).
+    `use_extend=True` — the call would go through `gemini.extend_video`,
+    which has NO duration parameter at all (fixed ~7s/call per the
+    `continuity_mode: extend` config comment).
+
+    A merged group's own multi-segment prompt timestamps must be built
+    against whichever of these is actually true, or the prompt would
+    describe a duration Veo never renders — see `_render_panel_group` in
+    `pipeline.py`, which always forces `use_extend=False` for its own call
+    for exactly this reason (extend's fixed duration can never be pinned to
+    match arbitrary group timestamps)."""
+    return VEO_MAX_DURATION if (use_references or use_extend) else None
+
+
 def _gen_gemini(images: list[Path], prompt: str, out_path: Path, *,
                 prev_clip: Path | None = None, duration_seconds: float | None = None,
                 reference_images: list[Path] | None = None,

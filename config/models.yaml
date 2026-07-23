@@ -108,6 +108,24 @@ video:
                                    # every other panel is unaffected. Falls back to the normal
                                    # seed/extend path automatically on any failure. Set false to
                                    # disable and always use single-image seeding.
+  multi_segment_prompting: true      # consecutive storyboard panels within the SAME scene that
+                                   # share the same in-frame cast (see reel/panel_grouping.py)
+                                   # are rendered as ONE Veo call via a timestamp-segmented
+                                   # multi-shot prompt ("[00:00-00:02] ... [00:02-00:04] ...")
+                                   # instead of one call per panel — fewer API calls, and lets
+                                   # Subject/Context be stated once while Cinematography/Action
+                                   # vary shot to shot. Gemini/Veo backend only (the bracket-
+                                   # timestamp convention has no equivalent on diffusers/comfyui);
+                                   # automatically forced off whenever `overlays.enabled` is true
+                                   # (overlay burn-in has no per-segment time-windowing — a
+                                   # merged clip would get one panel's caption burned over all of
+                                   # them). A merged call's own render is always single-image-seed
+                                   # (never extend-mode continuity — Veo's extend has no duration
+                                   # parameter to pin against the group's timestamps). Falls back
+                                   # to per-panel rendering automatically on any failure. Never
+                                   # merges across a SCENE boundary (scoped within one scene only
+                                   # — see panel_grouping.py's module docstring). Set false to
+                                   # disable and always render one panel per Veo call.
   style_suffix: "cinematic, photorealistic"   # Veo guide style keywords; appended only when no style is present in the prompt
   poll_seconds: 10
   timeout_seconds: 1200

@@ -46,8 +46,8 @@
 - **`tests/test_prompt_rules.py` is a real, committed, fully offline suite**
   (`make test`, no LLM/API calls, <1s) validating every agent prompt's
   conventions (sandwiching, DO-NOT lists, schema adherence) and the
-  deterministic functions backing some of those rules — 318 tests as of the
-  latest session.
+  deterministic functions backing some of those rules — 336 tests as of the
+  latest session (across the whole `tests/` suite, not just this one file).
 - **Still shelved:** a formal end-to-end `tests/` suite stubbing every paid
   API for a full `pipeline.run()` drive-through — drafted once, then
   explicitly removed before being committed. This project's practice for
@@ -65,6 +65,36 @@
   falling back to `_frame_char_anchor` at a boundary panel.
 
 ## Session log
+- 2026-07-23 — Added multi-segment timestamped Veo prompts
+  (`reel/panel_grouping.py`, new; `veo_prompt.multi_panel_video_prompt`;
+  `pipeline._render_panel_group`; config `video.multi_segment_prompting`,
+  default on): consecutive storyboard panels WITHIN one scene sharing the
+  same in-frame cast and fitting within Veo's 8s max duration are now
+  rendered as ONE Veo call via Google's documented
+  `[00:00-00:02] ... [00:02-00:04] ...` timestamp-segment technique, instead
+  of one call per panel — fewer API calls, Subject/Context/Style stated
+  once while Cinematography/Action vary per segment. A planning pass before
+  implementation surfaced a load-bearing fact the naive design missed: only
+  the plain image-seed Veo call actually honors a caller-chosen
+  `duration_seconds` (reference-images hardcodes 8s, extend-mode has no
+  duration parameter at all) — a merged group's own call is therefore
+  always forced onto the plain-seed path, and is disabled entirely when
+  `video.overlays.enabled` is true (no per-segment time-windowing exists for
+  burned-in captions) or the backend isn't Gemini/Veo. Deliberately scoped
+  to WITHIN one scene only (never crosses a `scene_number` boundary) after
+  direct pushback that an early draft's "location is constant" reasoning
+  was really an unstated assumption rather than a scoping decision;
+  cross-scene merging (consecutive scenes sharing a location, which the
+  data model already permits) was explicitly deferred as TBD, not
+  implemented. `_char_set_changed` was relocated verbatim to
+  `panel_grouping.char_set_changed` as the single source of truth (imported
+  back into `pipeline.py` under its old name). `rerender_panels`'s targeted
+  panel re-render now refuses (rather than silently corrupting a merged
+  clip's shared-clip invariant) if a targeted panel or its one-hop cascade
+  target belongs to a merged group — recursive group-aware cascading was
+  scoped out of v1 as the highest-risk piece, with re-rendering the whole
+  scene as the working escape hatch. New `tests/test_panel_grouping.py` (18
+  tests, offline); 336 tests total, still passing.
 - 2026-07-16 — Added explicit "best in the field" persona framing to every
   agent's `SYSTEM` prompt (e.g. "one of the most sought-after film casting
   directors working today"), and added a "DO NOT:" failure-mode list plus a

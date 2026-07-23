@@ -62,6 +62,11 @@
     flags a scene-count/reorder change as `drastic`.
   - `revision_merge.py` — the single shared `merge_by_key`/`merge_fields`
     splice primitive every scoped-revision agent call uses.
+  - `panel_grouping.py` — pure, deterministic same-cast/duration-bounded
+    panel grouping for multi-segment timestamped Veo prompts (see
+    "Multi-segment timestamped Veo prompts" below); the sole owner of the
+    `char_set_changed` "shot boundary" predicate, imported back into
+    `pipeline.py` as `_char_set_changed`.
   - `agents/` — ingest, genre, structure, moodboard, characters, casting,
     scenes, soundscape, visuals, cinematography, storyboard, screenplay,
     fidelity, critique, revision.
@@ -355,6 +360,36 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
   submission (`veo_guide.verify_prompt`, warnings only, never blocking);
   audio cues are constructed by dedicated `veo_guide` helper functions
   rather than hand-rolled inline.
+- **Multi-segment timestamped Veo prompts (`reel/panel_grouping.py`,
+  config `video.multi_segment_prompting`, default on):** consecutive
+  storyboard panels WITHIN one scene that share the same in-frame cast
+  (`panel_grouping.group_panels`, using the same `char_set_changed`
+  boundary predicate `_resolve_panel_references` already uses) and whose
+  summed duration fits Veo's 8s max are rendered as ONE Veo call via
+  Google's documented timestamp-segment technique
+  (`[00:00-00:02] ... [00:02-00:04] ...`, built by
+  `veo_prompt.multi_panel_video_prompt`) instead of one call per panel —
+  fewer API calls, and Subject/Context/Style are stated once while
+  Cinematography/Action vary shot to shot (`pipeline._render_panel_group`).
+  Deliberately scoped to WITHIN one scene only — never crosses a
+  `scene_number` boundary, even though the data model allows consecutive
+  scenes to share a location (see `panel_grouping.py`'s module docstring);
+  cross-scene merging is a deferred follow-on, not implemented. A merged
+  group's own call always uses the plain image-seed path (never
+  `continuity_mode: extend`, whose fixed ~7s/call has no duration parameter
+  to pin against the group's timestamps) and is forced off entirely when
+  `video.overlays.enabled` is true (overlay burn-in has no per-segment
+  time-windowing) or the backend isn't Gemini/Veo. Falls back to per-panel
+  rendering automatically on any exception. The manifest's per-panel
+  `frame_record`s for a merged group all share one physical `clip` path and
+  carry a `group_panels` list of sibling panel numbers — `_stitch_scene`/
+  `_clips_in_order` dedupe by resolved path (`_dedupe_clip_paths`) so a
+  shared clip isn't concatenated multiple times. **Known v1 limitation:**
+  `rerender_panels` (the `revise` CLI's targeted panel re-render) refuses
+  with a clear error if a targeted panel — or its one-hop cascade target —
+  belongs to a merged group, rather than attempting recursive group-aware
+  cascading; the escape hatch is re-rendering the whole scene via
+  `_render_scene_frames(..., only_scenes={N})`.
 - On this host prefer `--profile fast` (one model, no reload churn between
   agents).
 - Update cadence lives in `scripts/update-models.sh` (pull + version-check

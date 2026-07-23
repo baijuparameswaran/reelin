@@ -84,6 +84,8 @@ from . import veo_prompt
 from . import gemini
 from . import session
 from . import duration_budget
+from . import panel_grouping
+from .panel_grouping import char_set_changed as _char_set_changed
 from .revision_merge import merge_by_key
 
 
@@ -472,34 +474,6 @@ def _frame_char_anchor(frame: dict, cast_index: dict, out: Path) -> Path | None:
     return None
 
 
-def _char_set_changed(fr: dict, prev_char_key) -> bool:
-    """True if THIS panel is a character "shot boundary" relative to
-    `prev_char_key` — the immediately preceding panel's in-frame character
-    SET (a `frozenset`, or `None` for a scene's first panel, meaning
-    "nothing to compare against yet", which itself counts as a boundary).
-    A panel with no listed characters at all is never a boundary (nothing
-    to compare) — it's treated as a continuation of whatever came before.
-
-    Shared by `_resolve_panel_references` (decides whether to use
-    multi-character `reference_images` instead of a single seed) AND by
-    every caller that decides whether Veo's `continuity_mode: extend` is
-    even eligible for this panel (`_render_scene_frames`/`rerender_panels`
-    null out `prev_clip_path` when this is True) — extending the PREVIOUS
-    clip only makes sense when this panel is showing the same subject(s)
-    that clip was; carrying it forward across a cast change would extend
-    the wrong characters' continuity (and audio) into a shot that doesn't
-    feature them. Scene-level PROPS (`visual_overview.key_props`) don't
-    need an equivalent check here — they're attributed scene-wide, not
-    per-panel, in this codebase's data model (no artifact currently says
-    which panel a given prop appears in — see `veo_prompt.panel_context`),
-    so they can only ever change at a SCENE boundary, which already resets
-    `prev_clip_path`/`prev_tail` to `None` unconditionally between scenes."""
-    names = fr.get("characters_in_frame") or []
-    if not names:
-        return False
-    return prev_char_key is None or frozenset(names) != prev_char_key
-
-
 def _resolve_panel_references(fr: dict, prev_char_key, cast_index: dict, out: Path):
     """Multi-character Veo `reference_images` for THIS panel, at a "shot
     boundary" (see `_char_set_changed`) — and only when 2+ of the in-frame
@@ -680,6 +654,184 @@ def _render_one_panel(fr: dict, snum, sdir: Path, seed: Path | None,
     }
 
 
+def _render_panel_group_impl(group: list[dict], snum, sdir: Path, seed: Path | None, out: Path, *,
+                             casting_lookup: dict, location_desc: str, visual_overview: dict,
+                             voice_index: dict, audio_overview: dict,
+                             no_bg_music: bool, room_tone: bool, no_subtitles: bool,
+                             reference_images: list[Path] | None, force: bool, dry_run: bool) -> list[dict]:
+    """The actual multi-panel-group render (see `_render_panel_group`'s
+    docstring for the public contract) — split out so the wrapper can catch
+    ANY exception raised here and fall back to per-panel rendering without
+    the try/except itself hiding what's being tried."""
+    use_refs = bool(reference_images) and len(reference_images) >= 2
+    # A merged group's own call is NEVER extend-mode (see
+    # i2v.forced_group_duration's docstring) — only reference-images can
+    # force this group's duration; extend is always False here.
+    target_total = i2v.forced_group_duration(use_references=use_refs)
+    raw_durations = [duration_budget.parse_duration_seconds(fr.get("duration"))
+                     or duration_budget.ASSUMED_SECONDS_PER_SHOT for fr in group]
+    if target_total is None:
+        target_total = i2v.nearest_valid_duration(sum(raw_durations))
+    segments = panel_grouping.segment_boundaries(raw_durations, target_total)
+
+    prompt = veo_prompt.multi_panel_video_prompt(
+        group, segments, audio_overview,
+        casting_lookup=casting_lookup, location_desc=location_desc,
+        visual_overview=visual_overview, voice_index=voice_index,
+        no_bg_music=no_bg_music, room_tone=room_tone, no_subtitles=no_subtitles,
+        out=out, seed=seed, reference_images=reference_images)
+
+    first_fnum = group[0].get("panel") or group[0].get("frame", 0)
+    last_fnum = group[-1].get("panel") or group[-1].get("frame", 0)
+    first_tag = f"{int(first_fnum):02d}" if isinstance(first_fnum, int) else str(first_fnum)
+    last_tag = f"{int(last_fnum):02d}" if isinstance(last_fnum, int) else str(last_fnum)
+    tag = f"{first_tag}-{last_tag}"
+    clip = sdir / f"frame_{tag}.mp4"
+    tail_img = sdir / f"frame_{tag}_tail.png"
+    hash_path = sdir / f"frame_{tag}.hash"
+
+    # This call's own prev_clip is always None (never extend-mode) — see above.
+    current_hash = _content_hash(prompt, seed, None, target_total, *(reference_images or []))
+    rendered = False
+    failed = False
+    if force or _stale(clip, hash_path, current_hash):
+        if clip.exists():
+            _log(f"      scene {snum} frames {tag} — prompt/seed revised"
+                 + (", API params logged (--no-render) …" if dry_run else ", re-rendering …"))
+        elif dry_run:
+            _log(f"      scene {snum} frames {tag} — recording intended API call (--no-render) …")
+        if i2v.generate_clip([seed] if seed else [], prompt, clip, prev_clip=None,
+                             duration_seconds=target_total,
+                             reference_images=reference_images, dry_run=dry_run):
+            rendered = True
+            i2v.last_frame(clip, tail_img)
+            hash_path.write_text(current_hash)
+        elif dry_run:
+            pass
+        else:
+            failed = True
+            _log(f"      ⚠ scene {snum} frames {tag} — clip not produced")
+
+    group_panel_numbers = [fr.get("panel") or fr.get("frame", 0) for fr in group]
+    results = []
+    for i, fr in enumerate(group):
+        fnum = fr.get("panel") or fr.get("frame", 0)
+        is_first = (i == 0)
+        is_last = (i == len(group) - 1)
+        frame_record = {
+            "panel": fnum,
+            "shot_type": fr.get("shot_type", ""),
+            "action": fr.get("action") or fr.get("moment", ""),
+            "seed": str(Path(seed).relative_to(out)) if (is_first and seed and Path(seed).exists()) else None,
+            "start_frame": str(Path(seed).relative_to(out)) if (is_first and seed and Path(seed).exists()) else None,
+            # Only the LAST constituent panel gets a real end_frame — the
+            # intermediate members' "tail" is mid-clip, not a meaningful cut
+            # point (see this module's ARCHITECTURE.md entry for grouping).
+            "end_frame": str(tail_img.relative_to(out)) if (is_last and tail_img.exists()) else None,
+            "clip": str(clip.relative_to(out)) if clip.exists() else None,
+            "reference_images": ([str(p.relative_to(out)) for p in reference_images]
+                                 if (is_first and reference_images) else None),
+            # Sibling panel numbers sharing this ONE physical clip — lets
+            # downstream stitching dedupe (`_dedupe_clip_paths`) and lets
+            # `rerender_panels` detect group membership before targeting a
+            # single member of a merged clip.
+            "group_panels": group_panel_numbers,
+        }
+        results.append({
+            "frame_record": frame_record,
+            "prompt": prompt,
+            "tag": tag if is_last else f"{tag}#{fnum}",
+            "tail_path": tail_img,
+            "clip_path": clip,
+            "rendered": rendered,
+            "failed": failed,
+        })
+    return results
+
+
+def _render_panel_group(group: list[dict], snum, sdir: Path, seed: Path | None, out: Path, *,
+                        casting_lookup: dict, location_desc: str, visual_overview: dict,
+                        voice_index: dict, audio_overview: dict,
+                        no_bg_music: bool, room_tone: bool, no_subtitles: bool,
+                        reference_images: list[Path] | None = None,
+                        force: bool = False, dry_run: bool = False) -> list[dict]:
+    """Render 2+ consecutive same-cast panels (see `panel_grouping.group_
+    panels`) as ONE Veo call via a multi-segment timestamped prompt, instead
+    of one call per panel — cuts API calls and lets Subject/Context be
+    stated once. Mirrors `_render_one_panel`'s contract (dry_run, force,
+    hash/staleness, tail-frame extraction) but for the whole group at once;
+    returns a LIST of per-panel result dicts (one per constituent panel
+    number, same shape `_render_one_panel` returns) so callers that walk
+    panel-by-panel don't need a separate code path.
+
+    Deliberately does NOT burn overlays (`i2v.add_overlays`) — its caller
+    (`_render_scene_frames`) only ever invokes this function when
+    `video.overlays.enabled` is false (a merged clip spans several panels'
+    worth of shot labels/dialogue, and overlay burn-in has no per-segment
+    time-windowing) — see the config toggle's doc comment.
+
+    On ANY exception, falls back to rendering the group's panels
+    individually via `_render_one_panel` — this codebase's "best-effort,
+    never blocks" convention for every other optional render optimization
+    (fidelity/critique/config-validation/`veo_guide.verify_prompt`). The
+    caller sees no difference in the returned shape either way."""
+    try:
+        return _render_panel_group_impl(
+            group, snum, sdir, seed, out,
+            casting_lookup=casting_lookup, location_desc=location_desc,
+            visual_overview=visual_overview, voice_index=voice_index,
+            audio_overview=audio_overview, no_bg_music=no_bg_music,
+            room_tone=room_tone, no_subtitles=no_subtitles,
+            reference_images=reference_images, force=force, dry_run=dry_run,
+        )
+    except Exception as e:
+        _log(f"      ⚠ scene {snum} — multi-panel group render failed "
+             f"({type(e).__name__}: {e}); falling back to per-panel rendering")
+        results = []
+        fallback_seed = seed
+        fallback_prev_clip: Path | None = None
+        fallback_refs = reference_images
+        for fr in group:
+            res = _render_one_panel(fr, snum, sdir, fallback_seed, fallback_prev_clip, out,
+                                    casting_lookup=casting_lookup, location_desc=location_desc,
+                                    visual_overview=visual_overview, voice_index=voice_index,
+                                    audio_overview=audio_overview,
+                                    no_bg_music=no_bg_music, room_tone=room_tone,
+                                    no_subtitles=no_subtitles,
+                                    reference_images=fallback_refs or None,
+                                    force=force, dry_run=dry_run)
+            results.append(res)
+            fallback_seed = res["tail_path"] if res["tail_path"].exists() else fallback_seed
+            fallback_prev_clip = res["clip_path"] if res["rendered"] else None
+            fallback_refs = None  # only the group's first panel gets a fresh boundary anchor
+        return results
+
+
+def _dedupe_clip_paths(frames: list[dict], out: Path) -> list[Path]:
+    """Ordered, deduplicated clip paths from a list of frame_record-shaped
+    dicts. A merged multi-panel group (see `_render_panel_group`) emits N
+    frame_records that all share the SAME physical clip path, so a naive
+    per-record collection would hand `i2v.stitch` the same file N times in
+    a row. Preserves the records' own order; only collapses repeats of the
+    identical resolved path — a no-op for the (pre-existing, still common)
+    case of one distinct clip per record."""
+    seen: set[Path] = set()
+    paths: list[Path] = []
+    for fr in frames:
+        rel = fr.get("clip")
+        if not rel:
+            continue
+        p = out / rel
+        if not p.exists():
+            continue
+        rp = p.resolve()
+        if rp in seen:
+            continue
+        seen.add(rp)
+        paths.append(p)
+    return paths
+
+
 def _stitch_scene(scene_vid: Path, frames_out: list, out: Path, snum) -> str | None:
     """Unconditionally (re)build `scene_vid` from `frames_out`'s clips, in
     order (ffmpeg's `-y` overwrites any existing file). Returns the relative
@@ -688,8 +840,7 @@ def _stitch_scene(scene_vid: Path, frames_out: list, out: Path, snum) -> str | N
     `_render_scene_frames` skips calling this when `scene_vid` already exists
     (the normal resume case, nothing changed); `rerender_panels` always calls
     it, since it just changed at least one clip in this scene."""
-    scene_clips = [out / fr["clip"] for fr in frames_out
-                   if fr.get("clip") and (out / fr["clip"]).exists()]
+    scene_clips = _dedupe_clip_paths(frames_out, out)
     if not scene_clips:
         return None
     if i2v.stitch(scene_clips, scene_vid):
@@ -755,6 +906,16 @@ def _render_scene_frames(storyboard: dict, casting: dict, out: Path,
     no_bg_music = bool(audio_cfg.get("no_background_music", True))
     room_tone = bool(audio_cfg.get("room_tone", True))
     no_subtitles = bool(audio_cfg.get("no_subtitles", True))
+    # Multi-segment timestamped Veo prompts (see reel/panel_grouping.py):
+    # gated off whenever the bracket-timestamp convention wouldn't actually
+    # apply (non-Veo backend) or a merged clip would break another feature
+    # that assumes one clip == one panel (overlay burn-in has no per-segment
+    # time-windowing — see config `video.overlays`). `False` here makes
+    # `group_panels` a total no-op (all singleton groups), reproducing
+    # today's exact per-panel behavior.
+    use_grouping = (bool(vcfg.get("multi_segment_prompting", True))
+                   and i2v.backend() in ("gemini", "veo")
+                   and not i2v.overlays_enabled())
 
     cast_index = {}
     casting_lookup: dict[str, dict] = {}
@@ -804,60 +965,132 @@ def _render_scene_frames(storyboard: dict, casting: dict, out: Path,
         # [Style & Ambiance] source: the scene's own color/lighting/mood.
         visual_overview = scene.get("visual_overview") or {}
 
-        for fr in panels:
-            # Seed: continue from the previous frame's tail (carries the look
-            # forward); the first frame of a scene seeds from the in-frame
-            # character's representation image (identity reference).
-            seed = prev_tail if (prev_tail and continuity) else _frame_char_anchor(fr, cast_index, out)
-            # Extend-mode continuity (config `continuity_mode: extend`) may
-            # only continue from the previous CLIP when this panel's
-            # in-frame characters are the SAME as that clip's — extending a
-            # clip across a cast change would carry the wrong subject's
-            # continuity/audio into a shot that doesn't feature them. Props
-            # (visual_overview.key_props) need no separate check: they're
-            # scene-wide, not per-panel, in this codebase's data model, so
-            # they can only change at a SCENE boundary — already covered by
-            # `prev_clip_path`'s per-scene reset above. Nulled here (per
-            # call, not the loop variable itself) rather than in i2v, so
-            # `_gen_gemini`'s extend branch is never even attempted for a
-            # boundary panel.
-            effective_prev_clip = None if _char_set_changed(fr, prev_char_key) else prev_clip_path
-            # Multi-character identity lock at the SAME "shot boundary" —
-            # see _resolve_panel_references. Computed alongside `seed`, not
-            # instead of it: `i2v._gen_gemini` decides which actually gets
-            # used, falling back to `seed` on its own if this is
-            # disabled/unavailable/fails.
-            reference_images, prev_char_key = _resolve_panel_references(
-                fr, prev_char_key, cast_index, out)
-            res = _render_one_panel(fr, snum, sdir, seed, effective_prev_clip, out,
-                                    casting_lookup=casting_lookup, location_desc=location_desc,
-                                    visual_overview=visual_overview, voice_index=voice_index,
-                                    audio_overview=audio_overview,
-                                    no_bg_music=no_bg_music, room_tone=room_tone,
-                                    no_subtitles=no_subtitles,
-                                    reference_images=reference_images or None,
-                                    dry_run=dry_run)
-            if res["rendered"]:
-                manifest["clips"] += 1
-                if continuity:
+        # Partition this scene's OWN panels into same-cast, duration-bounded
+        # runs (see reel/panel_grouping.py) — a group of size 1 is the
+        # common/degenerate case and goes through the exact per-panel path
+        # below, untouched. Never crosses a scene boundary (grouping only
+        # ever sees one scene's panels here); see panel_grouping.py's module
+        # docstring for why cross-scene merging is out of scope.
+        groups = panel_grouping.group_panels(panels) if use_grouping else [[p] for p in panels]
+
+        for grp in groups:
+            if len(grp) == 1:
+                fr = grp[0]
+                # Seed: continue from the previous frame's tail (carries the look
+                # forward); the first frame of a scene seeds from the in-frame
+                # character's representation image (identity reference).
+                seed = prev_tail if (prev_tail and continuity) else _frame_char_anchor(fr, cast_index, out)
+                # Extend-mode continuity (config `continuity_mode: extend`) may
+                # only continue from the previous CLIP when this panel's
+                # in-frame characters are the SAME as that clip's — extending a
+                # clip across a cast change would carry the wrong subject's
+                # continuity/audio into a shot that doesn't feature them. Props
+                # (visual_overview.key_props) need no separate check: they're
+                # scene-wide, not per-panel, in this codebase's data model, so
+                # they can only change at a SCENE boundary — already covered by
+                # `prev_clip_path`'s per-scene reset above. Nulled here (per
+                # call, not the loop variable itself) rather than in i2v, so
+                # `_gen_gemini`'s extend branch is never even attempted for a
+                # boundary panel.
+                effective_prev_clip = None if _char_set_changed(fr, prev_char_key) else prev_clip_path
+                # Multi-character identity lock at the SAME "shot boundary" —
+                # see _resolve_panel_references. Computed alongside `seed`, not
+                # instead of it: `i2v._gen_gemini` decides which actually gets
+                # used, falling back to `seed` on its own if this is
+                # disabled/unavailable/fails.
+                reference_images, prev_char_key = _resolve_panel_references(
+                    fr, prev_char_key, cast_index, out)
+                res = _render_one_panel(fr, snum, sdir, seed, effective_prev_clip, out,
+                                        casting_lookup=casting_lookup, location_desc=location_desc,
+                                        visual_overview=visual_overview, voice_index=voice_index,
+                                        audio_overview=audio_overview,
+                                        no_bg_music=no_bg_music, room_tone=room_tone,
+                                        no_subtitles=no_subtitles,
+                                        reference_images=reference_images or None,
+                                        dry_run=dry_run)
+                if res["rendered"]:
+                    manifest["clips"] += 1
+                    if continuity:
+                        prev_tail = res["tail_path"] if res["tail_path"].exists() else seed
+                        prev_clip_path = res["clip_path"]
+                elif res["failed"]:
+                    manifest["failed"] += 1
+                elif continuity:
+                    # Already up to date — still chain forward from its tail frame
+                    # (previously this branch left prev_tail untouched, so a resumed
+                    # run with some frames already rendered would reset newer frames
+                    # to the character anchor instead of continuing the scene).
                     prev_tail = res["tail_path"] if res["tail_path"].exists() else seed
                     prev_clip_path = res["clip_path"]
-            elif res["failed"]:
-                manifest["failed"] += 1
-            elif continuity:
-                # Already up to date — still chain forward from its tail frame
-                # (previously this branch left prev_tail untouched, so a resumed
-                # run with some frames already rendered would reset newer frames
-                # to the character anchor instead of continuing the scene).
-                prev_tail = res["tail_path"] if res["tail_path"].exists() else seed
-                prev_clip_path = res["clip_path"]
 
-            frames_out.append(res["frame_record"])
-            prompt_log.append({
-                "tag": res["tag"],
-                "prompt": res["prompt"],
-                "clip": res["frame_record"]["clip"],
-            })
+                frames_out.append(res["frame_record"])
+                prompt_log.append({
+                    "tag": res["tag"],
+                    "prompt": res["prompt"],
+                    "clip": res["frame_record"]["clip"],
+                })
+                continue
+
+            # Merged group (2+ same-cast panels) — one Veo call for the
+            # whole run via a multi-segment timestamped prompt. Seed/
+            # reference-image selection uses the group's FIRST panel — a
+            # group can only ever start where this boundary logic already
+            # triggers seed/reference selection today (scene start, or a
+            # genuine character-set change).
+            fr0 = grp[0]
+            seed = prev_tail if (prev_tail and continuity) else _frame_char_anchor(fr0, cast_index, out)
+            reference_images, prev_char_key = _resolve_panel_references(
+                fr0, prev_char_key, cast_index, out)
+            # Propagate prev_char_key across the REST of the group too,
+            # mirroring what a per-panel walk would compute for each member
+            # (a same-cast run by construction, but a later member with NO
+            # characters_in_frame still needs the key preserved unchanged
+            # for whatever panel comes after the group).
+            for fr_ in grp[1:]:
+                names = list(dict.fromkeys(fr_.get("characters_in_frame") or []))
+                if names:
+                    prev_char_key = frozenset(names)
+
+            results = _render_panel_group(grp, snum, sdir, seed, out,
+                                          casting_lookup=casting_lookup, location_desc=location_desc,
+                                          visual_overview=visual_overview, voice_index=voice_index,
+                                          audio_overview=audio_overview,
+                                          no_bg_music=no_bg_music, room_tone=room_tone,
+                                          no_subtitles=no_subtitles,
+                                          reference_images=reference_images or None,
+                                          dry_run=dry_run)
+
+            # Bookkeeping counts unique physical clips, not constituent
+            # panel entries — a true grouped render shares one clip path
+            # across all N results (counted once); the exception-fallback
+            # path (see _render_panel_group) produces N distinct clips,
+            # each counted individually, same as the per-panel loop above.
+            # Same dedup keys the prompt log, so the SAME multi-segment
+            # prompt text isn't repeated N times for one physical clip —
+            # last-write-wins per clip picks up the clean (non-"#panel")
+            # tag from the group's final constituent panel.
+            seen_clips: set = set()
+            prompt_log_by_clip: dict = {}
+            for r in results:
+                clip_key = r["frame_record"].get("clip")
+                if clip_key not in seen_clips:
+                    seen_clips.add(clip_key)
+                    if r["rendered"]:
+                        manifest["clips"] += 1
+                    elif r["failed"]:
+                        manifest["failed"] += 1
+                frames_out.append(r["frame_record"])
+                prompt_log_by_clip[clip_key] = {
+                    "tag": r["tag"],
+                    "prompt": r["prompt"],
+                    "clip": r["frame_record"]["clip"],
+                }
+            prompt_log.extend(prompt_log_by_clip.values())
+
+            last = results[-1]
+            if last["rendered"] or (continuity and not last["failed"]):
+                prev_tail = last["tail_path"] if last["tail_path"].exists() else seed
+                prev_clip_path = last["clip_path"]
 
         _write_scene_prompt_log(
             out, snum, vcfg.get("model", "unknown"),
@@ -1058,15 +1291,45 @@ def rerender_panels(storyboard: dict, casting: dict, out: Path, *,
     for p in missing:
         _log(f"      ⚠ rerender_panels: panel {p} not found in scene {snum} storyboard — skipped")
 
-    for pnum in target_sorted:
-        _render(pnum)
-
-    # One-hop cascade: the panel immediately after the LAST targeted panel.
+    # One-hop cascade target, computed BEFORE any rendering so the group-
+    # membership check below can validate it too — see that check's comment.
     next_panel_num = None
     if target_sorted:
         after = sorted(n for n in panels_by_num if isinstance(n, int) and n > target_sorted[-1])
         next_panel_num = after[0] if after else None
 
+    # A panel that's part of a merged multi-panel group (see
+    # _render_panel_group) shares its physical clip with sibling panel
+    # numbers — re-rendering "just" that one panel would either produce a
+    # stray, orphaned clip file (if re-rendered alone) or silently desync
+    # the group's shared-clip invariant (siblings would keep pointing at
+    # the OLD clip while this one panel now has its own). v1 doesn't
+    # attempt group-aware cascading (the one-hop cascade target can itself
+    # be the first member of a DIFFERENT untouched group, which would need
+    # its own recursive expansion) — refuse instead of risking silent
+    # corruption, and point at the working escape hatch. Checked against
+    # BOTH the originally-targeted panels and the one-hop cascade target,
+    # before any panel is actually re-rendered (fail fast, no partial
+    # mutation).
+    candidates = list(target_sorted) + ([next_panel_num] if next_panel_num is not None else [])
+    for pnum in candidates:
+        rec = frames_by_num.get(pnum)
+        grp = (rec or {}).get("group_panels") or []
+        if len(grp) > 1:
+            raise ValueError(
+                f"panel {pnum} in scene {scene_number} was rendered as part of a merged "
+                f"multi-panel group (panels {grp} share one Veo clip) — targeted "
+                "re-render of a single member of a merged clip isn't supported yet. "
+                f"Re-render the whole scene instead: "
+                f"_render_scene_frames(..., only_scenes={{{scene_number}}})"
+            )
+
+    for pnum in target_sorted:
+        _render(pnum)
+
+    # One-hop cascade: the panel immediately after the LAST targeted panel
+    # (next_panel_num was already computed above, before rendering, so the
+    # group-membership check could validate it too).
     if next_panel_num is not None:
         next_result = _render(next_panel_num)
 
@@ -1153,15 +1416,16 @@ def _scene_videos_in_order(manifest: dict, out: Path) -> list[Path]:
 
 
 def _clips_in_order(manifest: dict, out: Path) -> list[Path]:
-    """Individual frame clip paths in playback order (fallback for final stitch)."""
+    """Individual frame clip paths in playback order (fallback for final
+    stitch). Dedupes within each scene via `_dedupe_clip_paths` — see its
+    docstring; a merged multi-panel group's several frame records share one
+    physical clip."""
     clips: list[Path] = []
     for scene in sorted(manifest.get("scenes", []),
                         key=lambda s: s.get("scene_number") if isinstance(s.get("scene_number"), int) else 1e9):
-        for fr in sorted(scene.get("frames", []),
-                         key=lambda f: f.get("frame") if isinstance(f.get("frame"), int) else 1e9):
-            rel = fr.get("clip")
-            if rel and (out / rel).exists():
-                clips.append(out / rel)
+        frames = sorted(scene.get("frames", []),
+                        key=lambda f: f.get("frame") if isinstance(f.get("frame"), int) else 1e9)
+        clips.extend(_dedupe_clip_paths(frames, out))
     return clips
 
 
