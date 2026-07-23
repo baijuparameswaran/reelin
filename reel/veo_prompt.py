@@ -24,6 +24,14 @@ audit trail.
 Visual half always follows the fixed five-part formula, in this order, per
 Google's official Veo 3.1 prompting guide:
   [Cinematography] + [Subject] + [Action] + [Context] + [Style & Ambiance]
+[Action] (`panel_action`) folds in the panel's own `emotional_note` — a
+per-shot creative direction authored by the cinematography/visuals/
+soundscape agents ("the emotion this panel must evoke") — as a short
+performance-direction clause. This is the pipeline's one deliberate
+"director's freedom" injection point: it never changes WHAT happens
+(source-bound facts stay scenes.py/screenplay.py's exclusive territory),
+only HOW an already-established beat is performed/felt, exactly like a
+director's note to an actor.
 Audio half is built via `veo_guide`'s construction helpers (ambient/SFX/
 music/dialogue/no-subtitles cues) — that module owns the guide-vocabulary
 knowledge; this one only gathers panel/scene data and hands it off.
@@ -185,6 +193,39 @@ def anchored_character_names(names: list[str], casting_lookup: dict[str, dict],
     return anchored
 
 
+def panel_action(panel: dict) -> str:
+    """[Action] — what the subject does, PLUS this panel's own authored
+    `emotional_note` ("the emotion this panel must evoke in the audience" —
+    per-SHOT creative direction from the cinematography agent, i.e. the DP's
+    own read of what a specific shot should communicate, falling back to the
+    visuals/soundscape agents' scene-wide read when no shot-specific one
+    exists; see `storyboard._build_scene_board`), folded in as a short
+    performance-direction clause.
+
+    This is the deliberate "director's freedom" layer: the FACTS of what
+    happens (source-bound, via scenes.py/screenplay.py) are never touched
+    here — only HOW an already-established beat is performed/felt is added,
+    the same way a director notes "play this with quiet dread" without
+    changing a line of the script. Before this function existed,
+    `emotional_note` was authored by three creative agents and shown to the
+    operator at the review gate, but silently dropped before ever reaching
+    the actual Veo prompt — this is that wiring.
+
+    Skipped when `emotional_note` is empty, or is already substantially
+    present in the action text (avoids a redundant clause — same dedup
+    pattern `panel_video_prompt` already uses for ambient/SFX overlap)."""
+    action = (panel.get("action") or panel.get("moment") or "").strip()
+    note = (panel.get("emotional_note") or "").strip()
+    if not note:
+        return action
+    if not action:
+        return note
+    if note.rstrip(".").lower() in action.lower():
+        return action
+    note_clause = note[0].lower() + note[1:] if len(note) > 1 else note.lower()
+    return f"{action.rstrip('.')}, conveying {note_clause}"
+
+
 def panel_context(panel: dict, location_desc: str, key_props: list | None = None,
                   casting_lookup: dict[str, dict] | None = None) -> str:
     """[Context] — environment and background elements: the scene's locked
@@ -257,7 +298,7 @@ def five_part_veo_prompt(panel: dict, *, casting_lookup: dict[str, dict],
     parts: dict[str, str] = {
         "cinematography": panel_cinematography(panel),
         "subject": panel_subject(panel, casting_lookup, anchored),
-        "action": (panel.get("action") or panel.get("moment") or "").strip(),
+        "action": panel_action(panel),
         "context": panel_context(panel, location_desc, (visual_overview or {}).get("key_props"),
                                  casting_lookup),
         "style_ambiance": panel_style_ambiance(visual_overview),
@@ -509,7 +550,7 @@ def multi_panel_video_prompt(panels: list[dict], segments: list[tuple[float, flo
     segment_lines: list[str] = []
     for panel, (start, end) in zip(panels, segments):
         cine = panel_cinematography(panel)
-        action = (panel.get("action") or panel.get("moment") or "").strip()
+        action = panel_action(panel)
         ambient, sfx = panel_ambient_sfx_cues(panel, ao, room_tone=room_tone)
         dialogue_cues = panel_dialogue_cues(panel, voice_index=voice_index)
         if dialogue_cues:

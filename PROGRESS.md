@@ -65,6 +65,20 @@
   falling back to `_frame_char_anchor` at a boundary panel.
 
 ## Session log
+- 2026-07-23 (later) — Wired storyboard panels' `emotional_note` (per-shot
+  creative direction — "the emotion this panel must evoke in the audience" —
+  authored by the cinematography agent, falling back to visuals'/
+  soundscape's scene-wide read) into the actual rendered Veo prompt for the
+  first time, via new `veo_prompt.panel_action` folding it into the [Action]
+  element as a short performance-direction clause ("conveying quiet dread"),
+  used by both `five_part_veo_prompt` and `multi_panel_video_prompt`. Closes
+  a real gap: this field was authored by three creative agents and shown at
+  the review gate, but silently dropped before ever reaching the actual
+  render. Deliberately scoped as the pipeline's one "director's freedom"
+  injection point — interpretive performance direction only, never new
+  source-bound facts (those stay scenes.py/screenplay.py's exclusive
+  territory). New `tests/test_panel_action_emotional_note.py` (13 tests);
+  349 tests total, still passing.
 - 2026-07-23 — Added multi-segment timestamped Veo prompts
   (`reel/panel_grouping.py`, new; `veo_prompt.multi_panel_video_prompt`;
   `pipeline._render_panel_group`; config `video.multi_segment_prompting`,

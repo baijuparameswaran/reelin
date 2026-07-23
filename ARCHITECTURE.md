@@ -205,6 +205,22 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
   case-insensitively against casting.json's Title-Case names
   (`fountain._canonical_name`) so a dialogue speaker is never wrongly
   marked off-screen.
+- **The Veo [Action] element carries a deliberate "director's freedom"
+  layer (`veo_prompt.panel_action`):** each storyboard panel's
+  `emotional_note` — per-shot creative direction ("the emotion this panel
+  must evoke") authored by the cinematography agent (falling back to
+  visuals'/soundscape's scene-wide read), consolidated by
+  `storyboard._build_scene_board` — is folded into the Action clause as a
+  short performance-direction phrase ("Alice reaches for the doorknob,
+  conveying quiet dread"), deduped against text already present in the
+  action. Before this existed, `emotional_note` was authored by three
+  creative agents and shown to the operator at the review gate, but
+  silently dropped before ever reaching the actual Veo prompt. This is the
+  one deliberate point where the rendering layer adds interpretive
+  performance direction on top of an already-established beat — it never
+  changes WHAT happens (scenes.py/screenplay.py stay the sole source-bound
+  authority for that), only HOW it's performed/felt, the same way a
+  director notes a line reading without touching the script.
 - **Config schema validation (`llm.validate_config`) and estimated $ spend
   tracking (`reel/spend.py`) are both best-effort, non-blocking checks
   layered on existing state:** `validate_config` is a lightweight,
