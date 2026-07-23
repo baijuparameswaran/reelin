@@ -129,11 +129,16 @@ class Gate:
         self.timeout = timeout_seconds
 
     @classmethod
-    def from_config(cls, cfg: dict) -> "Gate":
+    def from_config(cls, cfg: dict, *, timeout_override: int | None = None) -> "Gate":
+        """`timeout_override` — an explicit per-invocation override (e.g.
+        `reel.cli`'s `--gate-timeout`) that wins over config `hitl.
+        timeout_seconds` when given; `None` (the default) uses the config
+        value exactly as before."""
         h = cfg.get("hitl", {})
         return cls(
             enabled=h.get("enabled", True),
-            timeout_seconds=h.get("timeout_seconds", 120),
+            timeout_seconds=(timeout_override if timeout_override is not None
+                             else h.get("timeout_seconds", 120)),
         )
 
     def review(self, stage: str, result: dict, summarize) -> Decision:

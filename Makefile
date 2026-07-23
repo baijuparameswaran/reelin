@@ -23,11 +23,11 @@ setup-image: ## Install optional deps for casting image rendering (diffusers/tor
 	$(PIP) install -r requirements-image.txt
 	@echo "image rendering deps installed (image.backend: diffusers)"
 
-demo: test ## Run the bundled sample story (1 scene by default — all shots — per-agent profiles) [SCENES=1|all] [RESUME=1] [PROFILE=fast] [NORENDER=1]
-	$(PY) -m reel.cli samples/sample_story.txt --max-scenes $(or $(SCENES),1) $(if $(PROFILE),--profile $(PROFILE),) $(if $(RESUME),--resume,) $(if $(NORENDER),--no-render,)
+demo: test ## Run the bundled sample story (1 scene by default — all shots — per-agent profiles) [SCENES=1|all] [RESUME=1] [PROFILE=fast] [NORENDER=1] [TIMEOUT=N]
+	$(PY) -m reel.cli samples/sample_story.txt --max-scenes $(or $(SCENES),1) $(if $(PROFILE),--profile $(PROFILE),) $(if $(RESUME),--resume,) $(if $(NORENDER),--no-render,) $(if $(TIMEOUT),--gate-timeout $(TIMEOUT),)
 
-run: test ## Run on your own file:  make run SRC=path/to/story.txt [SCENES=1|all] [RESUME=1] [NORENDER=1]
-	$(PY) -m reel.cli $(SRC) --max-scenes $(or $(SCENES),1) $(if $(RESUME),--resume,) $(if $(NORENDER),--no-render,)
+run: test ## Run on your own file:  make run SRC=path/to/story.txt [SCENES=1|all] [RESUME=1] [NORENDER=1] [TIMEOUT=N]
+	$(PY) -m reel.cli $(SRC) --max-scenes $(or $(SCENES),1) $(if $(RESUME),--resume,) $(if $(NORENDER),--no-render,) $(if $(TIMEOUT),--gate-timeout $(TIMEOUT),)
 
 models: ## Show local model / profile status
 	$(PY) -m reel.cli --list-models

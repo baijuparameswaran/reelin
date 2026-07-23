@@ -1729,6 +1729,7 @@ def run(
     genre: str | None = None,
     target_duration_seconds: int | None = None,
     render: bool = True,
+    gate_timeout_seconds: int | None = None,
 ) -> dict:
     """Run the full screenplay-material phase and write artifacts to `out_dir`.
 
@@ -1759,6 +1760,12 @@ def run(
     normally either way — this is purely a media-generation cost switch,
     not a scoping mechanism (unlike `max_scenes`, which still applies to
     whichever of the two stages DOES run when `render=True`).
+
+    `gate_timeout_seconds` (default: config `hitl.timeout_seconds`, 900) —
+    overrides the auto-approve idle timeout at every review gate for THIS
+    invocation only (see `cli.py`'s `--gate-timeout`); `None` uses the
+    config value unchanged. Doesn't affect `hitl.enabled` — a gate is still
+    shown either way, just with a different auto-approve countdown.
     """
     # On a fresh run, clear any direction left over from a previous run that may
     # have crashed before reaching the llm.set_direction(None) at the end.
@@ -1784,7 +1791,7 @@ def run(
     def save(name: str, data: dict) -> None:
         _write_json(out / f"{name}.json", data)
 
-    gate = Gate.from_config(llm.config())
+    gate = Gate.from_config(llm.config(), timeout_override=gate_timeout_seconds)
     parallel = llm.config().get("runtime", {}).get("max_parallel_agents", 1) > 1
 
     # Per-stage fidelity: after each stage is approved, check its output stays

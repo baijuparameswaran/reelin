@@ -2,7 +2,7 @@
 
 Usage:
     python -m reel.cli SOURCE.txt [--out DIR] [--max-scenes N] [--profile NAME]
-        [--target-duration N] [--resume] [--no-render]
+        [--target-duration N] [--gate-timeout N] [--resume] [--no-render]
     python -m reel.cli --list-models             # show local model status
     python -m reel.cli stages                    # list pipeline stages + their inputs
     python -m reel.cli stage NAME [SOURCE.txt]   # run ONE stage independently
@@ -1707,6 +1707,11 @@ def main(argv: list[str] | None = None) -> int:
                          "config `image.enabled`/`video.enabled` to false, but scoped "
                          "to just this invocation. Omitted on a --resume run: inherits "
                          "whatever the run being resumed actually used")
+    ap.add_argument("--gate-timeout", type=int, default=None, dest="gate_timeout",
+                    help="override the review-gate auto-approve idle timeout, in "
+                         "seconds, for this invocation only (default: config "
+                         "hitl.timeout_seconds, currently 900; 0 = wait forever). "
+                         "Does not change hitl.enabled or persist to config/models.yaml")
     ap.add_argument("--list-models", action="store_true",
                     help="show local model / profile status and exit")
     args = ap.parse_args(argv)
@@ -1761,7 +1766,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         run(args.source, out_dir=args.out, max_scenes=max_scenes,
             profile_override=profile, resume=args.resume, genre=args.genre,
-            target_duration_seconds=target_duration, render=render)
+            target_duration_seconds=target_duration, render=render,
+            gate_timeout_seconds=args.gate_timeout)
     except PipelineStopped as e:
         session.finish(args.out, "paused")
         print(f"\n[reel] paused at '{e.stage}'. Completed stages saved in {args.out}/.")
