@@ -187,6 +187,61 @@ STAGES: list[Stage] = [
 REGISTRY: dict[str, Stage] = {s.name: s for s in STAGES}
 
 
+# ── empty-result safety net ───────────────────────────────────────────────────
+# A generation that comes back empty (a JSON-parse failure, or the expected
+# content missing entirely) would otherwise sail through fidelity/genre
+# scoring, self-critique, and the review gate untouched, silently corrupting
+# every downstream stage that reads it. Scoped to the creative content-
+# generating stages only — NOT casting_images/moodboard_tiles/scene_render/
+# fidelity, where "empty" means something else entirely (no API key, an
+# intentional no-op by design) rather than a failed generation.
+_STAGE_CONTENT_KEYS: dict[str, str] = {
+    "structure": "three_act",
+    "moodboard": "overall_aesthetic",
+    "characters": "characters",
+    "scenes": "scenes",
+    "casting": "casting",
+    "soundscape": "soundscapes",
+    "visuals": "scenes",
+    "cinematography": "scenes",
+    "screenplay": "scenes",
+    "storyboard": "storyboard",
+}
+
+
+def is_stage_result_empty(name: str, result: dict) -> bool:
+    """True when `result` is empty, a JSON-parse failure (`llm.safe_json`'s
+    `_parse_error` sentinel), or missing/empty its defining content key (see
+    `_STAGE_CONTENT_KEYS`) — a generation that produced nothing usable.
+    Stages not in `_STAGE_CONTENT_KEYS` always return False here — this
+    check is deliberately scoped to creative content generation, not every
+    stage in the registry (render/grader stages have a different notion of
+    "empty" that isn't a generation failure)."""
+    if not isinstance(result, dict) or not result:
+        return True
+    if result.get("_parse_error"):
+        return True
+    key = _STAGE_CONTENT_KEYS.get(name)
+    if key is None:
+        return False
+    return not result.get(key)
+
+
+class StageEmptyResultError(RuntimeError):
+    """Raised when a stage's generation comes back empty (see
+    `is_stage_result_empty`) even after one automatic retry. Propagates up
+    to fail the run outright — `pipeline.run()` (via `_gated`) and
+    `run_stage` both raise this rather than let empty data silently
+    propagate to every downstream stage."""
+
+    def __init__(self, stage: str):
+        super().__init__(
+            f"stage '{stage}' returned an empty or invalid result twice in a row "
+            "(the original generation and one automatic retry) — failing rather "
+            "than let empty data propagate to downstream stages.")
+        self.stage = stage
+
+
 def names() -> list[str]:
     return [s.name for s in STAGES]
 
@@ -322,6 +377,28 @@ def run_stage(name: str, out: str | Path = "output", *, input_path: str | None =
                        existing=existing, revise_keys=revise_keys,
                        target=target, shots_guidance=shots_guidance,
                        prior_scene_count=prior_scene_count)
+
+    # Empty-result safety net (see `is_stage_result_empty`) — mirrors
+    # `pipeline._gated`'s same check for the full-pipeline path, so a
+    # standalone `stage NAME` invocation gets the same guarantee: a
+    # generation that came back empty is retried ONCE (same call, with an
+    # explicit "try again" note replacing whatever feedback was given —
+    # nothing usable came back to combine it with), even though this is
+    # itself already a retry/iteration if `feedback` was already set. Still
+    # empty after that retry → fail outright rather than write empty data
+    # to output/<name>.json.
+    if is_stage_result_empty(name, result):
+        print(f"[reel]       stage '{name}': empty/invalid result — retrying once …", flush=True)
+        retry_feedback = ("Your previous response was empty or missing required data — "
+                          "respond with the complete JSON object exactly as specified, "
+                          "with every required field populated.")
+        result = stage.run(ctx, out=outp, profile=profile, feedback=retry_feedback,
+                           max_scenes=max_scenes, existing=existing, revise_keys=revise_keys,
+                           target=target, shots_guidance=shots_guidance,
+                           prior_scene_count=prior_scene_count)
+        if is_stage_result_empty(name, result):
+            raise StageEmptyResultError(name)
+
     if save and isinstance(result, dict):
         _save_artifact(outp, stage.artifact(), result)
         if name == "screenplay":

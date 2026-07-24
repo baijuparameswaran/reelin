@@ -77,6 +77,7 @@ from . import llm
 from . import session
 from . import artifact_diff
 from .pipeline import run, PipelineStopped
+from .stages import StageEmptyResultError
 
 
 def _max_scenes_arg(v: str) -> int | None:
@@ -250,7 +251,7 @@ def _run_stage(argv: list[str]) -> int:
     try:
         run_stage(a.name, out=a.out, input_path=a.source, profile=a.profile,
                   feedback=a.feedback, max_scenes=a.max_scenes)
-    except (FileNotFoundError, ValueError, KeyError) as e:
+    except (FileNotFoundError, ValueError, KeyError, StageEmptyResultError) as e:
         print(f"[reel] {e}")
         return 2
     print(f"[reel] stage '{a.name}' done → {a.out}/{REGISTRY[a.name].artifact()}.json")
@@ -1788,6 +1789,11 @@ def main(argv: list[str] | None = None) -> int:
               "resume with --resume.")
         _print_spend_summary(args.out)
         return 130
+    except StageEmptyResultError as e:
+        session.finish(args.out, "failed")
+        print(f"\n[reel] FAILED — {e}")
+        _print_spend_summary(args.out)
+        return 1
     except Exception:
         session.finish(args.out, "failed")
         _print_spend_summary(args.out)

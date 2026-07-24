@@ -146,6 +146,25 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
   `output/<stage>.0.json`. Toggle via config `critique.enabled` (default
   true); best-effort, never blocks. Scoped to `pipeline.run()` only, not the
   standalone `revise` gate.
+- **Empty-result safety net (`stages.is_stage_result_empty`/
+  `pipeline._ensure_nonempty_result`) — not toggleable, always on:** a
+  generation that comes back with nothing meaningful (a JSON-parse
+  failure, or the stage's own defining content key missing/empty — e.g.
+  `scenes` for the scenes stage, `characters` for characters, per
+  `stages._STAGE_CONTENT_KEYS`) would otherwise sail through fidelity/
+  genre/critique and the gate untouched, silently corrupting every
+  downstream stage. Checked at EVERY point a fresh result is produced — the
+  initial compute, the self-critique refine, and every gate-loop feedback
+  rerun — not just the first attempt, per direct instruction that this must
+  fire even when it's already an iteration. An empty result is rerun ONCE
+  via the same `rerun_fn` every other re-run path uses (an explicit "try
+  again" note as feedback, not silence); still empty after that single
+  retry raises `StageEmptyResultError`, failing the run outright.
+  `stages.run_stage` (the standalone `stage NAME` CLI path, which doesn't
+  go through `_gated` at all) carries its own copy of the same check.
+  Scoped to the creative content-generating stages only — not
+  casting_images/moodboard_tiles/scene_render/fidelity, whose "empty" means
+  something else entirely (no API key, an intentional no-op by design).
 - **Scene-structure alignment (`fidelity.check_scene_alignment`/
   `strip_orphan_scenes`) — deterministic, self-healing, distinct from story
   fidelity:** does a scene-keyed stage's own data structurally match

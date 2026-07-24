@@ -65,6 +65,32 @@
   falling back to `_frame_char_anchor` at a boundary panel.
 
 ## Session log
+- 2026-07-23 (later 2) — Added an empty-result safety net: any creative
+  stage (structure, moodboard, characters, scenes, casting, soundscape,
+  visuals, cinematography, screenplay, storyboard) that comes back with
+  nothing meaningful — a JSON-parse failure, or its defining content key
+  missing/empty (new `stages._STAGE_CONTENT_KEYS`/`stages.
+  is_stage_result_empty`) — is now automatically rerun ONCE via the same
+  `rerun_fn` mechanism every other re-run path already uses; still empty
+  after that retry fails the run via new `stages.StageEmptyResultError`,
+  instead of letting empty data silently propagate to every downstream
+  stage. Per direct instruction ("even if it is iteration"), the check
+  fires at EVERY point `pipeline._gated` produces a fresh result — the
+  initial compute, the self-critique refine, AND every gate-loop feedback
+  rerun — not just the first attempt (new `pipeline._ensure_nonempty_
+  result`, called at all three sites). `stages.run_stage` (the standalone
+  `stage NAME` CLI path, which doesn't go through `_gated`) carries its own
+  copy of the same check. `cli.py`'s `main()`/`_run_stage` both catch
+  `StageEmptyResultError` for a clean failure message instead of a raw
+  traceback. Required updating two pre-existing test fixtures
+  (`test_critique.py`'s `TestGatedCritiqueWiring` — renamed its synthetic
+  stage name from "structure" to "teststage" so its deliberately-minimal
+  placeholder payloads don't trip the new stage-schema-aware check;
+  `test_revise_gating.py`'s stop-decision test — gave its soundscape
+  fixture real content instead of an empty list) since both used a real
+  stage name with placeholder/empty data for testing an unrelated
+  mechanism. New `tests/test_empty_result_retry.py` (21 tests); 370 tests
+  total, still passing.
 - 2026-07-23 (later) — Wired storyboard panels' `emotional_note` (per-shot
   creative direction — "the emotion this panel must evoke in the audience" —
   authored by the cinematography agent, falling back to visuals'/

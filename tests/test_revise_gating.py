@@ -185,7 +185,9 @@ class TestGateApprovalAndPersistence(unittest.TestCase):
              mock.patch("reel.llm.config", return_value=_NO_SCORING_CFG):
             with self.assertRaises(PipelineStopped):
                 cli._gate_stage_result(
-                    gate, "soundscape", {"soundscapes": []}, out=Path("/tmp/whatever"),
+                    gate, "soundscape",
+                    {"soundscapes": [{"scene_number": 1, "ambient_bed": "quiet room tone"}]},
+                    out=Path("/tmp/whatever"),
                     profile="fast", existing=None, revise_keys=None,
                     max_scenes=None, duration_kwargs={})
 

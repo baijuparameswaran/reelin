@@ -123,7 +123,17 @@ class TestSpecStoresAgentModule(unittest.TestCase):
 
 class TestGatedCritiqueWiring(unittest.TestCase):
     """Drives pipeline._gated directly with a disabled (auto-approving) Gate
-    so only the critique-and-refine logic under test actually executes."""
+    so only the critique-and-refine logic under test actually executes.
+
+    Uses "teststage" (not a real stage name) so the empty-result safety net
+    (`stages.is_stage_result_empty`/`_ensure_nonempty_result`, checked
+    BEFORE critique — see `_gated`'s docstring) never fires on these tests'
+    deliberately minimal placeholder payloads (`{"result": "initial"}`, etc.)
+    — a real stage name like "structure" would be checked against its own
+    defining content key (`three_act`), which these payloads were never
+    meant to satisfy; `agent_module=pipeline.structure_agent` is still real,
+    since `critique_stage` needs an actual SYSTEM/PROMPT to critique
+    against (though it's mocked in every test here regardless)."""
 
     def setUp(self):
         self.gate = Gate(enabled=False)
@@ -139,7 +149,7 @@ class TestGatedCritiqueWiring(unittest.TestCase):
                                return_value={"verdict": "needs_improvement",
                                             "issues": ["thin"], "improvement_note": "flesh it out"}):
             result, _, _ = pipeline._gated(
-                self.gate, "structure", {"result": "initial"}, self.summarize, rerun,
+                self.gate, "teststage", {"result": "initial"}, self.summarize, rerun,
                 agent_module=pipeline.structure_agent, critique_enabled=True, profile="fast")
 
         self.assertEqual(len(rerun_calls), 1)
@@ -155,7 +165,7 @@ class TestGatedCritiqueWiring(unittest.TestCase):
         with mock.patch.object(pipeline.critique_agent, "critique_stage",
                                return_value={"verdict": "solid", "issues": [], "improvement_note": ""}):
             result, _, _ = pipeline._gated(
-                self.gate, "structure", {"result": "initial"}, self.summarize, rerun,
+                self.gate, "teststage", {"result": "initial"}, self.summarize, rerun,
                 agent_module=pipeline.structure_agent, critique_enabled=True)
 
         self.assertEqual(rerun_calls, [])
@@ -174,7 +184,7 @@ class TestGatedCritiqueWiring(unittest.TestCase):
                                return_value={"verdict": "needs_improvement",
                                             "issues": ["x"], "improvement_note": ""}):
             result, _, _ = pipeline._gated(
-                self.gate, "structure", {"result": "initial"}, self.summarize, rerun,
+                self.gate, "teststage", {"result": "initial"}, self.summarize, rerun,
                 agent_module=pipeline.structure_agent, critique_enabled=True)
 
         self.assertEqual(rerun_calls, [])
@@ -183,7 +193,7 @@ class TestGatedCritiqueWiring(unittest.TestCase):
     def test_no_agent_module_skips_critique_entirely(self):
         with mock.patch.object(pipeline.critique_agent, "critique_stage") as mocked:
             result, _, _ = pipeline._gated(
-                self.gate, "structure", {"result": "initial"}, self.summarize,
+                self.gate, "teststage", {"result": "initial"}, self.summarize,
                 lambda fb, p=None: {}, agent_module=None, critique_enabled=True)
         mocked.assert_not_called()
         self.assertEqual(result, {"result": "initial"})
@@ -191,7 +201,7 @@ class TestGatedCritiqueWiring(unittest.TestCase):
     def test_critique_disabled_skips_even_with_agent_module(self):
         with mock.patch.object(pipeline.critique_agent, "critique_stage") as mocked:
             result, _, _ = pipeline._gated(
-                self.gate, "structure", {"result": "initial"}, self.summarize,
+                self.gate, "teststage", {"result": "initial"}, self.summarize,
                 lambda fb, p=None: {}, agent_module=pipeline.structure_agent,
                 critique_enabled=False)
         mocked.assert_not_called()
@@ -206,7 +216,7 @@ class TestGatedCritiqueWiring(unittest.TestCase):
         with mock.patch.object(pipeline.critique_agent, "critique_stage",
                                side_effect=RuntimeError("boom")):
             result, _, _ = pipeline._gated(
-                self.gate, "structure", {"result": "initial"}, self.summarize, rerun,
+                self.gate, "teststage", {"result": "initial"}, self.summarize, rerun,
                 agent_module=pipeline.structure_agent, critique_enabled=True)
 
         self.assertEqual(rerun_calls, [])
@@ -220,7 +230,7 @@ class TestGatedCritiqueWiring(unittest.TestCase):
                                return_value={"verdict": "needs_improvement",
                                             "issues": ["x"], "improvement_note": "fix it"}):
             result, _, _ = pipeline._gated(
-                self.gate, "structure", {"result": "initial"}, self.summarize, rerun,
+                self.gate, "teststage", {"result": "initial"}, self.summarize, rerun,
                 agent_module=pipeline.structure_agent, critique_enabled=True)
 
         self.assertEqual(result, {"result": "initial"})
@@ -238,7 +248,7 @@ class TestGatedCritiqueWiring(unittest.TestCase):
         with mock.patch.object(pipeline.critique_agent, "critique_stage",
                                side_effect=fake_critique):
             pipeline._gated(
-                self.gate, "structure", {"result": "initial"}, self.summarize,
+                self.gate, "teststage", {"result": "initial"}, self.summarize,
                 lambda fb, p=None: {"result": "refined"},
                 agent_module=pipeline.structure_agent, critique_enabled=True)
 

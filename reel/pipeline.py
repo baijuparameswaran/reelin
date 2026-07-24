@@ -86,6 +86,8 @@ from . import session
 from . import duration_budget
 from . import panel_grouping
 from .panel_grouping import char_set_changed as _char_set_changed
+from . import stages
+from .stages import StageEmptyResultError
 from .revision_merge import merge_by_key
 
 
@@ -1541,6 +1543,38 @@ def _model_label(profile: str | None) -> str:
         return profile
 
 
+def _ensure_nonempty_result(name: str, result: dict, rerun_fn: Callable, profile) -> dict:
+    """Empty-result safety net (see `stages.is_stage_result_empty`) — called
+    by `_gated` at EVERY point a fresh result is produced (the initial
+    compute, the self-critique refine, and every gate-loop feedback rerun),
+    per direct instruction that this must fire even when it's already an
+    iteration, not just on the first attempt.
+
+    A stage that comes back with nothing meaningful is rerun ONCE via the
+    same `rerun_fn` every other re-run path already uses (an explicit
+    "try again" note, not silence — repeating the identical prompt would
+    likely just reproduce the same empty result). Still empty after that
+    single retry — or the retry itself raises — fails the run outright via
+    `StageEmptyResultError` rather than let empty data silently propagate
+    to every downstream stage. A non-empty `result` is returned unchanged
+    (the common case, essentially free)."""
+    if not stages.is_stage_result_empty(name, result):
+        return result
+    _log(f"      ⚠ {name}: empty/invalid result — retrying once …")
+    try:
+        retried = rerun_fn(
+            "Your previous response was empty or missing required data — "
+            "respond with the complete JSON object exactly as specified, "
+            "with every required field populated.",
+            profile)
+    except Exception as e:
+        raise StageEmptyResultError(name) from e
+    if stages.is_stage_result_empty(name, retried):
+        raise StageEmptyResultError(name)
+    _log(f"      [{name}] retry produced a non-empty result — continuing")
+    return retried
+
+
 def _gated(
     gate: Gate,
     name: str,
@@ -1559,6 +1593,13 @@ def _gated(
     critique_enabled: bool = True,  # config critique.enabled — no-ops the pass below when False
 ) -> tuple[dict, dict | None, dict | None]:
     """Show gate for initial_result; re-run with feedback until approved.
+
+    Empty-result safety net (`_ensure_nonempty_result`, see its own
+    docstring): checked before EVERY fresh result this function produces —
+    the initial compute, the self-critique refine, and every gate-loop
+    feedback rerun — not just the first attempt. A stage that comes back
+    empty is retried once automatically; still empty after that retry fails
+    the run via `StageEmptyResultError`.
 
     Two escalation paths (fast → quality → quality_high):
 
@@ -1596,9 +1637,11 @@ def _gated(
     The PRE-critique `initial_result` is preserved by the caller as
     `output/<name>.0.json` regardless of what happens here.
 
-    Returns (approved_result, fidelity_report, genre_report). Raises PipelineStopped.
+    Returns (approved_result, fidelity_report, genre_report). Raises PipelineStopped,
+    or StageEmptyResultError if a result (and its one automatic retry) both come
+    back empty — see `_ensure_nonempty_result`.
     """
-    result = initial_result
+    result = _ensure_nonempty_result(name, initial_result, rerun_fn, profile)
     current_profile = profile
     low_score_run = 0
     iteration = 0
@@ -1620,6 +1663,7 @@ def _gated(
                 _log(f"      [{name}] self-critique refine failed ({type(e).__name__}) — "
                      "keeping the pre-critique result")
                 result = initial_result
+        result = _ensure_nonempty_result(name, result, rerun_fn, current_profile)
 
     while True:
         report = fidelity_fn(result) if fidelity_fn else None
@@ -1694,6 +1738,7 @@ def _gated(
         _log(f"      re-running {name}  [{_model_label(current_profile)}]  with feedback …")
         llm.unload_model(current_profile)
         result = rerun_fn(decision.feedback, current_profile)
+        result = _ensure_nonempty_result(name, result, rerun_fn, current_profile)
 
 
 def compose_direction(genre_spec: dict | None, moodboard_spec: dict | None) -> str | None:
