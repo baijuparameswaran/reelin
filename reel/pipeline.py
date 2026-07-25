@@ -476,6 +476,26 @@ def _frame_char_anchor(frame: dict, cast_index: dict, out: Path) -> Path | None:
     return None
 
 
+def _boundary_aware_seed(fr: dict, is_boundary: bool, prev_tail: Path | None,
+                         continuity: bool, cast_index: dict, out: Path) -> Path | None:
+    """The seed image for this panel: continues from the previous frame's
+    tail (carries the look forward) UNLESS `is_boundary` — a character
+    "shot boundary" (see `_char_set_changed`) — in which case it seeds
+    fresh from the in-frame character's own casting portrait instead. A
+    new character entering (or an outgoing one leaving) needs a FRESH
+    identity anchor, not a tail frame that still shows the outgoing cast.
+
+    `is_boundary` is computed once by the caller (via `_char_set_changed`)
+    and shared with `effective_prev_clip`'s identical boundary check, so
+    the two decisions can never disagree. Previously this seed selection
+    wasn't boundary-aware at all — unlike `effective_prev_clip`, which
+    already nulled out at exactly this same boundary — see PROGRESS.md's
+    "Known deferred issue" for the history."""
+    if prev_tail and continuity and not is_boundary:
+        return prev_tail
+    return _frame_char_anchor(fr, cast_index, out)
+
+
 def _resolve_panel_references(fr: dict, prev_char_key, cast_index: dict, out: Path):
     """Multi-character Veo `reference_images` for THIS panel, at a "shot
     boundary" (see `_char_set_changed`) — and only when 2+ of the in-frame
@@ -978,10 +998,13 @@ def _render_scene_frames(storyboard: dict, casting: dict, out: Path,
         for grp in groups:
             if len(grp) == 1:
                 fr = grp[0]
-                # Seed: continue from the previous frame's tail (carries the look
-                # forward); the first frame of a scene seeds from the in-frame
-                # character's representation image (identity reference).
-                seed = prev_tail if (prev_tail and continuity) else _frame_char_anchor(fr, cast_index, out)
+                # A character "shot boundary" (see _char_set_changed) needs a
+                # FRESH identity anchor, not a seed/clip carried over from the
+                # outgoing cast — computed once, up front, and reused for both
+                # `seed` and `effective_prev_clip` below so the two decisions
+                # can't disagree.
+                is_boundary = _char_set_changed(fr, prev_char_key)
+                seed = _boundary_aware_seed(fr, is_boundary, prev_tail, continuity, cast_index, out)
                 # Extend-mode continuity (config `continuity_mode: extend`) may
                 # only continue from the previous CLIP when this panel's
                 # in-frame characters are the SAME as that clip's — extending a
@@ -994,7 +1017,7 @@ def _render_scene_frames(storyboard: dict, casting: dict, out: Path,
                 # call, not the loop variable itself) rather than in i2v, so
                 # `_gen_gemini`'s extend branch is never even attempted for a
                 # boundary panel.
-                effective_prev_clip = None if _char_set_changed(fr, prev_char_key) else prev_clip_path
+                effective_prev_clip = None if is_boundary else prev_clip_path
                 # Multi-character identity lock at the SAME "shot boundary" —
                 # see _resolve_panel_references. Computed alongside `seed`, not
                 # instead of it: `i2v._gen_gemini` decides which actually gets
@@ -1040,7 +1063,12 @@ def _render_scene_frames(storyboard: dict, casting: dict, out: Path,
             # triggers seed/reference selection today (scene start, or a
             # genuine character-set change).
             fr0 = grp[0]
-            seed = prev_tail if (prev_tail and continuity) else _frame_char_anchor(fr0, cast_index, out)
+            # Same boundary-aware seed fix as the singleton path above — a
+            # group can only ever start at a scene boundary or a genuine
+            # character-set change, so this is effectively always a
+            # boundary panel, but check explicitly rather than assume it.
+            is_boundary = _char_set_changed(fr0, prev_char_key)
+            seed = _boundary_aware_seed(fr0, is_boundary, prev_tail, continuity, cast_index, out)
             reference_images, prev_char_key = _resolve_panel_references(
                 fr0, prev_char_key, cast_index, out)
             # Propagate prev_char_key across the REST of the group too,

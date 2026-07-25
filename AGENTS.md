@@ -161,7 +161,7 @@ provider-policy bullet.
   plain `props` inventory when present, rather than invented from nothing —
   and, as of 2026-07-10, actually reaches the rendered video: `storyboard.py`
   copies prop NAMES into `visual_overview.key_props`, which
-  `pipeline._panel_context` resolves against `casting.py`'s cast prop
+  `veo_prompt.panel_context` resolves against `casting.py`'s cast prop
   entries (falling back to the bare name for an uncast, single-scene prop)
   and folds into every panel's Veo Context section. Before that wiring, a
   prop identified here never left `visuals.json` at all.
@@ -181,7 +181,9 @@ provider-policy bullet.
   text needs actual judgment the deterministic builder can't provide.
   `image_prompt` here is a fallback only — the real Veo prompt for an actual
   render is reconstructed from structured fields by
-  `pipeline._five_part_veo_prompt`, not read from here.
+  `veo_prompt.five_part_veo_prompt` (folding in the panel's own
+  `emotional_note` via `veo_prompt.panel_action` — see ARCHITECTURE.md's
+  "director's freedom" bullet), not read from here.
 - **`fidelity.py`** — two distinct, deliberately separate checks: story
   fidelity (`check_stage`/`check_alignment`/`score_pipeline`, a qualitative
   LLM judgment of drift/omissions/contradictions vs. the source) and

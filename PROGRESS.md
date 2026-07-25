@@ -6,12 +6,16 @@
 > Architecture reference lives in [ARCHITECTURE.md](ARCHITECTURE.md); the
 > per-agent prompt reference is [AGENTS.md](AGENTS.md).
 >
-> Compacted 2026-07-16: the session log below was condensed from its
-> original blow-by-blow form (verification steps, running test counts,
-> superseded intermediate attempts) down to decision + rationale per dated
-> entry, and stale/resolved "Current state" items were removed. History is
-> preserved at the git revision prior to that compaction if deeper detail
-> is ever needed.
+> Compacted 2026-07-16 and again 2026-07-24: the session log below was
+> condensed from its original blow-by-blow form (verification steps,
+> running test counts, superseded intermediate attempts) down to decision +
+> rationale per dated entry, and stale/resolved "Current state" items were
+> removed — including two obsolete function-path references in AGENTS.md
+> (functions relocated to `veo_prompt.py` during the 2026-07-15 extraction
+> but still cited under their old `pipeline._` names) and a stale default
+> model name (`gemini-2.5-flash-image` → `gemini-3.1-flash-image`, per
+> `config/models.yaml`) found during this pass. History is preserved at the
+> git revision prior to each compaction if deeper detail is ever needed.
 
 ## Current state
 - **`--max-scenes` only restricts actual media-rendering stages** —
@@ -35,10 +39,12 @@
   unmanaged (whatever the source content implies, if anything).
 - **Gemini image + video are live-verified** (key managed via
   `python -m reel.secrets`) — one portrait per character/location/prop via
-  `gemini-2.5-flash-image`; scene clips via Veo (default
-  `veo-3.1-fast-generate-preview`), stitched into `output/video/movie.mp4`.
-  Multi-character Veo `reference_images` at cast boundaries and native
-  `extend`-mode continuity are both implemented and config-toggleable.
+  `image.model` (currently `gemini-3.1-flash-image`); scene clips via Veo
+  (default `veo-3.1-fast-generate-preview`), stitched into
+  `output/video/movie.mp4`. Multi-character Veo `reference_images` at cast
+  boundaries, native `extend`-mode continuity, and consecutive same-cast
+  panels merged into one multi-segment timestamped call are all
+  implemented and config-toggleable.
 - **Render steps (casting images, moodboard tiles, scene frames) are
   idempotent by a content hash of prompt+seed, not just file existence** —
   a HITL-feedback-revised prompt correctly re-renders instead of being
@@ -46,7 +52,7 @@
 - **`tests/test_prompt_rules.py` is a real, committed, fully offline suite**
   (`make test`, no LLM/API calls, <1s) validating every agent prompt's
   conventions (sandwiching, DO-NOT lists, schema adherence) and the
-  deterministic functions backing some of those rules — 336 tests as of the
+  deterministic functions backing some of those rules — 376 tests as of the
   latest session (across the whole `tests/` suite, not just this one file).
 - **Still shelved:** a formal end-to-end `tests/` suite stubbing every paid
   API for a full `pipeline.run()` drive-through — drafted once, then
@@ -54,87 +60,74 @@
   that scope remains throwaway per-session stubs, not a committed suite.
 - **Next up:** moodboard tile auto-render (opt-in); richer ingest
   (PDF/EPUB/.fdx); an edit / sound-mix / final-cut phase.
-- **Known deferred issue:** at a character-boundary panel where
-  reference-images end up NOT actually sent that call (disabled, fewer than
-  2 resolvable portraits, or the API call fails), the single-image seed
-  fallback can reuse the PREVIOUS panel's tail frame (the old cast) instead
-  of a fresh anchor for the character(s) entering the new panel —
-  `pipeline._render_scene_frames`'s seed selection isn't boundary-aware the
-  way the adjacent extend-mode continuity check already is. Fix (if picked
-  up): make `seed` boundary-aware via the same `_char_set_changed` check,
-  falling back to `_frame_char_anchor` at a boundary panel.
+- **Known deferred issue (narrowed — see 2026-07-24 session log for the
+  `_render_scene_frames` fix):** `rerender_panels`'s `_resolve_start_frame`
+  (the standalone/revision targeted-rerender path) still has the SAME gap
+  `_render_scene_frames`'s seed selection had before that fix — it always
+  reuses the previous panel's recorded `end_frame`/tail PNG regardless of
+  whether the cast changed, unlike its own `prev_clip_path` computation
+  right next to it (`None if _char_set_changed(...) else ...`), which
+  already is boundary-aware. Fix (if picked up): give `_resolve_start_frame`
+  the same `_char_set_changed` check `_boundary_aware_seed` now
+  encapsulates, falling back to `_frame_char_anchor` at a boundary panel.
 
 ## Session log
+- 2026-07-24 — Fixed the seed-selection half of the "Known deferred issue"
+  above: seed choice in `_render_scene_frames` (both render paths) wasn't
+  boundary-aware, so a character "shot boundary" panel could keep reusing
+  the previous panel's tail frame (still showing the outgoing cast)
+  instead of a fresh anchor. New `pipeline._boundary_aware_seed`, sharing
+  the same `is_boundary` value `effective_prev_clip` already computed so
+  the two can't disagree. `rerender_panels`'s own copy of this gap
+  (`_resolve_start_frame`) is narrower and left open — see "Known deferred
+  issue." `tests/test_boundary_aware_seed.py` (6 tests); 376 tests total.
 - 2026-07-23 (later 2) — Added an empty-result safety net: any creative
-  stage (structure, moodboard, characters, scenes, casting, soundscape,
-  visuals, cinematography, screenplay, storyboard) that comes back with
-  nothing meaningful — a JSON-parse failure, or its defining content key
-  missing/empty (new `stages._STAGE_CONTENT_KEYS`/`stages.
-  is_stage_result_empty`) — is now automatically rerun ONCE via the same
-  `rerun_fn` mechanism every other re-run path already uses; still empty
-  after that retry fails the run via new `stages.StageEmptyResultError`,
-  instead of letting empty data silently propagate to every downstream
-  stage. Per direct instruction ("even if it is iteration"), the check
-  fires at EVERY point `pipeline._gated` produces a fresh result — the
-  initial compute, the self-critique refine, AND every gate-loop feedback
-  rerun — not just the first attempt (new `pipeline._ensure_nonempty_
-  result`, called at all three sites). `stages.run_stage` (the standalone
-  `stage NAME` CLI path, which doesn't go through `_gated`) carries its own
-  copy of the same check. `cli.py`'s `main()`/`_run_stage` both catch
-  `StageEmptyResultError` for a clean failure message instead of a raw
-  traceback. Required updating two pre-existing test fixtures
-  (`test_critique.py`'s `TestGatedCritiqueWiring` — renamed its synthetic
-  stage name from "structure" to "teststage" so its deliberately-minimal
-  placeholder payloads don't trip the new stage-schema-aware check;
-  `test_revise_gating.py`'s stop-decision test — gave its soundscape
-  fixture real content instead of an empty list) since both used a real
-  stage name with placeholder/empty data for testing an unrelated
-  mechanism. New `tests/test_empty_result_retry.py` (21 tests); 370 tests
-  total, still passing.
-- 2026-07-23 (later) — Wired storyboard panels' `emotional_note` (per-shot
-  creative direction — "the emotion this panel must evoke in the audience" —
-  authored by the cinematography agent, falling back to visuals'/
-  soundscape's scene-wide read) into the actual rendered Veo prompt for the
-  first time, via new `veo_prompt.panel_action` folding it into the [Action]
-  element as a short performance-direction clause ("conveying quiet dread"),
-  used by both `five_part_veo_prompt` and `multi_panel_video_prompt`. Closes
-  a real gap: this field was authored by three creative agents and shown at
-  the review gate, but silently dropped before ever reaching the actual
-  render. Deliberately scoped as the pipeline's one "director's freedom"
-  injection point — interpretive performance direction only, never new
-  source-bound facts (those stay scenes.py/screenplay.py's exclusive
-  territory). New `tests/test_panel_action_emotional_note.py` (13 tests);
-  349 tests total, still passing.
+  stage coming back with nothing meaningful (parse failure, or its
+  defining content key missing/empty, per new `stages._STAGE_CONTENT_KEYS`/
+  `is_stage_result_empty`) is rerun ONCE via the existing `rerun_fn`
+  mechanism; still empty fails the run via new `StageEmptyResultError`
+  instead of letting empty data reach downstream stages. Checked at every
+  point `_gated` produces a fresh result (initial compute, critique
+  refine, gate-loop rerun) per direct instruction that this must fire even
+  mid-iteration, not just on the first attempt — new
+  `pipeline._ensure_nonempty_result`. `stages.run_stage` (which doesn't go
+  through `_gated`) carries its own copy; `cli.py` catches the new
+  exception for a clean failure message. Two pre-existing test fixtures
+  (`test_critique.py`, `test_revise_gating.py`) used a real stage name with
+  placeholder/empty payloads for testing an unrelated mechanism and needed
+  updating now that the check is stage-schema-aware.
+  `tests/test_empty_result_retry.py` (21 tests); 370 tests total.
+- 2026-07-23 (later) — Wired storyboard panels' `emotional_note` ("the
+  emotion this panel must evoke," authored by cinematography, falling back
+  to visuals'/soundscape's scene-wide read) into the actual rendered Veo
+  prompt for the first time, via new `veo_prompt.panel_action` folding it
+  into [Action] as a performance-direction clause ("conveying quiet
+  dread"). Previously authored by three creative agents and shown at the
+  gate, but silently dropped before reaching the render. Deliberately the
+  pipeline's one "director's freedom" injection point — interpretive
+  performance only, never new source-bound facts.
+  `tests/test_panel_action_emotional_note.py` (13 tests); 349 tests total.
 - 2026-07-23 — Added multi-segment timestamped Veo prompts
   (`reel/panel_grouping.py`, new; `veo_prompt.multi_panel_video_prompt`;
   `pipeline._render_panel_group`; config `video.multi_segment_prompting`,
-  default on): consecutive storyboard panels WITHIN one scene sharing the
-  same in-frame cast and fitting within Veo's 8s max duration are now
-  rendered as ONE Veo call via Google's documented
-  `[00:00-00:02] ... [00:02-00:04] ...` timestamp-segment technique, instead
-  of one call per panel — fewer API calls, Subject/Context/Style stated
-  once while Cinematography/Action vary per segment. A planning pass before
-  implementation surfaced a load-bearing fact the naive design missed: only
-  the plain image-seed Veo call actually honors a caller-chosen
-  `duration_seconds` (reference-images hardcodes 8s, extend-mode has no
-  duration parameter at all) — a merged group's own call is therefore
-  always forced onto the plain-seed path, and is disabled entirely when
-  `video.overlays.enabled` is true (no per-segment time-windowing exists for
-  burned-in captions) or the backend isn't Gemini/Veo. Deliberately scoped
-  to WITHIN one scene only (never crosses a `scene_number` boundary) after
-  direct pushback that an early draft's "location is constant" reasoning
-  was really an unstated assumption rather than a scoping decision;
-  cross-scene merging (consecutive scenes sharing a location, which the
-  data model already permits) was explicitly deferred as TBD, not
-  implemented. `_char_set_changed` was relocated verbatim to
-  `panel_grouping.char_set_changed` as the single source of truth (imported
-  back into `pipeline.py` under its old name). `rerender_panels`'s targeted
-  panel re-render now refuses (rather than silently corrupting a merged
-  clip's shared-clip invariant) if a targeted panel or its one-hop cascade
-  target belongs to a merged group — recursive group-aware cascading was
-  scoped out of v1 as the highest-risk piece, with re-rendering the whole
-  scene as the working escape hatch. New `tests/test_panel_grouping.py` (18
-  tests, offline); 336 tests total, still passing.
+  default on): consecutive panels WITHIN one scene sharing the same
+  in-frame cast, fitting Veo's 8s max, render as ONE call via Google's
+  timestamp-segment technique instead of one call per panel — Subject/
+  Context/Style stated once, Cinematography/Action vary per segment. Only
+  the plain image-seed Veo call actually honors a caller-chosen duration
+  (reference-images hardcodes 8s, extend has none at all), so a merged
+  group's own call is always forced onto that path, and disabled entirely
+  under `video.overlays.enabled` or a non-Gemini backend. Deliberately
+  scoped within one scene only (never crosses a `scene_number` boundary)
+  after direct pushback that an early draft's "location is constant"
+  reasoning was an unstated assumption, not a scoping decision — cross-
+  scene merging deferred as TBD. `_char_set_changed` relocated verbatim to
+  `panel_grouping.char_set_changed` as the single source of truth.
+  `rerender_panels` now refuses (rather than silently corrupting a merged
+  clip) if a targeted panel or its cascade target belongs to a merged
+  group — recursive group-aware cascading scoped out of v1, whole-scene
+  re-render as the escape hatch. `tests/test_panel_grouping.py` (18 tests);
+  336 tests total.
 - 2026-07-16 — Added explicit "best in the field" persona framing to every
   agent's `SYSTEM` prompt (e.g. "one of the most sought-after film casting
   directors working today"), and added a "DO NOT:" failure-mode list plus a
@@ -226,12 +219,9 @@
 - 2026-07-11 (later 4) — `revise` now GUARANTEES every scene-keyed artifact
   stays aligned with scenes.json after every round, UNCONDITIONALLY
   (`cli._align_scene_keyed_stages`, called at the end of every revision
-  round regardless of which stage was edited) — supersedes the narrower
-  first-pass fix below, per direct pushback that the fix needed to not
-  depend on the edited stage's own downstream cascade.
-- 2026-07-11 (later 3) — First-pass fix for the same alignment bug
-  (superseded by the entry above): only backfilled a scene-keyed stage when
-  it happened to be in the edited stage's own downstream closure.
+  round regardless of which stage was edited) — per direct pushback that a
+  narrower first-pass fix (only backfilling a stage in the edited stage's
+  own downstream closure) needed to not depend on that closure at all.
 - 2026-07-11 (later 2) — Scoped revisions now merge FIELD BY FIELD within a
   targeted entry (`revision_merge.merge_fields`), not just entry-by-entry —
   a field the model reworded without real content change keeps its old

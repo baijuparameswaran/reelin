@@ -6,11 +6,11 @@
 > [PROGRESS.md](PROGRESS.md) for that) or per-agent prompt detail (see
 > [AGENTS.md](AGENTS.md)).
 >
-> Compacted 2026-07-16: condensed from a much longer, narrative form (deep
-> bug-fix-by-bug-fix justification, verification steps, running test
-> counts) down to what each convention IS and why, per direct instruction to
-> keep the auto-loaded context tidy. That history still lives, in
-> condensed form, in PROGRESS.md's session log.
+> Compacted 2026-07-16 and again 2026-07-24: condensed from a much longer,
+> narrative form (deep bug-fix-by-bug-fix justification, verification
+> steps, running test counts) down to what each convention IS and why, per
+> direct instruction to keep the auto-loaded context tidy. That history
+> still lives, in condensed form, in PROGRESS.md's session log.
 
 ## Stack & layout
 - **Runtime:** Python 3.12 (`.venv/`), local LLMs via **Ollama**. Core 3rd-party
@@ -148,23 +148,19 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
   standalone `revise` gate.
 - **Empty-result safety net (`stages.is_stage_result_empty`/
   `pipeline._ensure_nonempty_result`) — not toggleable, always on:** a
-  generation that comes back with nothing meaningful (a JSON-parse
-  failure, or the stage's own defining content key missing/empty — e.g.
-  `scenes` for the scenes stage, `characters` for characters, per
-  `stages._STAGE_CONTENT_KEYS`) would otherwise sail through fidelity/
-  genre/critique and the gate untouched, silently corrupting every
-  downstream stage. Checked at EVERY point a fresh result is produced — the
-  initial compute, the self-critique refine, and every gate-loop feedback
-  rerun — not just the first attempt, per direct instruction that this must
-  fire even when it's already an iteration. An empty result is rerun ONCE
-  via the same `rerun_fn` every other re-run path uses (an explicit "try
-  again" note as feedback, not silence); still empty after that single
-  retry raises `StageEmptyResultError`, failing the run outright.
-  `stages.run_stage` (the standalone `stage NAME` CLI path, which doesn't
-  go through `_gated` at all) carries its own copy of the same check.
-  Scoped to the creative content-generating stages only — not
-  casting_images/moodboard_tiles/scene_render/fidelity, whose "empty" means
-  something else entirely (no API key, an intentional no-op by design).
+  generation with nothing meaningful (a JSON-parse failure, or the stage's
+  own defining content key missing/empty — e.g. `scenes` for the scenes
+  stage, per `stages._STAGE_CONTENT_KEYS`) is rerun ONCE via the same
+  `rerun_fn` every other re-run path uses (an explicit "try again" note,
+  not silence); still empty after that retry raises `StageEmptyResultError`,
+  failing the run rather than letting empty data reach downstream stages.
+  Checked at every point `_gated` produces a fresh result — initial
+  compute, self-critique refine, and every gate-loop feedback rerun, not
+  just the first attempt. `stages.run_stage` (the standalone `stage NAME`
+  path, which doesn't go through `_gated`) carries its own copy. Scoped to
+  the creative content-generating stages only — not casting_images/
+  moodboard_tiles/scene_render/fidelity, whose "empty" means something else
+  (no API key, an intentional no-op by design).
 - **Scene-structure alignment (`fidelity.check_scene_alignment`/
   `strip_orphan_scenes`) — deterministic, self-healing, distinct from story
   fidelity:** does a scene-keyed stage's own data structurally match
@@ -225,21 +221,16 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
   (`fountain._canonical_name`) so a dialogue speaker is never wrongly
   marked off-screen.
 - **The Veo [Action] element carries a deliberate "director's freedom"
-  layer (`veo_prompt.panel_action`):** each storyboard panel's
-  `emotional_note` — per-shot creative direction ("the emotion this panel
-  must evoke") authored by the cinematography agent (falling back to
-  visuals'/soundscape's scene-wide read), consolidated by
-  `storyboard._build_scene_board` — is folded into the Action clause as a
+  layer (`veo_prompt.panel_action`):** each panel's `emotional_note`
+  ("the emotion this panel must evoke," authored by the cinematography
+  agent, falling back to visuals'/soundscape's scene-wide read, per
+  `storyboard._build_scene_board`) is folded into the Action clause as a
   short performance-direction phrase ("Alice reaches for the doorknob,
   conveying quiet dread"), deduped against text already present in the
-  action. Before this existed, `emotional_note` was authored by three
-  creative agents and shown to the operator at the review gate, but
-  silently dropped before ever reaching the actual Veo prompt. This is the
-  one deliberate point where the rendering layer adds interpretive
-  performance direction on top of an already-established beat — it never
-  changes WHAT happens (scenes.py/screenplay.py stay the sole source-bound
-  authority for that), only HOW it's performed/felt, the same way a
-  director notes a line reading without touching the script.
+  action. The one deliberate point where rendering adds interpretive
+  performance direction on top of an already-established beat — never WHAT
+  happens (scenes.py/screenplay.py stay the sole source-bound authority),
+  only HOW it's performed/felt.
 - **Config schema validation (`llm.validate_config`) and estimated $ spend
   tracking (`reel/spend.py`) are both best-effort, non-blocking checks
   layered on existing state:** `validate_config` is a lightweight,
@@ -369,7 +360,8 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
   performer's own intrinsic features) and a `character` block (that actor
   aged/costumed into the role). Image generation renders the character
   only — exactly one image per character (`output/casting/<name>.png`,
-  Gemini `gemini-2.5-flash-image`) from `character.visual_prompt` — the
+  Gemini `image.model`, config-driven — currently `gemini-3.1-flash-image`)
+  from `character.visual_prompt` — the
   identity seed for Veo; no actor render, no stock-photo lookup. Locations
   are cast the same way (`kind: "location"`, no `actor` layer, showing the
   space's own architecture instead of a person) — `casting` runs after
@@ -382,48 +374,50 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
   Gemini Veo). The first panel of each scene seeds from the in-frame
   character's casting portrait (identity anchor); later panels chain from
   the previous clip's last frame for continuity (scene boundary = cut);
-  idempotent by content hash of prompt+seed. A "shot boundary" panel (scene
-  start, or the in-frame cast changing) with 2+ resolvable character
-  portraits uses Veo's `reference_images` instead of a single seed, so
-  every character in frame gets an identity lock (up to 3, Veo's max)
-  rather than just one — mutually exclusive with seed/extend continuity
-  for that one call, falling back to the normal seed path on any failure.
+  idempotent by content hash of prompt+seed. Seed selection is boundary-
+  aware (`pipeline._boundary_aware_seed`, shared by both the singleton- and
+  merged-group render paths): a character "shot boundary" panel (cast
+  changing) always seeds fresh from `_frame_char_anchor` rather than the
+  previous panel's tail frame (which would still show the outgoing cast) —
+  computed from the same `is_boundary` value (`_char_set_changed`) the
+  adjacent `effective_prev_clip`/extend-eligibility check already uses, so
+  the two can't disagree. A boundary panel with 2+ resolvable character
+  portraits uses Veo's `reference_images` instead (up to 3, Veo's max) —
+  mutually exclusive with seed/extend continuity for that call (Veo API
+  constraint: a reference-image call can't also carry a start frame),
+  falling back to the normal boundary-aware seed path on any failure.
   `continuity_mode: extend` (native video-to-video continuity, carries
   ambient/score audio across the cut) is only attempted when the cast
-  hasn't changed panel to panel, and only at 720p (a genuine Veo
-  constraint). Every Veo prompt is verified against the guide before
-  submission (`veo_guide.verify_prompt`, warnings only, never blocking);
-  audio cues are constructed by dedicated `veo_guide` helper functions
-  rather than hand-rolled inline.
+  hasn't changed panel to panel, and only at 720p. Every Veo prompt is
+  verified against the guide before submission
+  (`veo_guide.verify_prompt`, warnings only, never blocking); audio cues
+  are constructed by dedicated `veo_guide` helper functions rather than
+  hand-rolled inline. `rerender_panels` (the `revise` targeted-panel path)
+  has its own, narrower copy of the pre-fix seed gap — not yet closed, see
+  PROGRESS.md's "Known deferred issue".
 - **Multi-segment timestamped Veo prompts (`reel/panel_grouping.py`,
   config `video.multi_segment_prompting`, default on):** consecutive
-  storyboard panels WITHIN one scene that share the same in-frame cast
-  (`panel_grouping.group_panels`, using the same `char_set_changed`
-  boundary predicate `_resolve_panel_references` already uses) and whose
-  summed duration fits Veo's 8s max are rendered as ONE Veo call via
-  Google's documented timestamp-segment technique
-  (`[00:00-00:02] ... [00:02-00:04] ...`, built by
-  `veo_prompt.multi_panel_video_prompt`) instead of one call per panel —
-  fewer API calls, and Subject/Context/Style are stated once while
-  Cinematography/Action vary shot to shot (`pipeline._render_panel_group`).
-  Deliberately scoped to WITHIN one scene only — never crosses a
-  `scene_number` boundary, even though the data model allows consecutive
-  scenes to share a location (see `panel_grouping.py`'s module docstring);
-  cross-scene merging is a deferred follow-on, not implemented. A merged
-  group's own call always uses the plain image-seed path (never
-  `continuity_mode: extend`, whose fixed ~7s/call has no duration parameter
-  to pin against the group's timestamps) and is forced off entirely when
-  `video.overlays.enabled` is true (overlay burn-in has no per-segment
-  time-windowing) or the backend isn't Gemini/Veo. Falls back to per-panel
-  rendering automatically on any exception. The manifest's per-panel
-  `frame_record`s for a merged group all share one physical `clip` path and
-  carry a `group_panels` list of sibling panel numbers — `_stitch_scene`/
-  `_clips_in_order` dedupe by resolved path (`_dedupe_clip_paths`) so a
-  shared clip isn't concatenated multiple times. **Known v1 limitation:**
-  `rerender_panels` (the `revise` CLI's targeted panel re-render) refuses
-  with a clear error if a targeted panel — or its one-hop cascade target —
-  belongs to a merged group, rather than attempting recursive group-aware
-  cascading; the escape hatch is re-rendering the whole scene via
+  panels WITHIN one scene sharing the same in-frame cast
+  (`panel_grouping.group_panels`, same `char_set_changed` boundary
+  predicate `_resolve_panel_references` uses) and fitting Veo's 8s max
+  duration render as ONE Veo call via Google's timestamp-segment technique
+  (`[00:00-00:02] ... [00:02-00:04] ...`, `veo_prompt.
+  multi_panel_video_prompt`) instead of one call per panel — Subject/
+  Context/Style stated once while Cinematography/Action vary per segment
+  (`pipeline._render_panel_group`). Never crosses a `scene_number`
+  boundary (cross-scene merging is a deferred follow-on, even though the
+  data model allows consecutive scenes to share a location). A merged
+  group's own call always uses the plain image-seed path (never `extend`,
+  whose duration can't be pinned to the group's timestamps) and is forced
+  off when `video.overlays.enabled` is true (no per-segment
+  time-windowing) or the backend isn't Gemini/Veo; falls back to per-panel
+  rendering on any exception. The manifest's per-panel `frame_record`s for
+  a group all share one physical `clip` path and carry a `group_panels`
+  sibling list — `_stitch_scene`/`_clips_in_order` dedupe by resolved path
+  (`_dedupe_clip_paths`). **Known v1 limitation:** `rerender_panels`
+  refuses (rather than attempting recursive group-aware cascading) if a
+  targeted panel or its one-hop cascade target belongs to a merged group;
+  escape hatch is re-rendering the whole scene via
   `_render_scene_frames(..., only_scenes={N})`.
 - On this host prefer `--profile fast` (one model, no reload churn between
   agents).
