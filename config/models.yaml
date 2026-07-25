@@ -333,14 +333,21 @@ profiles:
       num_ctx: 16384    # 23 GB RAM + mostly-GPU: large context fits; helps storyboard
     think: false        # set true to re-enable reasoning traces for this profile
 
-  # High-quality tier — qwen3:30b. At ~19 GB it splits across 8 GB VRAM + ~11 GB
-  # CPU RAM (22 GB available — comfortable). Expect ~7–9 tok/s; slow but the best
-  # quality available on this hardware. Escalation target after thinking tier fails.
-  # Pull: ollama pull qwen3:30b  (~19 GB download)
-  # Vision fallback: gemma3:27b (~17 GB, vision-capable) if qwen3:30b not pulled.
+  # High-quality tier — qwen3:30b (a 30B MoE, ~3B active params/token). At
+  # ~19 GB it splits across 8 GB VRAM + ~11 GB CPU RAM (23 GB available —
+  # comfortable). Measured ~10 tok/s (68%/32% CPU/GPU split) — slow but the
+  # best quality/speed balance on this hardware. Escalation target after
+  # the synthesis tier fails. Pull: ollama pull qwen3:30b (~19 GB download).
+  # qwen3:32b is a DENSE 32B model (all params active every token, unlike
+  # 30b's MoE sparsity) — live-measured at ~1.4–1.7 tok/s (71%/29% CPU/GPU),
+  # ~6-7x slower than qwen3:30b despite similar file size. Listed as the
+  # first fallback (closest quality match if qwen3:30b is ever missing) but
+  # deliberately NOT the primary model — the speed hit is too large for a
+  # tier that can fire multiple times per stage on escalation.
+  # Vision fallback: gemma3:27b (~17 GB, vision-capable) if none of the above are pulled.
   quality_high:
     model: qwen3:30b
-    fallbacks: [gemma3:27b, gemma3:12b, qwen3:8b]
+    fallbacks: [qwen3:32b, gemma3:27b, gemma3:12b, qwen3:8b]
     options:
       temperature: 0.8
       num_ctx: 8192     # balanced: enough context without blowing the CPU-RAM KV cache
