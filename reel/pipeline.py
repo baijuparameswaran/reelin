@@ -1237,14 +1237,22 @@ def rerender_panels(storyboard: dict, casting: dict, out: Path, *,
     frames_by_num = {f.get("panel"): f for f in scene_entry.get("frames", [])}
     first_panel_num = min(panels_by_num) if panels_by_num else None
 
-    def _resolve_start_frame(pnum):
+    def _resolve_start_frame(pnum, is_boundary):
         """Start frame for panel `pnum`: the casting reference image if it's
-        the scene's first panel, else the immediately-preceding panel's
-        recorded end_frame — falling back to re-deriving the tail PNG from
-        disk (it's always written on a fresh render regardless of whether an
-        older manifest predates the end_frame field) if that record is
-        missing."""
-        if pnum == first_panel_num:
+        the scene's first panel OR a character "shot boundary" (`is_boundary`
+        — the in-frame cast changed from the previous panel, see
+        `_char_set_changed`/`_boundary_aware_seed`), else the immediately-
+        preceding panel's recorded end_frame — falling back to re-deriving
+        the tail PNG from disk (it's always written on a fresh render
+        regardless of whether an older manifest predates the end_frame
+        field) if that record is missing.
+
+        `is_boundary` mirrors `_render_scene_frames`'s own
+        `_boundary_aware_seed` fix: without it, a boundary panel here would
+        keep reusing the previous panel's tail frame — still showing the
+        outgoing cast — instead of a fresh anchor for whoever is actually
+        in THIS panel."""
+        if pnum == first_panel_num or is_boundary:
             return _frame_char_anchor(panels_by_num[pnum], cast_index, out)
         prev_num = pnum - 1 if isinstance(pnum, int) else None
         prev_record = frames_by_num.get(prev_num) if prev_num is not None else None
@@ -1294,13 +1302,19 @@ def rerender_panels(storyboard: dict, casting: dict, out: Path, *,
 
     def _render(pnum):
         fr = panels_by_num[pnum]
-        seed = _resolve_start_frame(pnum)
         prev_key = _prev_char_key(pnum)
+        # Computed once, shared by seed and prev_clip_path below (mirrors
+        # _render_scene_frames' own _boundary_aware_seed fix) so the two
+        # decisions can't disagree — a character "shot boundary" panel
+        # must seed fresh from _frame_char_anchor, not the previous
+        # panel's tail frame (which would still show the outgoing cast).
+        is_boundary = _char_set_changed(fr, prev_key)
+        seed = _resolve_start_frame(pnum, is_boundary)
         # Same extend-eligibility rule as _render_scene_frames' own walk —
         # see _char_set_changed's docstring — kept consistent between the
         # two entry points for the same hash-mismatch reason
         # _resolve_prev_clip_path itself already documents.
-        prev_clip_path = None if _char_set_changed(fr, prev_key) else _resolve_prev_clip_path(pnum)
+        prev_clip_path = None if is_boundary else _resolve_prev_clip_path(pnum)
         reference_images, _ = _resolve_panel_references(fr, prev_key, cast_index, out)
         res = _render_one_panel(fr, snum, sdir, seed, prev_clip_path, out,
                                 casting_lookup=casting_lookup, location_desc=location_desc,

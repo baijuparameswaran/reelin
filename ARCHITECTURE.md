@@ -393,8 +393,10 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
   (`veo_guide.verify_prompt`, warnings only, never blocking); audio cues
   are constructed by dedicated `veo_guide` helper functions rather than
   hand-rolled inline. `rerender_panels` (the `revise` targeted-panel path)
-  has its own, narrower copy of the pre-fix seed gap — not yet closed, see
-  PROGRESS.md's "Known deferred issue".
+  applies the same boundary-aware seed logic via its own
+  `_resolve_start_frame(pnum, is_boundary)` — `is_boundary` computed once
+  in `_render` and shared with `prev_clip_path` there too, so the two
+  can't disagree, mirroring `_boundary_aware_seed`'s pattern.
 - **Multi-segment timestamped Veo prompts (`reel/panel_grouping.py`,
   config `video.multi_segment_prompting`, default on):** consecutive
   panels WITHIN one scene sharing the same in-frame cast

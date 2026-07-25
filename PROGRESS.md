@@ -52,7 +52,7 @@
 - **`tests/test_prompt_rules.py` is a real, committed, fully offline suite**
   (`make test`, no LLM/API calls, <1s) validating every agent prompt's
   conventions (sandwiching, DO-NOT lists, schema adherence) and the
-  deterministic functions backing some of those rules — 376 tests as of the
+  deterministic functions backing some of those rules — 379 tests as of the
   latest session (across the whole `tests/` suite, not just this one file).
 - **Still shelved:** a formal end-to-end `tests/` suite stubbing every paid
   API for a full `pipeline.run()` drive-through — drafted once, then
@@ -60,27 +60,30 @@
   that scope remains throwaway per-session stubs, not a committed suite.
 - **Next up:** moodboard tile auto-render (opt-in); richer ingest
   (PDF/EPUB/.fdx); an edit / sound-mix / final-cut phase.
-- **Known deferred issue (narrowed — see 2026-07-24 session log for the
-  `_render_scene_frames` fix):** `rerender_panels`'s `_resolve_start_frame`
-  (the standalone/revision targeted-rerender path) still has the SAME gap
-  `_render_scene_frames`'s seed selection had before that fix — it always
-  reuses the previous panel's recorded `end_frame`/tail PNG regardless of
-  whether the cast changed, unlike its own `prev_clip_path` computation
-  right next to it (`None if _char_set_changed(...) else ...`), which
-  already is boundary-aware. Fix (if picked up): give `_resolve_start_frame`
-  the same `_char_set_changed` check `_boundary_aware_seed` now
-  encapsulates, falling back to `_frame_char_anchor` at a boundary panel.
 
 ## Session log
-- 2026-07-24 — Fixed the seed-selection half of the "Known deferred issue"
-  above: seed choice in `_render_scene_frames` (both render paths) wasn't
+- 2026-07-25 — Closed the "Known deferred issue" left open on 2026-07-24:
+  `rerender_panels`'s `_resolve_start_frame` had the same non-boundary-aware
+  seed gap `_render_scene_frames` had before that fix — it always reused the
+  previous panel's recorded `end_frame`/tail PNG even at a character "shot
+  boundary" (someone entering OR leaving), unlike its own `prev_clip_path`
+  computation right next to it, which was already boundary-aware. Now takes
+  an `is_boundary` param (computed once in `_render`, shared with
+  `prev_clip_path` so the two can't disagree, same pattern
+  `_boundary_aware_seed` established) and short-circuits to
+  `_frame_char_anchor` at a boundary panel. Matters most for a
+  single-character boundary panel, where `_resolve_panel_references` never
+  kicks in (needs 2+ resolvable portraits), so the seed path was the ONLY
+  identity anchor available. `tests/test_rerender_panels_boundary_seed.py`
+  (3 tests, confirmed to fail without the fix); 379 tests total.
+- 2026-07-24 — Fixed the seed-selection half of the issue above: seed
+  choice in `_render_scene_frames` (both render paths) wasn't
   boundary-aware, so a character "shot boundary" panel could keep reusing
   the previous panel's tail frame (still showing the outgoing cast)
   instead of a fresh anchor. New `pipeline._boundary_aware_seed`, sharing
   the same `is_boundary` value `effective_prev_clip` already computed so
-  the two can't disagree. `rerender_panels`'s own copy of this gap
-  (`_resolve_start_frame`) is narrower and left open — see "Known deferred
-  issue." `tests/test_boundary_aware_seed.py` (6 tests); 376 tests total.
+  the two can't disagree. `tests/test_boundary_aware_seed.py` (6 tests);
+  376 tests total.
 - 2026-07-23 (later 2) — Added an empty-result safety net: any creative
   stage coming back with nothing meaningful (parse failure, or its
   defining content key missing/empty, per new `stages._STAGE_CONTENT_KEYS`/
