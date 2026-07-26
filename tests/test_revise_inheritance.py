@@ -105,10 +105,10 @@ class TestEffectiveMaxScenes(unittest.TestCase):
 
 
 class TestDurationKwargs(unittest.TestCase):
-    """`--target-duration`'s planning guidance only applies to the two
-    stages that actually consume it (`scenes`/`cinematography`); every
-    other stage gets nothing to compute (and would ignore it anyway via
-    its own `**_` catch-all)."""
+    """`--target-duration`'s planning guidance now applies to exactly ONE
+    stage — `cinematography` (shots-per-scene). Every other stage gets
+    nothing to compute (and would ignore it anyway via its own `**_`
+    catch-all)."""
 
     def test_empty_for_unrelated_stages(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -118,13 +118,17 @@ class TestDurationKwargs(unittest.TestCase):
                 with self.subTest(stage=stage):
                     self.assertEqual(cli._duration_kwargs(stage, out, 45), {})
 
-    def test_scenes_gets_a_target_string(self):
+    def test_scenes_gets_no_target_so_the_runtime_cannot_cap_scene_count(self):
+        """A runtime budget bounds RENDERING, not design — the same rule
+        `--max-scenes` already follows. Passing a `target` here used to put a
+        literal scene-count range ("roughly 2-4 scenes") into the highest-
+        salience position of the scenes prompt, which beat the coverage rules
+        below it; `segment_scenes` now uses its own coverage-first default."""
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp)
-            kwargs = cli._duration_kwargs("scenes", out, 10)
-            self.assertIn("target", kwargs)
-            self.assertIsInstance(kwargs["target"], str)
-            self.assertIn("10s", kwargs["target"])
+            for seconds in (10, 45, 600, None):
+                with self.subTest(target_duration=seconds):
+                    self.assertEqual(cli._duration_kwargs("scenes", out, seconds), {})
 
     def test_cinematography_uses_current_scene_count_from_disk(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -136,11 +140,15 @@ class TestDurationKwargs(unittest.TestCase):
             self.assertIn("5 scene(s)", kwargs["shots_guidance"])
 
     def test_falls_back_to_default_target_when_none_inherited(self):
+        """`target_duration=None` (no prior record) still resolves to the
+        config default for the stage that does consume it."""
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp)
             from reel import duration_budget
-            kwargs = cli._duration_kwargs("scenes", out, None)
-            self.assertIn(f"{duration_budget.DEFAULT_TARGET_SECONDS}s", kwargs["target"])
+            (out / "scenes.json").write_text(json.dumps({"scenes": [{"number": 1}]}))
+            kwargs = cli._duration_kwargs("cinematography", out, None)
+            self.assertIn(f"{duration_budget.DEFAULT_TARGET_SECONDS}s",
+                          kwargs["shots_guidance"])
 
 
 class TestReviseThreadsInheritedAttributes(unittest.TestCase):

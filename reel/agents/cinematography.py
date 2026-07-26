@@ -101,6 +101,19 @@ under-shoot a scene just to keep the shot count low; a scene needs at least \
 that simple (a brief insert, a single reaction), never as a default to save \
 time. Any runtime/shot-count guidance below is a soft target, secondary to \
 real coverage — never a reason to skip shots a scene actually needs{duration_rule}
+- HONOR THE SCENE'S EMOTIONAL DIRECTION: each scene below may carry \
+`emotional_beat` (what the moment must make the audience feel) and \
+`expression` (how that reads on faces, bodies, gestures, held silences) — the \
+director's own reading of the story, settled upstream, not a suggestion. \
+Design coverage that actually DELIVERS it: put the camera where that emotion \
+becomes legible (close or insert coverage on the specific physical tell \
+`expression` names, a held shot rather than a cut where a beat needs time to \
+land, distance where withholding is the point), and make each shot's \
+`emotional_function` say what THAT shot does for THAT scene's \
+`emotional_beat` specifically, rather than restating the scene summary. Never \
+invent an action or line to serve it — it directs how an existing beat is \
+seen and felt, not what happens. Scenes without those fields (an older scene \
+list): read `summary`/`purpose` as before.
 - Shot types and movement should reflect the genre \
 (thriller → tight, handheld; drama → measured, Steadicam; horror → Dutch tilts, \
 low angles; romance → soft telephoto, slow dolly)
@@ -128,6 +141,10 @@ architecture/layout consistent — only angle/movement/lens vary, per the \
 TIE-BREAKER rule above.
 - `scene_number` in your output matches the `number` field from the scene list \
 above exactly, one output scene per input scene, none skipped or renumbered.
+- Every scene's coverage actually serves that scene's own `emotional_beat` / \
+`expression` from the list above, and each shot's `emotional_function` is tied \
+to that specific emotional turn rather than restating the summary — without \
+any shot's `moment` asserting an action the source doesn't support.
 - The response is ONLY the JSON object above — no markdown fences, no \
 commentary, no extra top-level keys, every scene/shot has all its schema fields.
 """
@@ -190,7 +207,8 @@ def plan_cinematography(
     scene_list = json.dumps(
         [
             {k: s[k] for k in ("number", "slugline", "location", "summary", "purpose",
-                                "source_line", "chunk_indices")
+                                "source_line", "chunk_indices",
+                                "emotional_beat", "expression")
              if k in s}
             for s in scenes.get("scenes", [])
         ],

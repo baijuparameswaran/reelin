@@ -94,7 +94,7 @@ class TestScenesPrompt(SandwichAssertionsMixin, unittest.TestCase):
         return scenes.PROMPT.format(**kwargs)
 
     def test_sandwiched(self):
-        self.assert_sandwiched(self._render(), "every scene has all 8 schema fields.")
+        self.assert_sandwiched(self._render(), "every scene has all 10 schema fields.")
 
     def test_source_is_the_only_authority_rule_present(self):
         self.assertIn("SOURCE TEXT IS THE ONLY AUTHORITY", self._render())
@@ -413,7 +413,7 @@ class TestScreenplayPrompt(SandwichAssertionsMixin, unittest.TestCase):
         kwargs = dict(revision_note="", structure_note="", logline="L", tone="T",
                       story_block="", characters="c", casting_block="", location_block="",
                       prior_scenes_block="", slugline="INT. X - DAY",
-                      scene_number=3, summary="s", purpose="p",
+                      scene_number=3, summary="s", purpose="p", director_block="",
                       soundscape_block="", visuals_block="", cinema_block="")
         kwargs.update(overrides)
         return screenplay.PROMPT.format(**kwargs)
@@ -643,7 +643,7 @@ class TestNoStoryLikeExamplesInPrompts(unittest.TestCase):
                 revision_note="", structure_note="", logline="L", tone="T", story_block="",
                 characters="c", casting_block="", location_block="",
                 prior_scenes_block="", slugline="INT. X - DAY",
-                scene_number=3, summary="s", purpose="p",
+                scene_number=3, summary="s", purpose="p", director_block="",
                 soundscape_block="", visuals_block="", cinema_block=""),
             "storyboard": storyboard.PROMPT.format(
                 logline="L", genre="G", tone="T", story_block="", bundles="[]",

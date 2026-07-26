@@ -178,6 +178,14 @@ not just the panel where the prop is most relevant, so list every key prop that 
 belongs anywhere in this scene
 - the LAST panel's transition                             <- bundle.camera.transition_to_next \
 when present, used as-is rather than an invented scene-ending transition
+- each panel's emotional_note                             <- the most specific \
+read available for that panel: bundle.camera.shots[].emotional_function first, \
+else bundle.art/.audio.emotional_function, else bundle.director \
+(.expression/.emotional_beat — the scene's own authored director's direction: \
+what the moment must make the audience feel and how it reads physically). This \
+reaches the rendered Veo prompt as performance direction, so it must describe \
+HOW the beat is played — never assert an action, line, or fact the bundle and \
+source material don't already contain
 
 DO NOT:
 - invent a scene, action, motivation, or relationship not grounded in the
@@ -434,6 +442,18 @@ def _scene_bundles(
             "slugline_parsed": slugline_parsed,
             "summary": scene.get("summary", ""),
             "purpose": scene.get("purpose", ""),
+            # scenes.py rule 11's director's read of the moment (what it must
+            # make the audience feel, and how that reads physically). Every
+            # scene-keyed design agent already got these fields too, so
+            # `cam`/`art`/`audio`'s own emotional_function normally reflects
+            # them by the time a panel is built — this is the floor for a
+            # scene where none of those three authored one at all, so the
+            # direction still reaches the rendered Veo prompt (see
+            # `_build_panel`'s `emotional_note`).
+            "director": {
+                "emotional_beat": scene.get("emotional_beat", ""),
+                "expression": scene.get("expression", ""),
+            },
             "characters_in_scene": char_names,
             "cast": cast,
             "location": location,
@@ -686,6 +706,7 @@ def _fallback_image_prompt(cam: dict, action: str, characters_in_frame: list,
 def _build_panel(panel_num: int, cam: dict, scr: dict, bundle: dict, is_last: bool) -> dict:
     art = bundle.get("art", {})
     audio = bundle.get("audio", {})
+    director = bundle.get("director") or {}
     cast_lookup = {c["name"]: c for c in bundle.get("cast", [])}
     location_desc = (bundle.get("location") or {}).get("visual_prompt", "")
 
@@ -707,8 +728,16 @@ def _build_panel(panel_num: int, cam: dict, scr: dict, bundle: dict, is_last: bo
         "action": action,
         "dialogue": dialogue,
         "sound": _panel_sound(cam, scr, audio),
+        # Most specific first: the DP's per-shot read, then the visuals/
+        # soundscape agents' scene-wide read, then the scene's own director's
+        # direction (scenes.py rule 11) as the floor — `expression` before
+        # `emotional_beat` because it's already phrased as something visible
+        # and performable, which is what `veo_prompt.panel_action` folds into
+        # the Action clause ("..., conveying <note>").
         "emotional_note": (cam.get("emotional_function") or art.get("emotional_function")
-                           or audio.get("emotional_function") or ""),
+                           or audio.get("emotional_function")
+                           or director.get("expression") or director.get("emotional_beat")
+                           or ""),
         "transition": transition,
         "image_prompt": _fallback_image_prompt(cam, action, characters_in_frame, cast_lookup,
                                                location_desc, art),

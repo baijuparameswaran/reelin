@@ -122,7 +122,14 @@ provider-policy bullet.
   `"scenes"` branch (see ARCHITECTURE.md's "A DIRECT hand-edit to
   `scenes.json`..." bullet), which strips the deleted number out of every
   OTHER scene-keyed artifact directly, since `merge_by_key` can only add or
-  replace a key, never remove one.
+  replace a key, never remove one. Finally, rule 11 (DIRECTOR'S INTERPRETIVE
+  EXPANSION) adds `emotional_beat` + `expression` — the director's read of
+  what a moment must make the audience feel and how that reads physically —
+  and is the ONE place this stage may go beyond the literal text: an
+  emotional/expressional moment the prose only implies is filmable material
+  and may earn its own scene, where an implied EVENT never could. See
+  ARCHITECTURE.md's bullet for that boundary and the two rules (4 and 7)
+  tightened to hold it.
 - **`casting.py`** — locks each character's on-screen visual form: an
   `actor` block (the performer's own intrinsic look) plus a `character`
   block (that actor aged/costumed into the role). Also casts every distinct
@@ -156,7 +163,12 @@ provider-policy bullet.
   rule (scenes sharing a `location` share its base look/sound; only
   mood/specific events vary) — `cinematography.py`'s version has an explicit
   TIE-BREAKER against its own motif-development rule (see the audit entry
-  in PROGRESS.md). `visuals.py`'s `key_props` (props with genuine dramatic/
+  in PROGRESS.md). All three also receive each scene's `emotional_beat`/
+  `expression` (scenes.py rule 11) and share a HONOR THE SCENE'S EMOTIONAL
+  DIRECTION rule grounding it to their own `emotional_function` output field
+  (plus, for cinematography, where the camera goes and how long it holds) —
+  direction on how an existing beat is seen/heard/felt, never on what
+  happens in it. `visuals.py`'s `key_props` (props with genuine dramatic/
   thematic weight, each with a `function`) is now grounded by `scenes.py`'s
   plain `props` inventory when present, rather than invented from nothing —
   and, as of 2026-07-10, actually reaches the rendered video: `storyboard.py`
@@ -170,7 +182,12 @@ provider-policy bullet.
   three above), favoring voice-over over on-screen dialogue economy. Takes
   `casting` for a locked on-screen-look block so action stays true to what's
   actually rendered. SOURCE OVER COVERAGE tie-breaker: camera coverage never
-  licenses inventing content the source doesn't support.
+  licenses inventing content the source doesn't support. `_director_block`
+  feeds the scene's own `emotional_beat`/`expression` in as explicit
+  performance direction for the action descriptions and `parenthetical`
+  delivery notes, restating the HOW-not-WHAT limit so it can't read as
+  licence against FIDELITY FIRST; a strict no-op for a scenes.json
+  checkpoint predating those fields.
 - **`storyboard.py`** — the fusion stage; merges every upstream artifact
   into a production-ready board. **Deterministic by default** (see its
   module docstring's "BUILD PATH" section) — `_build_scene_board` constructs
@@ -183,7 +200,13 @@ provider-policy bullet.
   render is reconstructed from structured fields by
   `veo_prompt.five_part_veo_prompt` (folding in the panel's own
   `emotional_note` via `veo_prompt.panel_action` — see ARCHITECTURE.md's
-  "director's freedom" bullet), not read from here.
+  "director's freedom" bullet), not read from here. A panel's
+  `emotional_note` resolves most-specific-first: the DP's per-shot
+  `emotional_function`, then visuals'/soundscape's scene-wide read, then the
+  scene's own `bundle.director` direction (`expression` before
+  `emotional_beat`, since it's already phrased as something visible) as the
+  floor — so rule 11's direction reaches the render even for a scene where
+  none of those three authored one.
 - **`fidelity.py`** — two distinct, deliberately separate checks: story
   fidelity (`check_stage`/`check_alignment`/`score_pipeline`, a qualitative
   LLM judgment of drift/omissions/contradictions vs. the source) and
@@ -195,14 +218,20 @@ provider-policy bullet.
   consistency) and genre (genre fit): given a stage's own governing
   SYSTEM/PROMPT template (not the fully-interpolated text — story content
   isn't needed to judge craft), is the response genuinely strong, or does
-  it show gaps a single generation pass can miss? Runs once, automatically,
-  right after a stage's scene-structure self-heal and before the operator
-  ever sees the gate; a `needs_improvement` verdict triggers exactly one
-  re-run of the same stage via the same `feedback` mechanism a human's
-  typed gate feedback uses. Neutral grader (`models.text`, never Gemini),
-  best-effort (any failure falls back to the pre-critique result). Scoped
-  to `pipeline.run()` only — `revise`'s own gate doesn't pass
-  `agent_module`, so critique doesn't fire there.
+  it show gaps a single generation pass can miss? Runs automatically, right
+  after a stage's scene-structure self-heal and before the operator ever
+  sees the gate; a `needs_improvement` verdict triggers a re-run of the same
+  stage via the same `feedback` mechanism a human's typed gate feedback
+  uses. `critique.iterations` (config, default 1) bounds the rounds — one
+  pass by default, exactly as before the knob existed — and both it and
+  `enabled` take per-stage overrides via `critique.stages.<name>`.
+  **`scenes` ships with critique disabled** (already triple-checked
+  elsewhere, most expensive to re-run, and a craft critique pushes it toward
+  re-segmenting against rule 9). Neutral grader
+  (`models.text` — always a LOCAL profile, never Gemini), best-effort (any
+  failure falls back to the pre-critique result). Scoped to
+  `pipeline.run()` only — `revise`'s own gate doesn't pass `agent_module`,
+  so critique doesn't fire there.
 - **`revision.py`** — powers `python -m reel.cli revise`. `identify_source_text_changes`
   scopes a raw story-TEXT edit down to the scene numbers it actually
   affects (given `artifact_diff`'s deterministic candidate pre-filter +

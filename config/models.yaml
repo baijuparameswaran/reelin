@@ -221,8 +221,28 @@ revision:
 # the operator ever sees the review gate. The pre-critique response is always
 # preserved at output/<stage>.0.json for reference. Set `enabled: false` to
 # skip this entirely (faster runs, no extra model calls).
+#
+# `iterations` is how many critique -> refine rounds a stage may run. The
+# default of 1 is the original behaviour exactly: critique once, refine at
+# most once, hand to the gate. Raising it re-critiques each refinement and
+# keeps going until the critic is satisfied or the count is spent — better
+# output on a weak stage, but N times the critique/refine model calls, so
+# raise it deliberately.
 critique:
   enabled: true
+  iterations: 1
+  # Per-stage overrides, merged field-by-field over the two globals above
+  # (so an entry that sets only `enabled` keeps the global `iterations`).
+  # Stage names are the ones `python -m reel.cli stages` lists.
+  stages:
+    # scenes is deliberately OFF. Its output already gets three other checks
+    # — story fidelity, genre alignment, and the deterministic
+    # scene-alignment self-heal — and it is the most expensive stage to
+    # re-run. A craft critique of a scene list also tends to push toward
+    # re-segmenting, which is churn against the very rule (rule 9, CAPTURE
+    # THE STORY FULLY) the stage is tuned for.
+    scenes:
+      enabled: false
 
 # Target total runtime for the rendered movie. Engine-independent planning
 # guidance (see reel/duration_budget.py) fed to the scenes/cinematography
@@ -353,6 +373,43 @@ profiles:
       num_ctx: 8192     # balanced: enough context without blowing the CPU-RAM KV cache
     think: false        # set true to re-enable reasoning traces for this profile
 
+  # Frontier tier — HOSTED (Gemini), the only non-Ollama text profile.
+  # Opt a stage in via `agent_profiles` below; nothing uses it by default.
+  # Reuses the SAME API key image/video already use (python -m reel.secrets),
+  # so it needs no extra credential, SDK, or server-side setup.
+  #
+  # Exists for the one place local context length was a hard ceiling rather
+  # than a tradeoff: `quality_high` at num_ctx 8192 leaves room for only
+  # ~14 scenes of JSON output after the scenes prompt's rules + source text,
+  # capping how completely the film can cover the story. A 1M-context /
+  # 65K-output model removes that ceiling, llm.MAX_CHARS source truncation,
+  # and the ~13 min/stage wall at ~8 tok/s together.
+  #
+  # Model choice is MEASURED, not assumed — benched on the real scenes prompt
+  # against the bundled samples (see PROGRESS.md for the numbers):
+  #   gemini-3.6-flash        8-10 scenes, 26-36s, 4/4 parsed   ← chosen
+  #   gemini-3.1-pro-preview  9-13 scenes, 42-70s, 3/4 parsed
+  #   gemini-3.5-flash        9 scenes,    25s
+  #   gemini-2.5-pro          404 — listed by the API but not callable
+  # Scene counts overlap within each model's own run-to-run variance, so the
+  # pro tier's slight edge isn't meaningful; it is ~1.7x slower, carries a
+  # `-preview` tag (can change or be withdrawn under us), and produced the
+  # only unparseable response in the whole bench. Flash is GA and was clean
+  # every run. Switch the line below to compare on your own material.
+  frontier:
+    provider: gemini
+    model: gemini-3.6-flash   # 1M in / 65K out
+    fallback_profile: quality_high
+    options:
+      max_output_tokens: 32000
+      # Optional: how much SOURCE TEXT a stage on this profile may send.
+      # Omitted, a hosted profile gets llm._PROVIDER_MAX_CHARS (600,000 chars
+      # ~ 150K tokens — a whole novel, well inside the 1M window) instead of
+      # the 12,000-char local default, which would otherwise truncate the
+      # story to roughly its first 2,000 words. Falls back to the local
+      # budget automatically when no key is set. Uncomment to pin a value.
+      # max_source_chars: 600000
+
 # Default profile each agent uses (override per run with `--profile`).
 # thinking tier for stages that synthesise many upstream artifacts with structural
 # reasoning (structure, storyboard). Screenplay is creative writing + Fountain
@@ -361,7 +418,15 @@ agent_profiles:
   structure:       quality_high
   characters:      quality_high
   casting:         quality_high
-  scenes:          quality_high
+  # scenes is the one stage on the HOSTED frontier tier (see the `frontier`
+  # profile above). It's the most consequential stage — every scene becomes at
+  # least one rendered clip — and the only one where local context length was
+  # a hard ceiling rather than a tradeoff (~14 scenes max at num_ctx 8192).
+  # Degrades to `frontier.fallback_profile` (quality_high) with a printed note
+  # if no Gemini key is set, so an offline run behaves exactly as before.
+  # Note: `frontier` sits outside llm._PROFILE_TIERS, so the low-score
+  # escalation ladder is a no-op here — it's already the top tier.
+  scenes:          frontier
   soundscape:      quality_high
   visuals:         quality_high
   cinematography:  quality_high

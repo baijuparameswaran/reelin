@@ -26,21 +26,21 @@ ASSUMED_SECONDS_PER_SHOT = 6
 ASSUMED_SHOTS_PER_SCENE = 2.5
 
 
-def suggest_scene_target(target_seconds: int) -> str:
-    """A scene-count-range string for scenes.py's own `target` prompt param
-    — sized so roughly `target_seconds` worth of ~6s shots at ~2.5
-    shots/scene fits, with a floor of 1 scene. Deliberately worded as a
-    SOFT, SECONDARY hint (explicitly deferring to scenes.py's own rule 9,
-    "CAPTURE THE STORY FULLY") — an earlier version of this text read as a
-    firmer target, which combined with scenes.py's own then-current
-    "minimize scene count" rule to under-serve the story; that rule was
-    removed per direct instruction, and this text was reworded to match."""
-    est_shots = max(1, round(target_seconds / ASSUMED_SECONDS_PER_SHOT))
-    est_scenes = max(1, round(est_shots / ASSUMED_SHOTS_PER_SCENE))
-    lo, hi = max(1, est_scenes - 1), est_scenes + 1
-    return (f"roughly {lo}-{hi} scenes if the story naturally fits that runtime "
-           f"(a soft runtime budget near {target_seconds}s, secondary to rule 9 "
-           "below — never compress the story's own beats to fit this range)")
+# NO scene-count guidance is produced here, deliberately. `suggest_scene_target`
+# used to turn `target_seconds` into a literal range ("roughly 2-4 scenes" at
+# the 45s default) that `scenes.PROMPT` interpolated into the END of its
+# opening sentence — the highest-salience position in the prompt, immediately
+# after two anti-inflation warnings. A concrete number there reliably beat the
+# prose forty lines below telling the model to capture the story fully, so the
+# stage was capped by a runtime default rather than by the story's own shape.
+#
+# It also contradicted this project's own convention that a runtime/quantity
+# budget bounds RENDERING, not design: `--max-scenes` restricts only the
+# media-generating stages while every design stage processes every scene. The
+# runtime target still does real work below — shots-per-scene pacing, and each
+# clip's requested duration in i2v — but it no longer decides how many scenes
+# a story gets. `scenes.segment_scenes` uses its own coverage-first default
+# `target` instead.
 
 
 def suggest_shots_per_scene(target_seconds: int, scene_count: int) -> str:
@@ -50,7 +50,29 @@ def suggest_shots_per_scene(target_seconds: int, scene_count: int) -> str:
     there's nothing to compute (`scene_count <= 0`). Floor of 1 shot/scene,
     not 2 — a scene needs only one decisive shot when the beat is that
     simple; this is a soft budget hint, not a coverage-count minimum OR
-    maximum — cinematography.py's own coverage rule takes priority over it."""
+    maximum — cinematography.py's own coverage rule takes priority over it.
+
+    TBD — the same anchor problem `suggest_scene_target` was removed for, one
+    level down; deliberately left in place for now rather than changed
+    alongside that removal, so the scene-count fix could be measured on its
+    own. What's wrong: this is a CONSERVED TOTAL. `est_total_shots` is pinned
+    at `target_seconds / 6` and then DIVIDED by `scene_count`, so more scenes
+    mechanically means fewer shots each — at the 45s default that's ~8 shots
+    for the whole film regardless, and the scene-count fix (which took the
+    bundled sample from 4 scenes to 9) therefore halves this stage's
+    per-scene budget from ~2 shots to 1 as a side effect. Two stages now pull
+    against each other: scenes is told to cover the story fully, and
+    cinematography is told it has a fixed shot pool to spread across whatever
+    scenes produced.
+
+    Shape of the fix when it's picked up: state a per-scene FLOOR derived
+    from coverage needs rather than a quotient of a fixed pool, and let the
+    film's total runtime fall out of that — the same "budget bounds
+    RENDERING, not design" direction the scene-count removal took. Worth
+    measuring the same way (A/B on the bundled samples) rather than assuming,
+    since unlike scene count, shot count does have a real per-clip cost: every
+    shot becomes a panel and every panel a Veo call, so uncapping it moves
+    real money in a way uncapping scene count did not."""
     if scene_count <= 0:
         return ""
     est_total_shots = max(scene_count, round(target_seconds / ASSUMED_SECONDS_PER_SHOT))

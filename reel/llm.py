@@ -28,8 +28,47 @@ import yaml
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "models.yaml"
 
-# Hardware-derived cap: keep prompts within the num_ctx budget of small local models.
+# Legacy flat cap. Retained as the safe floor returned for an unknown or
+# malformed profile, and as the value an undeclared `num_ctx` derives back to
+# — but agents should call `max_chars(profile)`, which derives the real budget
+# from the model actually serving the stage.
 MAX_CHARS = 12_000
+
+# ── local source-budget derivation (from each profile's own num_ctx) ─────────
+# `num_ctx` is this project's hardware knob: it's chosen per profile against
+# what fits in 8 GB VRAM plus the CPU-RAM KV cache (see the profile comments
+# in config/models.yaml), so deriving the source budget from it IS the
+# hardware derivation. A profile that can afford more context should be
+# allowed to read more of the story; a flat constant across all of them threw
+# that away — `synthesis` runs at 16K ctx and was capped as if it were 8K.
+#
+# num_ctx is a TOTAL token budget (prompt + response), so two reserves come
+# off the top before the remainder is spent on source text:
+_PROMPT_RESERVE_TOKENS = 3_000   # the agent's own rules/scaffold. Sized on the
+                                 # largest of the three whole-source prompts —
+                                 # `scenes` measures ~2,900 tokens — so the
+                                 # budget is safe for all of them, not just the
+                                 # average one.
+_OUTPUT_RESERVE_TOKENS = 2_000   # room for the JSON response. Matches what was
+                                 # measured left over at the old flat cap, so
+                                 # output space doesn't shrink as input grows.
+_CHARS_PER_TOKEN = 4             # English prose approximation, deliberately on
+                                 # the generous side of the usual 3.5-4.
+_DEFAULT_NUM_CTX = 8_192         # for a profile that declares no num_ctx —
+                                 # every profile in this config declares one,
+                                 # and 8192 derives back to ~the old flat cap,
+                                 # so an undeclared profile behaves as before
+                                 # rather than silently collapsing to a floor.
+_MIN_SOURCE_CHARS = 4_000        # floor for a genuinely tiny num_ctx, where the
+                                 # reserves would otherwise leave nothing at all.
+
+# Source-text budget per provider, for providers whose context dwarfs anything
+# local. Not the model's full context: the binding limit for a stage like
+# `scenes` is the OUTPUT cap (65K tokens on the Gemini frontier models, a few
+# hundred scenes' worth) and cost, not input. 600K chars ~ 150K tokens covers
+# a full novel while staying well inside a 1M-token window.
+
+_PROVIDER_MAX_CHARS: dict[str, int] = {"gemini": 600_000}
 
 # ── hardware detection ────────────────────────────────────────────────────────
 
@@ -161,6 +200,17 @@ class Profile:
     fallbacks: list[str] = field(default_factory=list)
     options: dict = field(default_factory=dict)
     think: bool | None = None  # per-profile override; None = use runtime.think global
+    # "ollama" (default, every existing profile) or "gemini" (hosted frontier
+    # tier — see reel.gemini.generate_text). Keeping the provider on the
+    # PROFILE rather than on the agent is what preserves this project's
+    # "agents pick a profile, never a model name" rule: opting a stage into a
+    # hosted model is a one-line `agent_profiles` change, and no agent module
+    # learns a provider or model name.
+    provider: str = "ollama"
+    # Local profile to degrade to when a non-Ollama provider isn't usable (no
+    # SDK, no credentials). `fallbacks` can't serve this purpose — those are
+    # Ollama model TAGS resolved by `resolve_model`, not profile names.
+    fallback_profile: str = "quality_high"
 
 
 @lru_cache(maxsize=1)
@@ -216,11 +266,15 @@ _KNOWN_SUB_KEYS: dict[str, set[str]] = {
     "genre": {"value", "steer", "enforce", "min_score"},
     "moodboard": {"enabled", "steer"},
     "revision": {"identity_drift_threshold"},
-    "critique": {"enabled"},
+    "critique": {"enabled", "iterations", "stages"},
     "duration": {"target_seconds"},
     "runtime": {"max_parallel_agents", "request_timeout_seconds", "think",
                "num_gpu", "escalate_after", "escalate_score_gap"},
 }
+_KNOWN_PROFILE_KEYS = {"model", "fallbacks", "options", "think",
+                       "provider", "fallback_profile"}
+_KNOWN_PROVIDERS = {"ollama", "gemini"}
+
 _KNOWN_VIDEO_AUDIO_KEYS = {"no_background_music", "room_tone", "no_subtitles"}
 _KNOWN_VIDEO_OVERLAY_KEYS = {"enabled", "subtitles", "shot_info", "font_size",
                             "subtitle_color", "label_color"}
@@ -246,6 +300,8 @@ _KNOWN_TYPES: dict[tuple[str, str], type | tuple[type, ...]] = {
     ("genre", "min_score"): (int, float),
     ("moodboard", "enabled"): bool,
     ("moodboard", "steer"): bool,
+    ("critique", "enabled"): bool,
+    ("critique", "iterations"): int,
     ("duration", "target_seconds"): (int, float),
     ("runtime", "max_parallel_agents"): int,
     ("runtime", "think"): bool,
@@ -299,8 +355,73 @@ def validate_config(cfg: dict | None = None) -> list[str]:
             warnings.append(f"config '{block}.{sub}' should be {expected_name} "
                            f"(got {type(value[sub]).__name__}: {value[sub]!r})")
 
-    agent_profiles = cfg.get("agent_profiles")
+    # `critique.stages` — a mapping of STAGE NAME to a per-stage override.
+    # Validated separately (and one level deeper than the generic loop above)
+    # because a typo'd stage name here is completely silent: the override
+    # simply never matches, and the stage keeps the global setting while the
+    # operator believes they changed it. Checked against the real stage
+    # registry, imported lazily so this module stays free of the
+    # reel.stages -> agents -> llm import cycle.
+    crit = cfg.get("critique")
+    if isinstance(crit, dict) and crit.get("stages") is not None:
+        per_stage = crit["stages"]
+        if not isinstance(per_stage, dict):
+            warnings.append("config 'critique.stages' should be a mapping "
+                           f"(got {type(per_stage).__name__})")
+        else:
+            try:
+                from . import stages as _stages
+                known_stages = set(_stages.names())
+            except Exception:
+                known_stages = set()
+            for stage_name, override in per_stage.items():
+                if known_stages and stage_name not in known_stages:
+                    warnings.append(f"config 'critique.stages.{stage_name}' is not a "
+                                   f"known stage — known: {sorted(known_stages)}")
+                if not isinstance(override, dict):
+                    warnings.append(f"config 'critique.stages.{stage_name}' should be a "
+                                   f"mapping (got {type(override).__name__})")
+                    continue
+                for k, v in override.items():
+                    if k not in ("enabled", "iterations"):
+                        warnings.append(f"unknown config key "
+                                       f"'critique.stages.{stage_name}.{k}' — "
+                                       "check for a typo")
+                    elif k == "enabled" and not isinstance(v, bool):
+                        warnings.append(f"config 'critique.stages.{stage_name}.enabled' "
+                                       f"should be bool (got {type(v).__name__}: {v!r})")
+                    elif k == "iterations" and not isinstance(v, int):
+                        warnings.append(f"config 'critique.stages.{stage_name}.iterations' "
+                                       f"should be int (got {type(v).__name__}: {v!r})")
+
+    # Per-profile keys. Unlike the blocks above, `profiles` is a mapping of
+    # user-chosen NAMES to profile bodies, so the one-level-deep loop can't be
+    # reused — the check has to descend one further, into each body. Worth
+    # having specifically because of `provider`: a misspelled `provider:` key
+    # silently routes a stage back to Ollama, which looks like the hosted model
+    # simply performing badly rather than never having been called.
     profiles = cfg.get("profiles")
+    if isinstance(profiles, dict):
+        for pname, body in profiles.items():
+            if not isinstance(body, dict):
+                warnings.append(f"config 'profiles.{pname}' should be a mapping "
+                               f"(got {type(body).__name__})")
+                continue
+            for sub in body:
+                if sub not in _KNOWN_PROFILE_KEYS:
+                    warnings.append(f"unknown config key 'profiles.{pname}.{sub}' "
+                                   "— check for a typo")
+            provider = body.get("provider", "ollama")
+            if provider not in _KNOWN_PROVIDERS:
+                warnings.append(f"config 'profiles.{pname}.provider' is "
+                               f"'{provider}' — known providers: "
+                               f"{sorted(_KNOWN_PROVIDERS)}")
+            fb = body.get("fallback_profile")
+            if fb is not None and fb not in profiles:
+                warnings.append(f"config 'profiles.{pname}.fallback_profile' "
+                               f"references undefined profile '{fb}'")
+
+    agent_profiles = cfg.get("agent_profiles")
     if isinstance(agent_profiles, dict) and isinstance(profiles, dict):
         for stage, tier in agent_profiles.items():
             if tier not in profiles:
@@ -411,12 +532,104 @@ def get_profile(name: str) -> Profile:
     p = profiles[name]
     think = p.get("think")  # explicit bool in yaml → per-profile override
     return Profile(name, p["model"], p.get("fallbacks", []), p.get("options", {}),
-                   think=think)
+                   think=think,
+                   provider=p.get("provider", "ollama"),
+                   fallback_profile=p.get("fallback_profile", "quality_high"))
 
 
 def agent_profile(agent: str) -> str:
     """The default profile name configured for a given agent."""
     return config().get("agent_profiles", {}).get(agent, "fast")
+
+
+def local_max_chars(p: Profile) -> int:
+    """Source-text budget for one LOCAL profile, derived from its `num_ctx`.
+
+    `num_ctx` is the hardware knob in this project — each profile's value is
+    chosen against what fits in 8 GB VRAM plus the CPU-RAM KV cache — so
+    deriving from it makes the source cap hardware-derived per model rather
+    than one flat number for every tier. It's a TOTAL (prompt + response)
+    budget, so the agent's own rules and room for the JSON reply come off the
+    top first; whatever remains is spent on story text.
+
+    A profile declaring no `num_ctx` derives back to roughly the old flat cap
+    rather than collapsing to the floor — every profile in this config
+    declares one, so that path is for a hand-added profile, where behaving as
+    before is less surprising than silently truncating. Never raises: a
+    non-numeric `num_ctx` falls back to the same default."""
+    try:
+        num_ctx = int((p.options or {}).get("num_ctx", _DEFAULT_NUM_CTX))
+    except (TypeError, ValueError):
+        num_ctx = _DEFAULT_NUM_CTX
+    usable = num_ctx - _PROMPT_RESERVE_TOKENS - _OUTPUT_RESERVE_TOKENS
+    return max(_MIN_SOURCE_CHARS, usable * _CHARS_PER_TOKEN)
+
+
+def max_chars(profile: str | None = None) -> int:
+    """How much SOURCE TEXT a stage may send, given the model actually
+    serving it. Agents should call this rather than reading `MAX_CHARS`
+    directly — that constant is only the local default.
+
+    Why per-profile: `MAX_CHARS` (12,000 chars ≈ 3,000 tokens) is sized for a
+    local profile at `num_ctx: 8192`, where the scenes prompt's own rules
+    already consume ~2,900 tokens. On a 1M-context hosted model that same cap
+    silently truncates the story to roughly the first 2,000 words — the model
+    has room for a whole novel and never sees past chapter one. Switching a
+    stage's profile alone doesn't fix that, because the truncation happens in
+    the agent, before the prompt is ever built.
+
+    Resolution order:
+      1. `options.max_source_chars` on the profile — explicit always wins.
+      2. Local (ollama) profiles → derived from that profile's own
+         `num_ctx` (`local_max_chars`), so a tier configured for more context
+         is actually allowed to read more of the story.
+      3. A hosted profile whose provider ISN'T usable → the budget of its
+         `fallback_profile`. This is the case that matters most: `llm.generate`
+         degrades such a profile to a local model, so handing back a hosted
+         budget would push 600K chars at a model with an 8K context. The
+         truncation decision and the routing decision must agree.
+      4. Otherwise the provider's budget, defaulting to `MAX_CHARS`.
+
+    Never raises — an unknown or malformed profile yields `MAX_CHARS`, the
+    safe floor, matching how every other config read in this module degrades.
+    """
+    if not profile:
+        return MAX_CHARS
+    try:
+        p = get_profile(profile)
+    except Exception:
+        return MAX_CHARS
+
+    explicit = (p.options or {}).get("max_source_chars")
+    if explicit:
+        try:
+            return max(1, int(explicit))
+        except (TypeError, ValueError):
+            pass
+
+    if p.provider == "ollama":
+        return local_max_chars(p)
+
+    if not _provider_usable(p.provider):
+        # Guard against a fallback_profile that points at itself or loops.
+        if p.fallback_profile and p.fallback_profile != p.name:
+            return max_chars(p.fallback_profile)
+        return MAX_CHARS
+
+    return _PROVIDER_MAX_CHARS.get(p.provider, MAX_CHARS)
+
+
+def _provider_usable(provider: str) -> bool:
+    """Whether a non-Ollama provider can actually serve a call right now —
+    the same question `_generate_hosted` asks before routing, kept in sync so
+    the source-truncation budget can't disagree with where the call lands."""
+    if provider == "gemini":
+        try:
+            from . import gemini
+            return gemini.available()
+        except Exception:
+            return False
+    return False
 
 
 def resolve_model(profile: Profile) -> str:
@@ -487,6 +700,51 @@ def next_profile(name: str) -> str | None:
         return None
 
 
+_warned_providers: set[str] = set()
+
+
+def _generate_hosted(p: Profile, prompt: str, *, sys_msg: str | None,
+                     as_json: bool, schema: dict | None) -> str | None:
+    """Route one generation to a non-Ollama provider, or return None to tell
+    the caller to fall through to the local path.
+
+    Returning None rather than raising is the whole point: a missing SDK or
+    missing credentials must degrade to `p.fallback_profile` and keep the run
+    going, exactly the way the Gemini image/video path no-ops into the open
+    backend without `GEMINIAPIKEY`. An UNKNOWN provider name degrades the same
+    way — a typo in `provider:` should cost a warning, not the run.
+
+    A failure from a provider that IS configured and reachable does propagate
+    — that's a real error (bad request, refusal, truncation), not a
+    fall-back-to-local situation, and silently re-running a scene breakdown on
+    a small local model after paying for a hosted call would hide it."""
+    if p.provider != "gemini":
+        if p.provider not in _warned_providers:
+            _warned_providers.add(p.provider)
+            print(f"[reel] profile '{p.name}' declares unknown provider "
+                  f"'{p.provider}' — falling back to '{p.fallback_profile}'")
+        return None
+
+    from . import gemini
+    if not gemini.available():
+        if p.provider not in _warned_providers:
+            _warned_providers.add(p.provider)
+            print(f"[reel] profile '{p.name}' wants Gemini but no API key is set "
+                  f"({gemini.key_hint()}) — falling back to '{p.fallback_profile}'")
+        return None
+
+    opts = p.options or {}
+    return gemini.generate_text(
+        prompt,
+        system=sys_msg,
+        model=p.model,
+        as_json=as_json,
+        schema=schema,
+        max_output_tokens=opts.get("max_output_tokens"),
+        temperature=opts.get("temperature"),
+    )
+
+
 def generate(
     prompt: str,
     *,
@@ -495,6 +753,7 @@ def generate(
     as_json: bool = False,
     steer: bool = True,
     images: list | None = None,
+    schema: dict | None = None,
 ) -> str:
     """Single-turn generation against a local model selected by `profile`.
 
@@ -509,11 +768,30 @@ def generate(
     `images` is an optional list of file paths or raw bytes to attach as vision
     inputs. Only sent when the resolved model supports vision; ignored silently
     for text-only models (avoids Ollama 400 errors).
+
+    A profile declaring a non-Ollama `provider` (see `Profile`) routes to that
+    provider instead, degrading to its `fallback_profile` when the provider
+    isn't usable. `schema` (a JSON Schema) is honored only on providers that
+    support structured outputs — it's ignored on Ollama, which has `as_json`'s
+    coarser "must be valid JSON" mode and no schema enforcement. No agent
+    passes one yet; the parameter exists so a stage can adopt it without
+    another change here.
     """
     p = get_profile(profile)
-    model = resolve_model(p)
     steer_text = direction() if steer else None
     sys_msg = "\n\n".join(s for s in (steer_text, system) if s) or None
+
+    # Steering is composed BEFORE the provider branch on purpose: a hosted
+    # creative stage must receive the same genre+moodboard direction a local
+    # one does, or it would silently be the one unsteered stage in the run.
+    if p.provider != "ollama":
+        hosted = _generate_hosted(p, prompt, sys_msg=sys_msg,
+                                  as_json=as_json, schema=schema)
+        if hosted is not None:
+            return hosted
+        p = get_profile(p.fallback_profile)  # degraded — continue locally
+
+    model = resolve_model(p)
     messages: list[dict] = []
     if sys_msg:
         messages.append({"role": "system", "content": sys_msg})

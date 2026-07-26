@@ -47,7 +47,7 @@ Scene to write:
 - Slugline: {slugline}
 - What happens: {summary}
 - Dramatic purpose: {purpose}
-{soundscape_block}{visuals_block}{cinema_block}
+{director_block}{soundscape_block}{visuals_block}{cinema_block}
 DO NOT:
 - invent an event, action, location, or relationship the SOURCE MATERIAL
   doesn't support (see FIDELITY FIRST / SOURCE OVER COVERAGE below)
@@ -296,6 +296,36 @@ def _story_block(context_text: str) -> str:
     )
 
 
+def _director_block(scene: dict) -> str:
+    """The scene's own `emotional_beat`/`expression` (`reel.agents.scenes`
+    rule 11, DIRECTOR'S INTERPRETIVE EXPANSION) — what the moment must make
+    the audience feel and how it reads physically. Fed in as explicit
+    performance direction so a shot's `description`/`parenthetical` can stage
+    the emotion the scene stage already read out of the source, instead of
+    the screenplay agent independently re-inferring it (or flattening the
+    beat to bare plot mechanics).
+
+    Deliberately restates the LIMIT: this shapes how a beat is performed, not
+    what happens — otherwise it would sit in direct tension with this prompt's
+    own FIDELITY FIRST / SOURCE OVER COVERAGE rules, which stay authoritative
+    for content. Empty (a strict no-op) for a scene without those fields —
+    e.g. a scenes.json checkpoint written before they existed."""
+    beat = (scene.get("emotional_beat") or "").strip()
+    expression = (scene.get("expression") or "").strip()
+    if not beat and not expression:
+        return ""
+    lines = ["DIRECTOR'S EMOTIONAL DIRECTION for this scene — stage it in the "
+             "action descriptions and delivery notes (`parenthetical`); it "
+             "governs HOW the beat is performed, never WHAT happens (the "
+             "source material above remains the only authority for that, per "
+             "FIDELITY FIRST below):"]
+    if beat:
+        lines.append(f"- Must make the audience feel: {beat}")
+    if expression:
+        lines.append(f"- How it reads on screen: {expression}")
+    return "\n".join(lines) + "\n"
+
+
 def _prior_scenes_block(drafted: list[dict]) -> str:
     """Compact summary of already-drafted scenes for cross-scene continuity."""
     if not drafted:
@@ -404,6 +434,7 @@ def draft_screenplay(
             scene_number=scene_num if scene_num is not None else 0,
             summary=scene.get("summary", ""),
             purpose=scene.get("purpose", ""),
+            director_block=_director_block(scene),
             soundscape_block=_scene_soundscape_block(scene_num, sound_lookup),
             visuals_block=_scene_visuals_block(scene_num, vis_lookup),
             cinema_block=_scene_cinema_block(scene_num, cinema_lookup),

@@ -1617,6 +1617,39 @@ def _ensure_nonempty_result(name: str, result: dict, rerun_fn: Callable, profile
     return retried
 
 
+def critique_settings(crit_cfg: dict | None, stage: str) -> tuple[bool, int]:
+    """Resolve `(enabled, iterations)` for ONE stage from the `critique`
+    config block: the global values, with a `critique.stages.<name>` entry
+    merged on top field-by-field.
+
+    Per-stage rather than global-only because the stages differ in what a
+    critique is worth. `scenes` is the clear case and ships disabled: its
+    output is already scored three other ways (story fidelity, genre
+    alignment, and the deterministic scene-alignment self-heal), it is the
+    most expensive stage to re-run, and a craft critique of a scene list
+    tends to push toward re-segmenting — churn against the very rule
+    (CAPTURE THE STORY FULLY) the stage is tuned for.
+
+    Field-by-field merge, not entry replacement: `stages: {scenes: {enabled:
+    false}}` must keep the global `iterations`, not silently reset it to the
+    function default. Malformed entries degrade to the global values rather
+    than raising — this runs inside every pipeline stage, and a bad config
+    key should cost a validate_config warning, not the run."""
+    cfg = crit_cfg or {}
+    enabled = bool(cfg.get("enabled", True))
+    iterations = int(cfg.get("iterations", 1) or 1)
+    per_stage = (cfg.get("stages") or {}).get(stage)
+    if isinstance(per_stage, dict):
+        if "enabled" in per_stage:
+            enabled = bool(per_stage["enabled"])
+        if per_stage.get("iterations") is not None:
+            try:
+                iterations = int(per_stage["iterations"])
+            except (TypeError, ValueError):
+                pass
+    return enabled, max(1, iterations)
+
+
 def _gated(
     gate: Gate,
     name: str,
@@ -1633,6 +1666,7 @@ def _gated(
     escalate_score_gap: int = 20,   # escalate immediately when score is this far below threshold
     agent_module=None,              # module with SYSTEM/PROMPT — enables the self-critique pass
     critique_enabled: bool = True,  # config critique.enabled — no-ops the pass below when False
+    critique_iterations: int = 1,   # config critique.iterations — how many critique→refine rounds
 ) -> tuple[dict, dict | None, dict | None]:
     """Show gate for initial_result; re-run with feedback until approved.
 
@@ -1664,7 +1698,8 @@ def _gated(
     the automatic fix has already been attempted; it's surfaced here purely
     so the operator can see when that attempt still left a gap.
 
-    Self-critique (`agent_module`, `critique_enabled`): ONE automatic pass,
+    Self-critique (`agent_module`, `critique_enabled`, `critique_iterations`):
+    `critique_iterations` automatic pass(es) — ONE by default,
     BEFORE the while loop below and thus before the operator ever sees the
     gate at all — `reel.agents.critique.critique_stage` reviews
     `initial_result` against `agent_module.SYSTEM`/`PROMPT` (what this stage
@@ -1689,22 +1724,36 @@ def _gated(
     iteration = 0
 
     if agent_module is not None and critique_enabled:
-        try:
-            crit = critique_agent.critique_stage(
-                name, agent_module.SYSTEM, agent_module.PROMPT, result, profile=current_profile)
-        except Exception as e:
-            crit = None
-            _log(f"      critique[{name}] skipped ({type(e).__name__})")
-        if crit and crit.get("verdict") == "needs_improvement" and crit.get("improvement_note"):
-            _log(f"      [{name}] self-critique found room to improve — refining once …")
+        rounds = max(1, int(critique_iterations or 1))
+        for critique_pass in range(1, rounds + 1):
+            try:
+                crit = critique_agent.critique_stage(
+                    name, agent_module.SYSTEM, agent_module.PROMPT, result,
+                    profile=current_profile)
+            except Exception as e:
+                _log(f"      critique[{name}] skipped ({type(e).__name__})")
+                break
+            if not (crit and crit.get("verdict") == "needs_improvement"
+                    and crit.get("improvement_note")):
+                break
+            suffix = ("once …" if rounds == 1
+                      else f"(pass {critique_pass}/{rounds}) …")
+            _log(f"      [{name}] self-critique found room to improve — refining {suffix}")
             for issue in (crit.get("issues") or [])[:5]:
                 _log(f"        - {issue}")
             try:
-                result = rerun_fn(crit["improvement_note"], current_profile)
+                refined = rerun_fn(crit["improvement_note"], current_profile)
             except Exception as e:
+                # Keep the last GOOD result rather than reverting to
+                # `initial_result`. At the default `rounds == 1` those are the
+                # same value, so this is byte-identical to the original
+                # single-pass behaviour; only a multi-round config could tell
+                # them apart, and there reverting would throw away refinements
+                # that already succeeded.
                 _log(f"      [{name}] self-critique refine failed ({type(e).__name__}) — "
                      "keeping the pre-critique result")
-                result = initial_result
+                break
+            result = _ensure_nonempty_result(name, refined, rerun_fn, current_profile)
         result = _ensure_nonempty_result(name, result, rerun_fn, current_profile)
 
     while True:
@@ -1890,10 +1939,10 @@ def run(
     fid_reports: dict = {}
     _FID_STAGES = FIDELITY_GATED_STAGES
 
-    # Self-critique: one automatic critique-and-refine pass per freshly-computed
-    # stage, before the operator ever sees the gate — see _gated's docstring.
-    # Toggle via config `critique.enabled`.
-    crit_on = bool(llm.config().get("critique", {}).get("enabled", True))
+    # Self-critique: automatic critique-and-refine pass(es) per freshly-computed
+    # stage, before the operator ever sees the gate — see _gated's docstring
+    # and `critique_settings` for the global-plus-per-stage resolution.
+    _crit_cfg = llm.config().get("critique", {}) or {}
 
     def fidelity_report(name: str, result: dict) -> dict | None:
         """Score this stage's output against the original story (open model).
@@ -2009,6 +2058,7 @@ def run(
             gen_fn = (lambda res, _nm=nm: genre_report(_nm, res)) \
                 if (gen_enforce and nm in _GENRE_STAGES) else None
 
+            crit_on, crit_iters = critique_settings(_crit_cfg, nm)
             _save_initial_response(out, nm, raws[nm],
                                    crit_on and s.get("agent_module") is not None)
 
@@ -2044,7 +2094,8 @@ def run(
                                   profile=stage_profile, escalate_after=escalate_after,
                                   escalate_score_gap=escalate_score_gap,
                                   agent_module=s.get("agent_module"),
-                                  critique_enabled=crit_on)
+                                  critique_enabled=crit_on,
+                                  critique_iterations=crit_iters)
             save(nm, r)
             save_fidelity(nm, rep)
             save_genre(nm, grep)
@@ -2128,13 +2179,16 @@ def run(
         apply_direction()   # fold the moodboard into the steering for every stage below
 
     # ── 3/10  scenes (scenes←structure) ────────────────────────────────────────
-    scene_target = duration_budget.suggest_scene_target(target_seconds)
     g = run_group("3/10", "scenes", [
         _spec("scenes",
-              lambda: segment_scenes(source, structure, target=scene_target,
+              # No `target=` — segment_scenes' own coverage-first default
+              # applies. The runtime budget deliberately no longer decides
+              # scene COUNT (see duration_budget's note); it still drives
+              # shots-per-scene and each clip's requested duration.
+              lambda: segment_scenes(source, structure,
                                      profile=profile_override, characters=characters),
               _summarize_scenes,
-              lambda fb, p=None: segment_scenes(source, structure, target=scene_target,
+              lambda fb, p=None: segment_scenes(source, structure,
                                                 profile=p or profile_override,
                                                 feedback=fb, characters=characters),
               agent_module=scenes_agent),

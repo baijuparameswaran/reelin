@@ -89,6 +89,14 @@ drama → sparse naturalism; comedy → lighter textures, etc.)
 - Scenes sharing the same `location` share the same base ambient_bed (that \
 place has a fixed, rendered acoustic character) — only specific sound_events \
 should vary between them, not the room tone itself
+- HONOR THE SCENE'S EMOTIONAL DIRECTION: each scene below may carry \
+`emotional_beat` (what the moment must make the audience feel) and \
+`expression` (how that reads on faces and bodies) — the director's own reading \
+of the story, settled upstream. Let it drive `score_direction`, where silence \
+is the right choice, and what `emotional_function` claims the audio does for \
+THAT beat specifically. It directs how an existing moment sounds and feels, \
+never what happens in it. Scenes without those fields (an older scene list): \
+read `summary`/`purpose` as before.
 
 SCENE LIST:
 {scenes}
@@ -124,7 +132,8 @@ def design_soundscape(
     scene_list = json.dumps(
         [
             {k: s[k] for k in ("number", "slugline", "location", "summary", "purpose",
-                                "source_line", "chunk_indices")
+                                "source_line", "chunk_indices",
+                                "emotional_beat", "expression")
              if k in s}
             for s in scenes.get("scenes", [])
         ],

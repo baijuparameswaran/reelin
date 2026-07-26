@@ -184,24 +184,23 @@ def _effective_max_scenes(stage_name: str, max_scenes: int | None) -> int | None
 
 
 def _duration_kwargs(stage_name: str, out, target_duration: int | None) -> dict:
-    """`target`/`shots_guidance` kwargs for `stages.run_stage`, restoring the
-    ORIGINAL run's `--target-duration` planning guidance for the two stages
-    that actually consume it — `scenes` (scene-count budget) and
-    `cinematography` (shots-per-scene budget, which additionally needs the
+    """`shots_guidance` kwargs for `stages.run_stage`, restoring the ORIGINAL
+    run's `--target-duration` planning guidance for the one stage that still
+    consumes it — `cinematography` (shots-per-scene budget, which needs the
     CURRENT scene count, reloaded fresh since `scenes` may have just been
-    regenerated earlier in the same revision). Empty dict for every other
-    stage — nothing meaningful to compute, and every other stage's `**_`
+    regenerated earlier in the same revision). `scenes` is deliberately NOT
+    here any more: a runtime budget no longer sets scene COUNT (see
+    `reel.duration_budget`'s note), so it uses `segment_scenes`' own
+    coverage-first default. Empty dict for every other stage — nothing meaningful to compute, and every other stage's `**_`
     catch-all would ignore these anyway. `target_duration=None` (no prior
     record, or the original run used the config default) falls back to
     `duration_budget.DEFAULT_TARGET_SECONDS`, matching what a fresh
     `pipeline.run()` does when `--target-duration` is omitted."""
-    if stage_name not in ("scenes", "cinematography"):
+    if stage_name != "cinematography":
         return {}
     from . import duration_budget
     from .stages import _load
     target_seconds = target_duration or duration_budget.DEFAULT_TARGET_SECONDS
-    if stage_name == "scenes":
-        return {"target": duration_budget.suggest_scene_target(target_seconds)}
     scenes_doc = _load(out, "scenes") or {}
     scene_count = len(scenes_doc.get("scenes", []))
     return {"shots_guidance": duration_budget.suggest_shots_per_scene(target_seconds, scene_count)}

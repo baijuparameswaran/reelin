@@ -18,9 +18,15 @@
   rendering adds **optional** deps (`diffusers`/`torch`/etc., see
   `requirements-image.txt`) — the text pipeline runs without them.
 - `reel/` — package:
-  - `models.py` — provider policy + open-text front door; graders import
-    this, `text()` is the only public function, always routes to Ollama
-    with `steer=False` so graders stay neutral.
+  - `models.py` — provider policy + text front door for graders; `text()`
+    always routes to a LOCAL profile (`local_profile`) with `steer=False`, so
+    graders stay both neutral and independent of whatever authored the
+    artifact.
+  - `gemini.py` also carries `generate_text` — the hosted frontier-tier text
+    call behind `provider: gemini`. Reuses this module's existing key,
+    headers, `_post` retry/backoff, and `gemini_api.log`, and treats a
+    blocked prompt or a `MAX_TOKENS`/early finishReason as an error rather
+    than returning empty or truncated content.
   - `stages.py` — per-stage registry + `run_stage` for independent
     invocation.
   - `llm.py` — open-model client: model-agnostic Ollama + profile/fallback
@@ -74,13 +80,26 @@
   knobs, `genre`/`moodboard`/`fidelity`/`critique` blocks, `image`/`video`
   blocks (backend/model), runtime knobs. Validated at every CLI invocation
   (best-effort, non-blocking) by `llm.validate_config`.
-- **Gemini API key** (for image/video): read from env `GEMINIAPIKEY` (or
-  `GEMINI_API_KEY`/`GOOGLE_API_KEY`). Without it, image/video stages no-op
-  gracefully with a hint; the text pipeline is unaffected.
+- **Gemini API key** (`python -m reel.secrets`, chmod-600 file under
+  `~/.config/reel/` — never an env var, never anything in the project dir):
+  one key now serves three things — image, video, and the optional hosted
+  `frontier` text profile. Without it, image/video stages no-op gracefully
+  with a hint and a hosted text profile falls back to its local
+  `fallback_profile`; the local text pipeline is unaffected.
 - `scripts/` — `update-models.sh` (cadence), `install-cron.sh`,
   `model-updates.log`.
 - `samples/` — bundled test story. `output/` — generated artifacts
   (gitignored).
+- **Tests cannot spend money (`tests/__init__.py`, enforced not assumed):**
+  importing the test package blocks outbound sockets, so a test that forgets
+  to mock its transport fails with `NetworkBlockedInTests` naming the address
+  it tried, instead of quietly billing a Gemini/Veo call. Blocked at the
+  SOCKET layer rather than by patching `urlopen`/`gemini._post`, because
+  those are per-module — an SDK doing its own HTTP (`google-genai`) slips
+  past a per-module guard but not this one. Loopback is blocked too, so no
+  test can depend on a live Ollama daemon. `tests/test_no_api_cost.py`
+  meta-tests the guard itself (it would otherwise fail silently if deleted)
+  and asserts the suite behaves identically with and without a Gemini key.
 - `tests/test_prompt_rules.py` — stdlib `unittest`, offline (no LLM/API
   calls, <1s): validates every agent PROMPT template follows this
   project's prompting conventions (sandwiching, DO-NOT lists,
@@ -126,7 +145,71 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
   Image/video config backends are `auto` → resolve to `gemini` when a key
   exists, else the `open_backend`. `reel.models` exposes only `text()` for
   grader agents; `reel.llm` is the open-text engine behind it. No Gemini
-  text path exists by design.
+  text path exists by design. Text is a two-way split: **creative** stages
+  default to the local open models and may opt into a hosted frontier profile
+  (below); **grader/checker** stages are always local and always neutral.
+- **Hosted frontier text tier (`provider: gemini`,
+  `gemini.generate_text`, profile `frontier`):** a deliberate, narrow
+  exception to the otherwise absolute "no Gemini text path" rule — taken
+  because it reuses the key image/video already use, so it needs no second
+  credential, no SDK, and no server-side setup. The provider lives on the
+  PROFILE, not the agent, so "agents pick a profile, never a model name"
+  still holds: opting a stage in is a one-line `agent_profiles` change and no
+  agent module learns a provider or model string. Nothing uses it by default.
+  It exists for the one place local context length was a hard ceiling rather
+  than a tradeoff: `quality_high` at `num_ctx: 8192`, minus the scenes
+  prompt's ~2,900 tokens of rules and ~3,000 of `MAX_CHARS` source text,
+  leaves room for only ~14 scenes of JSON before the array truncates —
+  capping how completely the film can ever cover the story. A 1M-in/65K-out
+  model removes that ceiling, `MAX_CHARS` truncation, and the ~13-min-per-
+  stage wall at ~8 tok/s together. Degrades to the profile's
+  `fallback_profile` with a printed note when no key is set, or on an unknown
+  provider name, so the pipeline still runs fully offline; a failure from a
+  provider that IS reachable propagates instead (a real error, not a
+  fall-back-to-local situation). Steering is composed BEFORE the provider
+  branch, so a hosted creative stage is steered like any other. Text calls
+  log to the same `gemini_api.log` as image/video, so `spend.py` sees them
+  with no second format to parse. **Graders stay local**
+  (`models.local_profile`, applied inside `models.text`) — the provider-level
+  half of the independence rule `steer=False` already enforces, and load-
+  bearing now that a creative stage can run on Gemini: the grader must not be
+  the same model that authored the artifact. It also keeps grader cost at
+  zero, since graders fire on every stage.
+- **Source-text budget is per-PROFILE, not a global constant
+  (`llm.max_chars`):** `MAX_CHARS` (12,000 chars ~ 3,000 tokens) is sized for
+  a local profile at `num_ctx: 8192`. Agents call `llm.max_chars(profile)`
+  instead of reading the constant, because the truncation happens in the
+  agent BEFORE the prompt is built — so switching a stage to a 1M-context
+  model would otherwise still cut the story at its first ~2,000 words.
+  Resolution: `options.max_source_chars` on the profile wins; a LOCAL profile
+  derives its own budget from its `num_ctx` (`local_max_chars`, below); a
+  hosted profile whose provider isn't usable takes its `fallback_profile`'s
+  budget, so the truncation decision can't disagree with where `llm.generate`
+  actually routes; otherwise the provider budget (`gemini`: 600,000 chars).
+  Never raises — unknown/malformed yields `MAX_CHARS`, the safe floor.
+  Applies to the three whole-source agents: `structure`, `characters`,
+  `scenes`.
+- **Local caps are hardware-derived per model, not one flat number
+  (`llm.local_max_chars`):** `num_ctx` is this project's hardware knob —
+  chosen per profile against 8 GB VRAM plus the CPU-RAM KV cache — so the
+  source budget derives from it. It's a TOTAL (prompt + response) budget, so
+  `_PROMPT_RESERVE_TOKENS` (3,000 — sized on `scenes`, the largest of the
+  three whole-source prompts at ~2,900) and `_OUTPUT_RESERVE_TOKENS` (2,000,
+  matching what was measured left over at the old flat cap) come off the top
+  before the rest is spent at `_CHARS_PER_TOKEN` (4). Today that yields
+  12,768 chars at `num_ctx: 8192` (fast/quality/quality_high — within 10% of
+  the old hand-tuned 12,000, so the tiers this host actually runs on barely
+  move) and 45,536 at 16,384 (`synthesis`, previously capped as if it were
+  8K). Floors at `_MIN_SOURCE_CHARS` for a tiny `num_ctx`; a profile
+  declaring no `num_ctx` derives back to the 8,192 default rather than
+  collapsing to the floor.
+- **Frontier model choice is measured, not assumed:** benched on the real
+  scenes prompt against the bundled samples — `gemini-3.6-flash` (8-10
+  scenes, 26-36s, 4/4 parsed) chosen over `gemini-3.1-pro-preview` (9-13
+  scenes, 42-70s, 3/4 parsed) because the scene-count difference sits inside
+  each model's own run-to-run variance while flash is GA, ~1.7x faster, and
+  produced no unparseable responses. `gemini-2.5-pro` is listed by the models
+  endpoint but 404s on `generateContent`. See PROGRESS.md for the raw runs.
 - **Story-fidelity at every stage (`reel/agents/fidelity.py`, open model):**
   each stage's output is scored against the original story text
   (`fidelity_score` 0-100, drift/omissions/contradictions, verdict) before
@@ -139,12 +222,17 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
   (`reel/agents/critique.py`, open model, wired into `pipeline._gated`):** a
   third check, distinct from fidelity (source consistency) and genre (genre
   fit) — judges craft quality of a stage's own output against its own
-  governing SYSTEM/PROMPT template. Runs once automatically before the
-  operator sees the gate; a `needs_improvement` verdict triggers exactly one
-  re-run via the same `feedback` mechanism a human's gate feedback uses
-  (never recursive). The pre-critique raw result is preserved as
-  `output/<stage>.0.json`. Toggle via config `critique.enabled` (default
-  true); best-effort, never blocks. Scoped to `pipeline.run()` only, not the
+  governing SYSTEM/PROMPT template. Runs automatically before the operator
+  sees the gate; a `needs_improvement` verdict triggers a re-run via the same
+  `feedback` mechanism a human's gate feedback uses. `critique.iterations`
+  (config, **default 1**) sets how many critique→refine rounds are allowed —
+  at the default this is exactly one pass and the refined result is not
+  re-critiqued, identical to the original behaviour; raising it re-critiques
+  each refinement and stops early the moment the critic is satisfied, at N
+  times the model calls. `critique.enabled` (default true) is still the off
+  switch — a bogus `iterations: 0` floors to 1 rather than silently disabling.
+  The pre-critique raw result is preserved as `output/<stage>.0.json`.
+  Best-effort, never blocks. Scoped to `pipeline.run()` only, not the
   standalone `revise` gate.
 - **Empty-result safety net (`stages.is_stage_result_empty`/
   `pipeline._ensure_nonempty_result`) — not toggleable, always on:** a
@@ -196,8 +284,17 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
   note needs judgment the deterministic builder can't provide.
 - **Target total runtime (`--target-duration N`, default 45s,
   `reel/duration_budget.py`):** an engine-independent budget threaded
-  through scene/shot-count planning guidance (soft, secondary to each
-  agent's own coverage rules) and each clip's requested render duration
+  through SHOT-count planning guidance (soft, secondary to cinematography's
+  own coverage rules) and each clip's requested render duration. It
+  deliberately does NOT set scene count any more: `suggest_scene_target` used
+  to interpolate a literal range ("roughly 2-4 scenes" at the 45s default)
+  into the end of the scenes prompt's opening sentence, the highest-salience
+  position and immediately after two anti-inflation warnings, where a
+  concrete number reliably beat the coverage rules forty lines below. That
+  made a runtime default — not the story — decide how much of the story got
+  filmed, and contradicted this project's own rule that a budget bounds
+  RENDERING (`--max-scenes`) while every design stage processes everything.
+  `segment_scenes` now uses its own coverage-first, numberless default
   (parsed from the storyboard panel's own duration estimate). Each video
   backend translates the requested duration its own way — Veo only accepts
   4/6/8s exactly (`i2v._veo_nearest_valid_duration` rounds/forces as
@@ -227,10 +324,32 @@ laptop) via `%UserProfile%\.wslconfig` (`[wsl2]` / `memory=12GB`). 4 GB swap.
   `storyboard._build_scene_board`) is folded into the Action clause as a
   short performance-direction phrase ("Alice reaches for the doorknob,
   conveying quiet dread"), deduped against text already present in the
-  action. The one deliberate point where rendering adds interpretive
-  performance direction on top of an already-established beat — never WHAT
-  happens (scenes.py/screenplay.py stay the sole source-bound authority),
+  action. The point where *rendering* adds interpretive performance
+  direction on top of an already-established beat — never WHAT happens
+  (scenes.py/screenplay.py stay the sole source-bound authority for that),
   only HOW it's performed/felt.
+- **The same interpretive boundary now also applies at the SCENES stage
+  (`scenes.py` rule 11, DIRECTOR'S INTERPRETIVE EXPANSION):** every scene
+  carries `emotional_beat` (what the moment must make the audience feel) and
+  `expression` (how that reads on a face/body), and an emotional or
+  expressional moment the source only *implies* — the held look, the
+  decision not to speak, the beat where grief lands — is treated as filmable
+  material that may even earn its own scene. This is the one deliberate
+  loosening of rules 1-2 ("SOURCE TEXT IS THE ONLY AUTHORITY"), and it is
+  scoped exactly as narrowly as the render-time layer above: an inferred
+  EMOTION is grounded in the source, an inferred PLOT POINT is not (no
+  invented events, characters, locations, props, spoken lines, or outcomes).
+  Two structural consequences: rule 4 keeps `summary` unembellished and
+  source-checkable so the interpretive layer stays quarantined in its own
+  named fields (fidelity grading still has a clean record to judge), and
+  rule 7 was tightened so "two beats from one passage" can't degrade into
+  two scenes restating one moment. Both fields are propagated to every stage
+  that can act on them — soundscape/visuals/cinematography (each grounding
+  them to its own `emotional_function`), screenplay
+  (`_director_block`), and storyboard (a `bundle.director` block, used as
+  the `emotional_note` floor beneath the DP's more specific per-shot read) —
+  rather than stopping in scenes.json, which is the dead-field failure mode
+  `visuals.key_props` and panel `emotional_note` both previously had.
 - **Config schema validation (`llm.validate_config`) and estimated $ spend
   tracking (`reel/spend.py`) are both best-effort, non-blocking checks
   layered on existing state:** `validate_config` is a lightweight,

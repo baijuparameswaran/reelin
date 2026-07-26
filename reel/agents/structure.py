@@ -6,7 +6,6 @@ concurrently.
 from __future__ import annotations
 
 from .. import llm
-from ..llm import MAX_CHARS
 
 SYSTEM = (
     "You are one of the most respected story analysts and screenwriters "
@@ -52,7 +51,8 @@ def analyze_structure(
 ) -> dict:
     profile = profile or llm.agent_profile("structure")
     prompt = llm.with_feedback(
-        PROMPT.format(title=source["title"], text=source["text"][:MAX_CHARS]),
+        PROMPT.format(title=source["title"],
+                      text=source["text"][:llm.max_chars(profile)]),
         feedback,
     )
     raw = llm.generate(prompt, profile=profile, system=SYSTEM, as_json=True)

@@ -190,6 +190,101 @@ def _inline(image_path: Path) -> dict:
                             "data": base64.b64encode(Path(image_path).read_bytes()).decode()}}
 
 
+# ── text generation ───────────────────────────────────────────────────────────
+# Used ONLY by profiles that explicitly declare `provider: gemini` (the
+# `frontier` profile — see config/models.yaml and reel/llm.py's dispatch).
+# Every other text stage, and EVERY grader, stays on local Ollama models; see
+# reel.models' docstring for the policy this sits inside.
+
+def generate_text(prompt: str, *, system: str | None = None,
+                  model: str = "gemini-3.6-flash",
+                  as_json: bool = False,
+                  schema: dict | None = None,
+                  max_output_tokens: int | None = None,
+                  temperature: float | None = None,
+                  timeout: float = 600) -> str:
+    """One text generation. Returns the response text.
+
+    Reuses this module's existing key, headers, and `_post` retry/backoff, so
+    a text stage inherits the same 429/500/503 handling the image and video
+    calls already have — and logs to the SAME `gemini_api.log`, which means
+    `spend.py` sees text calls without a second log format to parse.
+
+    `as_json` asks for `application/json` back, which is a real response-format
+    constraint rather than a prompt-level request; `schema` (optional) goes
+    further and constrains the shape. Both are stronger guarantees than the
+    "respond with ONLY a single JSON object" instruction every agent prompt
+    carries, so `llm.safe_json` becomes a formality on this path.
+
+    A blocked prompt or a truncated response raises rather than returning
+    empty/partial text: silently handing half a JSON object back to a stage
+    would surface later as an unexplained parse failure, several steps from
+    the actual cause.
+    """
+    body: dict = {"contents": [{"role": "user", "parts": [{"text": prompt}]}]}
+    if system:
+        body["systemInstruction"] = {"parts": [{"text": system}]}
+    gen: dict = {}
+    if as_json or schema:
+        gen["responseMimeType"] = "application/json"
+    if schema:
+        gen["responseSchema"] = schema
+    if max_output_tokens:
+        gen["maxOutputTokens"] = max_output_tokens
+    if temperature is not None:
+        gen["temperature"] = temperature
+    if gen:
+        body["generationConfig"] = gen
+
+    params = {"model": model, "as_json": bool(as_json or schema),
+              "max_output_tokens": max_output_tokens, "prompt_chars": len(prompt)}
+    try:
+        resp = _post(f"{BASE}/v1beta/models/{model}:generateContent", body, timeout)
+    except Exception as e:
+        _log_call("TEXT", model=model, backend="gemini",
+                  outcome=f"error({type(e).__name__})", params=params)
+        raise
+
+    blocked = (resp.get("promptFeedback") or {}).get("blockReason")
+    if blocked:
+        _log_call("TEXT", model=model, backend="gemini",
+                  outcome=f"blocked({blocked})", params=params)
+        raise RuntimeError(f"Gemini blocked this prompt (reason={blocked}).")
+
+    candidates = resp.get("candidates") or []
+    if not candidates:
+        _log_call("TEXT", model=model, backend="gemini", outcome="empty", params=params)
+        raise RuntimeError("Gemini returned no candidates.")
+    cand = candidates[0]
+    finish = cand.get("finishReason")
+    text = "".join(p.get("text", "")
+                   for p in (cand.get("content") or {}).get("parts") or [])
+
+    usage = resp.get("usageMetadata") or {}
+    params.update({k: usage[k] for k in
+                   ("promptTokenCount", "candidatesTokenCount", "totalTokenCount")
+                   if k in usage})
+
+    if finish == "MAX_TOKENS":
+        _log_call("TEXT", model=model, backend="gemini",
+                  outcome="truncated(MAX_TOKENS)", params=params)
+        raise RuntimeError(
+            f"Gemini hit maxOutputTokens ({max_output_tokens}) before finishing — "
+            "the response is truncated and unusable as JSON. Raise the profile's "
+            "`options.max_output_tokens` in config/models.yaml.")
+    if finish and finish not in ("STOP", "MAX_TOKENS"):
+        _log_call("TEXT", model=model, backend="gemini",
+                  outcome=f"stopped({finish})", params=params)
+        raise RuntimeError(f"Gemini stopped early (finishReason={finish}).")
+    if not text.strip():
+        _log_call("TEXT", model=model, backend="gemini", outcome="empty-text",
+                  params=params)
+        raise RuntimeError("Gemini returned an empty response.")
+
+    _log_call("TEXT", model=model, backend="gemini", outcome="success", params=params)
+    return text.strip()
+
+
 # ── image generation ──────────────────────────────────────────────────────────
 
 def generate_image(prompt: str, out_path: Path, *,

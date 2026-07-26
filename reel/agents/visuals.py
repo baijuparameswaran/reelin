@@ -106,6 +106,15 @@ should shift between them (e.g. day vs. night at the same place), not the \
 underlying architecture or light sources
 - genre should influence the visual approach (thriller → high contrast, \
 deep shadows; drama → naturalistic light; period → desaturated warmth, etc.)
+- HONOR THE SCENE'S EMOTIONAL DIRECTION: each scene below may carry \
+`emotional_beat` (what the moment must make the audience feel) and \
+`expression` (how that reads on faces, bodies, gestures) — the director's own \
+reading of the story, settled upstream. Design the scene's light, palette, and \
+`visual_moments` to make that emotion land, and let `emotional_function` state \
+what the design does for THAT beat specifically rather than describing the \
+scene generically. This directs how an existing moment looks and feels, never \
+what happens in it. Scenes without those fields (an older scene list): read \
+`summary`/`purpose` as before.
 
 SCENE LIST:
 {scenes}
@@ -138,7 +147,8 @@ def design_visuals(
     scene_list = json.dumps(
         [
             {k: s[k] for k in ("number", "slugline", "location", "summary", "purpose",
-                                "source_line", "chunk_indices", "props")
+                                "source_line", "chunk_indices", "props",
+                                "emotional_beat", "expression")
              if k in s}
             for s in scenes.get("scenes", [])
         ],

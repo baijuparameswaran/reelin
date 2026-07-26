@@ -5,7 +5,6 @@ Runs independently of structure analysis (the pipeline runs them concurrently).
 from __future__ import annotations
 
 from .. import llm
-from ..llm import MAX_CHARS
 from ..revision_merge import merge_by_key
 
 SYSTEM = (
@@ -79,7 +78,8 @@ def extract_characters(
     byte-identical from `existing["characters"]`."""
     profile = profile or llm.agent_profile("characters")
     prompt = llm.with_feedback(
-        PROMPT.format(title=source["title"], text=source["text"][:MAX_CHARS]),
+        PROMPT.format(title=source["title"],
+                      text=source["text"][:llm.max_chars(profile)]),
         feedback,
     )
     raw = llm.generate(prompt, profile=profile, system=SYSTEM, as_json=True)

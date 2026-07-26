@@ -61,6 +61,30 @@ per-scene art design gets them as grounding context for its own `key_props`
 plain inventory — see `visuals.py`'s docstring). Without a source-grounded
 starting point, both of those downstream steps had no better option than
 inventing props from scratch, which had no fidelity anchor at all.
+
+Each scene finally carries `emotional_beat` + `expression` (rule 11,
+DIRECTOR'S INTERPRETIVE EXPANSION) — the director's read of what the moment
+must make the audience FEEL and how that reads visibly on a face/body. This
+is the ONE place this stage is licensed to go beyond the literal text: an
+emotional or expressional moment the prose only implies (the held look, the
+decision not to speak, the beat where grief lands) is treated as filmable
+material, and may even earn its own scene, where an implied EVENT never
+could. That boundary — interpretation of HOW a moment is felt and performed,
+never new FACTS (no invented events, characters, locations, props, lines, or
+outcomes; rules 1-2 still stand unchanged) — is the same line
+`veo_prompt.panel_action`'s "director's freedom" layer already draws at
+render time, applied here at the point the scene list itself is built. Two
+deliberate consequences: rule 4 keeps `summary` clean and source-checkable
+so the interpretive layer stays quarantined in its own named fields (fidelity
+grading still has an unembellished record to judge against), and rule 7 was
+tightened so "two beats from one passage" can't degrade into two scenes
+restating one moment. Both fields are propagated to the stages that can
+actually act on them — `cinematography` (into each shot's
+`emotional_function`, which reaches the rendered Veo prompt via
+`storyboard`'s panel `emotional_note`), `visuals`, `soundscape`, and
+`screenplay` — rather than stopping in scenes.json, which is the failure
+mode `visuals.key_props` and panel `emotional_note` both previously had (see
+PROGRESS.md's 2026-07-10 and 2026-07-23 entries).
 """
 from __future__ import annotations
 
@@ -68,7 +92,6 @@ import json
 import re
 
 from .. import llm
-from ..llm import MAX_CHARS
 from ..revision_merge import merge_by_key
 from .ingest import chunk_text, CHUNK_SIZE
 
@@ -79,21 +102,38 @@ SYSTEM = (
 )
 
 PROMPT = """\
-Break the story below into filmable scenes the way a director breaks down a
-shooting script: give every beat that carries its own dramatic or visual
-weight its own scene, so the film actually does the story justice (see
-STRICT RULE 9 below). Never invent scenes to hit a count, and never split a
-single continuous beat into two just to inflate the count either — {target}.
+Break the story below into filmable scenes the way a great director breaks
+down a shooting script: {target}. Give every beat that carries its own
+dramatic, visual, or EMOTIONAL weight its own scene, so the film actually
+does the story justice (see STRICT RULES 9 and 11 below). Read the story for
+the emotional and expressional life inside each line — including what the
+prose implies but never spells out — and give that life both its own scenes
+and its own explicit direction (RULE 11). The only limits on scene count are
+real ones: never invent a scene the source doesn't support, and never split a
+single continuous beat into two.
 {structure_note}
 STRICT RULES:
-1. SOURCE TEXT IS THE ONLY AUTHORITY. Every scene must correspond to an actual
-   event, location, or moment explicitly present in the source text below.
-2. No invented scenes, characters, plot points, or locations. If the source doesn't
-   describe it, it cannot appear in the scene list.
+1. SOURCE TEXT IS THE ONLY AUTHORITY FOR WHAT HAPPENS. Every scene must
+   correspond to an actual event, location, or moment present in the source
+   text below — including a moment the source carries implicitly, in what a
+   character does, feels, withholds, or leaves unsaid (rule 11). What the
+   source does not support, you may not add.
+2. No invented characters, plot points, locations, props, or outcomes. If the
+   source doesn't describe it, it cannot appear in the scene list. A scene that
+   stages an EVENT the source never has is an invented scene; a scene that
+   surfaces an emotional or expressional moment the source genuinely implies is
+   not (rule 11) — that distinction is the whole line between direction and
+   invention, so hold it precisely.
 3. `source_line` is mandatory: copy a SHORT verbatim phrase (5-15 words) from the
    source text that anchors this scene. If you cannot find a matching phrase, the
-   scene does not belong in the list.
+   scene does not belong in the list. When two scenes draw on the same sentence or
+   passage (rule 11 makes that legitimate), each must still anchor on its own
+   distinct phrase wherever the text offers one — don't repeat an identical
+   `source_line` across scenes.
 4. `summary` must describe only what the source text says — no embellishment.
+   Keep your interpretive reading OUT of `summary` and IN `emotional_beat` /
+   `expression`, where it belongs: `summary` stays the plain, source-checkable
+   record of what happens, so the two layers never get confused for each other.
 5. Use the EXACT character names that appear in the source text — or, when a
    CANONICAL CHARACTER NAMES list is provided below, the exact matching name
    from THAT list (it already settled on one consistent name per character;
@@ -103,7 +143,11 @@ STRICT RULES:
 7. No unnecessary repeats: never split one event into two overlapping scenes, and
    never list two scenes whose `summary`/`source_line` cover substantially the same
    moment. Each scene must earn its place with something the others don't already
-   cover.
+   cover. Two scenes drawn from the SAME passage are legitimate only when each
+   turns on a genuinely different emotional or expressional beat (the dread
+   before a door opens, then the recognition after it does) — restating one beat
+   in different words is still a repeat, and a differently-worded
+   `emotional_beat` alone never turns one moment into two scenes.
 8. `location` is the plain NAME of the physical setting (e.g. "the harbor tavern",
    "a wheat field", "a corner café" — generic illustrations of the FORMAT only;
    use the source's own name for the place when it has one) — NOT the full
@@ -139,12 +183,43 @@ STRICT RULES:
     regardless of scene) vs. one a character carries or that's specific to
     this scene's action are BOTH valid — don't filter either out; a later
     stage decides which is which.
+11. DIRECTOR'S INTERPRETIVE EXPANSION — THE EMOTIONAL LAYER. Read the source
+    the way the best directors read a story: every line carries emotional and
+    expressional life the prose states only in passing, or leaves entirely
+    between the lines — the held look before an answer, the flinch of
+    recognition, the moment someone decides not to speak, the beat where grief
+    finally lands, the small physical tell that gives away what a character
+    won't say. Surface that layer generously and precisely; it is what makes an
+    adaptation feel directed rather than transcribed. Two things follow:
+    (a) an implicit emotional or expressional MOMENT may earn its OWN scene
+    even where the source never marks it as a separate event — if the prose
+    supports a character feeling or showing it at that point in the story,
+    it is filmable material;
+    (b) EVERY scene carries `emotional_beat` and `expression`: what the moment
+    must make the audience feel, and how that reads visibly on a face, in a
+    body, in behaviour. Be elaborate and specific in both — a performable
+    read, not a label ("the practiced stillness of someone who has already
+    decided to lie, eyes steady a half-beat too long" — not "he is nervous").
+    This is the one place in this stage where your own directorial reading of
+    the story is actively wanted.
+    THE LIMIT — this licenses interpretation of HOW a moment is felt and
+    performed, never new FACTS. You still may not add an event, character,
+    location, prop, spoken line, or outcome the source doesn't contain
+    (rules 1-2 stand): an inferred EMOTION is grounded in the source, an
+    inferred PLOT POINT is not.
 
 DO NOT:
-- invent a scene, character, location, or prop the source text doesn't
-  actually contain (rules 1-2 above)
-- merge two genuinely distinct dramatic beats into one scene just to keep
-  the count down, or split one continuous beat into two just to inflate it
+- invent an EVENT, character, location, prop, or outcome the source text
+  doesn't actually contain (rules 1-2 above) — note that surfacing an
+  emotional or expressional moment the source implies is direction, not
+  invention (rule 11), and the two must not be confused in either direction
+- write a generic, unperformable `emotional_beat`/`expression` ("she is sad",
+  "it is tense") when the passage supports a specific read (rule 11b)
+- let interpretation leak into `summary` instead of `emotional_beat`/
+  `expression` (rule 4)
+- merge two genuinely distinct dramatic or emotional beats into one scene just
+  to keep the count down, or split one continuous beat into two just to
+  inflate it
 - leave `source_line` paraphrased instead of a real verbatim quote
 - produce duplicate or non-sequential `number` values
 - add commentary, preamble, or markdown code fences before or after the JSON
@@ -161,7 +236,9 @@ key present for every scene, no extra top-level keys, no missing keys:
       "summary": "one or two sentences of what actually happens in the source",
       "characters": ["EXACT NAME as in source, or the matching CANONICAL name below", "..."],
       "purpose": "why this scene exists dramatically",
-      "props": ["notable physical object explicitly present or mentioned in the source for this scene", "..."]
+      "props": ["notable physical object explicitly present or mentioned in the source for this scene", "..."],
+      "emotional_beat": "the director's read: what this moment must make the audience FEEL, specifically — the emotional turn inside it, including what the source only implies",
+      "expression": "how that reads on screen: the specific faces, bodies, gestures, held silences, and physical tells that make it visible and performable"
     }}
   ]
 }}
@@ -188,10 +265,19 @@ just read, not just what you remember from the rules list):
   scene (CAPTURE THE STORY FULLY, rule 9) — check for two different turning
   points or emotional shifts hiding inside one merged scene just because
   they share a location, and split them if you find one.
+- Every distinct EMOTIONAL or EXPRESSIONAL moment the source material above
+  supports — stated outright or carried in subtext — has been surfaced rather
+  than passed over (DIRECTOR'S INTERPRETIVE EXPANSION, rule 11), and every
+  scene's `emotional_beat`/`expression` is a specific, performable read of
+  that scene rather than a generic label.
+- Nothing in `emotional_beat`/`expression` asserts a new EVENT, spoken line,
+  character, location, prop, or outcome the source material above doesn't
+  contain — interpretation of how a moment feels and plays, never new facts
+  (rule 11's LIMIT).
 - Every entry in `props` is an object the source material above actually names
   — not one you inferred would look good on screen.
 - The response is ONLY the JSON object above — no markdown fences, no
-  commentary, no extra top-level keys, every scene has all 8 schema fields.
+  commentary, no extra top-level keys, every scene has all 10 schema fields.
 """
 
 
@@ -375,8 +461,17 @@ def _attach_source_excerpts(scenes: list[dict], source_text: str) -> list[dict]:
         positioned.append((pos if pos >= 0 else None, sc))
 
     located = sorted((p for p in positioned if p[0] is not None), key=lambda p: p[0])
+    positions = [p for p, _ in located]
     for i, (pos, sc) in enumerate(located):
-        end = located[i + 1][0] if i + 1 < len(located) else len(norm_source)
+        # The next STRICTLY GREATER position, not simply the next entry in the
+        # list: rule 11 (DIRECTOR'S INTERPRETIVE EXPANSION) makes it legitimate
+        # for two scenes to draw distinct emotional beats out of the SAME
+        # passage, and two scenes whose `source_line` resolves to the same
+        # offset would otherwise hand the earlier one an empty excerpt (and a
+        # `word_count` of 0, silently breaking duration estimation for it).
+        # Colliding scenes share that passage's span instead.
+        nxt = next((p for p in positions[i + 1:] if p > pos), None)
+        end = nxt if nxt is not None else len(norm_source)
         excerpt = norm_source[pos:end].strip()
         sc["source_excerpt"] = excerpt
         sc["word_count"] = len(excerpt.split())
@@ -419,8 +514,15 @@ def _map_chunks(scenes: list[dict], source: dict) -> list[dict]:
 def segment_scenes(
     source: dict,
     structure: dict,
-    target: str = "as many scenes as the story's own beats call for — segment "
-                  "like a director breaking down a shooting script, not for brevity",
+    # Coverage-first and deliberately NUMBERLESS. This used to be overridden
+    # by `duration_budget.suggest_scene_target`, which interpolated a literal
+    # range ("roughly 2-4 scenes" at the 45s default) into the sentence below
+    # — the most salient spot in the prompt — where it beat every coverage
+    # rule that followed. Callers no longer pass `target` at all; see
+    # `reel.duration_budget`'s note for why a runtime budget bounds rendering
+    # rather than design.
+    target: str = "as many scenes as the story's own beats call for, "
+                  "never a number decided in advance and never for brevity",
     profile: str | None = None,
     feedback: str | None = None,
     existing: dict | None = None,
@@ -467,7 +569,10 @@ def segment_scenes(
     (prior_scene_count), never both."""
     profile = profile or llm.agent_profile("scenes")
     beats = json.dumps(structure.get("three_act", {}), ensure_ascii=False, indent=2)
-    source_text = source["text"][:MAX_CHARS]
+    # Budget is per-PROFILE, not a global constant: on the hosted frontier
+    # tier the local 12,000-char cap would truncate the story to roughly
+    # its first 2,000 words while the model has room for a whole novel.
+    source_text = source["text"][:llm.max_chars(profile)]
     structure_note = (_structure_alignment_note(existing, revise_keys)
                       or _revision_reminder_note(prior_scene_count))
     prompt = llm.with_feedback(

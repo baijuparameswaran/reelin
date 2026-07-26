@@ -317,3 +317,118 @@ class TestRunWiresCritiqueForEveryCreativeStage(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCritiqueIterationsKnob(unittest.TestCase):
+    """`critique.iterations` (config, default 1). The default must be
+    behaviourally identical to the original single-pass code — the tests in
+    TestGatedCritiqueWiring above are unchanged from before this knob existed
+    and still pass, which is the real proof. These cover the knob itself."""
+
+    def setUp(self):
+        self.gate = Gate(enabled=False)
+        self.summarize = lambda r: f"summary: {r}"
+
+    def _drive(self, iterations, verdicts=None):
+        calls = []
+        def rerun(feedback, profile):
+            calls.append(feedback)
+            return {"result": f"refined-{len(calls)}"}
+        seq = iter(verdicts) if verdicts else None
+        crit = {"verdict": "needs_improvement", "issues": ["x"],
+                "improvement_note": "improve"}
+        with mock.patch.object(
+                pipeline.critique_agent, "critique_stage",
+                side_effect=(lambda *a, **k: next(seq)) if seq else None,
+                return_value=None if seq else crit):
+            result, _, _ = pipeline._gated(
+                self.gate, "teststage", {"result": "initial"}, self.summarize, rerun,
+                agent_module=pipeline.structure_agent, critique_enabled=True,
+                critique_iterations=iterations)
+        return calls, result
+
+    def test_default_is_one_round(self):
+        sig = inspect.signature(pipeline._gated)
+        self.assertEqual(sig.parameters["critique_iterations"].default, 1)
+
+    def test_one_iteration_refines_at_most_once(self):
+        calls, result = self._drive(1)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(result, {"result": "refined-1"})
+
+    def test_higher_count_keeps_refining_while_unsatisfied(self):
+        calls, result = self._drive(3)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(result, {"result": "refined-3"})
+
+    def test_stops_early_once_the_critic_is_satisfied(self):
+        calls, result = self._drive(3, verdicts=[
+            {"verdict": "needs_improvement", "issues": [], "improvement_note": "n1"},
+            {"verdict": "solid", "issues": [], "improvement_note": ""},
+        ])
+        self.assertEqual(calls, ["n1"])
+        self.assertEqual(result, {"result": "refined-1"})
+
+    def test_zero_or_none_is_floored_to_one_not_disabled(self):
+        """`enabled` is the off switch; a bogus 0 must not silently become it."""
+        for bogus in (0, None):
+            with self.subTest(value=bogus):
+                calls, _ = self._drive(bogus)
+                self.assertEqual(len(calls), 1)
+
+
+class TestPerStageCritiqueConfig(unittest.TestCase):
+    """`critique.stages.<name>` overrides, merged field-by-field over the two
+    globals. Per-stage because the stages differ in what a critique is worth —
+    `scenes` ships disabled (see the shipped-config test below)."""
+
+    def test_global_values_apply_when_no_override(self):
+        cfg = {"enabled": True, "iterations": 2}
+        self.assertEqual(pipeline.critique_settings(cfg, "casting"), (True, 2))
+
+    def test_per_stage_enabled_override(self):
+        cfg = {"enabled": True, "iterations": 1,
+               "stages": {"scenes": {"enabled": False}}}
+        self.assertEqual(pipeline.critique_settings(cfg, "scenes"), (False, 1))
+        self.assertEqual(pipeline.critique_settings(cfg, "casting"), (True, 1))
+
+    def test_override_merges_field_by_field_not_wholesale(self):
+        """Setting only `enabled` must keep the global `iterations`, not reset
+        it to the function default."""
+        cfg = {"enabled": True, "iterations": 3,
+               "stages": {"scenes": {"enabled": False}}}
+        self.assertEqual(pipeline.critique_settings(cfg, "scenes"), (False, 3))
+
+    def test_per_stage_iterations_override(self):
+        cfg = {"enabled": True, "iterations": 1,
+               "stages": {"screenplay": {"iterations": 4}}}
+        self.assertEqual(pipeline.critique_settings(cfg, "screenplay"), (True, 4))
+
+    def test_a_stage_can_be_enabled_against_a_global_off(self):
+        cfg = {"enabled": False, "stages": {"casting": {"enabled": True}}}
+        self.assertEqual(pipeline.critique_settings(cfg, "casting")[0], True)
+        self.assertEqual(pipeline.critique_settings(cfg, "scenes")[0], False)
+
+    def test_malformed_override_degrades_to_the_globals(self):
+        """Runs inside every stage — a bad key costs a validate_config
+        warning, not the run."""
+        for bad in ("nonsense", 7, None, {"iterations": "many"}):
+            with self.subTest(value=bad):
+                cfg = {"enabled": True, "iterations": 2, "stages": {"scenes": bad}}
+                self.assertEqual(pipeline.critique_settings(cfg, "scenes"), (True, 2))
+
+    def test_missing_or_empty_config_is_the_shipped_default(self):
+        for cfg in (None, {}, {"stages": {}}):
+            with self.subTest(cfg=cfg):
+                self.assertEqual(pipeline.critique_settings(cfg, "scenes"), (True, 1))
+
+    def test_iterations_floor_of_one_survives_an_override(self):
+        cfg = {"stages": {"casting": {"iterations": 0}}}
+        self.assertEqual(pipeline.critique_settings(cfg, "casting"), (True, 1))
+
+    def test_shipped_config_disables_critique_for_scenes(self):
+        """The actual config/models.yaml, not a fixture."""
+        from reel import llm
+        crit = llm.config().get("critique")
+        self.assertEqual(pipeline.critique_settings(crit, "scenes")[0], False)
+        self.assertEqual(pipeline.critique_settings(crit, "storyboard"), (True, 1))
