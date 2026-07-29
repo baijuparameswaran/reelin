@@ -52,15 +52,21 @@ class TestProfileCarriesProvider(unittest.TestCase):
         fb = llm.get_profile(llm.get_profile("frontier").fallback_profile)
         self.assertEqual(fb.provider, "ollama")
 
-    def test_scenes_is_the_only_stage_on_the_hosted_tier(self):
-        """`scenes` is opted in deliberately — it's the one stage local
-        context length capped outright (~14 scenes at num_ctx 8192) rather
-        than merely traded off against. Every OTHER stage staying local is
-        the assertion that matters here: hosting a stage is a cost and a
-        network dependency, so it should never spread by accident."""
+    def test_no_stage_other_than_scenes_is_on_the_hosted_tier(self):
+        """Hosting is OPTIONAL, so this deliberately does not assert that
+        `scenes` IS hosted: an all-local config (every stage on `fast`, say)
+        is a legitimate way to run this project, and pinning the hosted tier
+        as required would make a local-only run fail its own test suite.
+
+        What must hold is the containment: hosting a stage costs money and
+        adds a network dependency, so it should never spread by accident.
+        `scenes` is the one stage eligible — local context length capped it
+        outright (~14 scenes at num_ctx 8192) rather than merely trading off
+        against it."""
         hosted = {stage for stage, tier in (llm.config().get("agent_profiles") or {}).items()
                   if llm.get_profile(tier).provider != "ollama"}
-        self.assertEqual(hosted, {"scenes"})
+        self.assertLessEqual(hosted, {"scenes"},
+                             f"unexpected stage(s) on a hosted tier: {sorted(hosted - {'scenes'})}")
 
     def test_no_grader_is_on_the_hosted_tier(self):
         """Belt-and-braces alongside `models.local_profile`: graders must not
