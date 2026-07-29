@@ -15,9 +15,19 @@ from . import llm
 
 
 def models(include_fallbacks: bool = False) -> list[str]:
+    """The Ollama tags the agents depend on.
+
+    HOSTED profiles (`provider != "ollama"` — the frontier tier) are skipped:
+    their `model` is a provider-side model name, not a pullable Ollama tag, so
+    emitting it here would make the updater try `ollama pull gemini-3.6-flash`.
+    A hosted profile degrades to its `fallback_profile`, which is itself a
+    profile in this same loop, so nothing it actually needs locally is lost.
+    """
     tags: list[str] = []
     for name in llm.config()["profiles"]:
         p = llm.get_profile(name)
+        if p.provider != "ollama":
+            continue
         tags.append(p.model)
         if include_fallbacks:
             tags.extend(p.fallbacks)

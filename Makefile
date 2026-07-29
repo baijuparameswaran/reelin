@@ -2,22 +2,41 @@
 PY := .venv/bin/python
 PIP := .venv/bin/pip
 
-.PHONY: help setup setup-image run demo models update update-all install-cron test clean
+.PHONY: help setup hardware-config setup-models setup-image run demo models update update-all install-cron test clean
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
-	  awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
+	  awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
 
-setup: ## Create venv and install dependencies
+setup: ## Create venv, install deps, and pull the agents' Ollama models [SKIP_MODELS=1]
 	python3 -m venv .venv
 	$(PIP) install -q --upgrade pip
 	$(PIP) install -q -r requirements.txt
+	@echo "python env ready — activate with: source .venv/bin/activate"
+	@$(MAKE) --no-print-directory hardware-config
+	@$(if $(SKIP_MODELS),echo "skipping model pull (SKIP_MODELS set)",$(MAKE) --no-print-directory setup-models)
 	@echo "setup complete"
 
-setup-models: ## Pull all preferred Ollama models (qwen3:4b, qwen3:8b, gemma3:12b)
-	@echo "Pulling preferred models from config/models.yaml …"
-	@$(PY) -m reel.manifest | while read m; do echo "  pull $$m"; ollama pull "$$m"; done
-	@echo "done — run 'make models' to verify"
+# Runs BEFORE the pull, so the models this host downloads are the ones it can
+# actually run. A no-op on the machine config/models.yaml is tuned for.
+hardware-config: ## Match each profile's model to this host's GPU/RAM (writes config/models.local.yaml)
+	@$(PY) -m reel.hardware_config --apply
+
+# Delegates to the same script `make update` uses (daemon start, Ollama version
+# gate, hardware-fit filtering, per-model failure tolerance) rather than keeping
+# a second, weaker pull loop here — just without the smoke test, since setup
+# runs before there's anything to smoke.  Ollama itself needs sudo to install,
+# so a missing binary prints the one-liner and skips instead of failing setup.
+setup-models: ## Pull the Ollama models the agents need (from config/models.yaml)
+	@if command -v ollama >/dev/null 2>&1; then \
+	  scripts/update-models.sh --no-test; \
+	  echo "models ready — run 'make models' to verify"; \
+	else \
+	  echo "ollama not installed — skipping model pull."; \
+	  echo "  install: curl -fsSL https://ollama.com/install.sh | sh"; \
+	  echo "  (the snap package can't reach the GPU — use the installer above)"; \
+	  echo "  then: make setup-models"; \
+	fi
 
 setup-image: ## Install optional deps for casting image rendering (diffusers/torch)
 	$(PIP) install -r requirements-image.txt

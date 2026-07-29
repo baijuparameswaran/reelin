@@ -52,7 +52,12 @@
     assembly. Pure, no render-loop/filesystem state — shared by
     `pipeline.py`'s main render path AND `fountain.py`'s standalone render
     path so the two entry points can't silently drift apart.
-  - `cli.py` — entry point. `manifest.py` — model list for the updater.
+  - `cli.py` — entry point. `manifest.py` — model list for the updater
+    (LOCAL profiles only — a hosted profile's `model` is a provider-side
+    name, not a pullable Ollama tag).
+  - `hardware_config.py` — the `make setup` step that matches each profile's
+    model to the host's GPU/RAM, writing `config/models.local.yaml` (see
+    "Per-host model overrides" below).
   - `fountain.py` — Fountain parser + screenplay→storyboard/shot builder
     for the standalone `render` command; `to_storyboard` builds a board
     shape-compatible with `storyboard.py`'s own deterministic build, so it
@@ -76,6 +81,32 @@
   - `agents/` — ingest, genre, structure, moodboard, characters, casting,
     scenes, soundscape, visuals, cinematography, storyboard, screenplay,
     fidelity, critique, revision.
+- **Per-host model overrides (`config/models.local.yaml`,
+  `reel/hardware_config.py`, `make setup` / `make hardware-config`):**
+  `config/models.yaml` is tracked, hand-tuned, and heavily commented against
+  ONE machine (the RTX 2070 Super above), so it's the wrong file for another
+  host's model choices — rewriting it would destroy the commentary and leave
+  every clone with a dirty worktree. Instead a gitignored overlay holds just
+  the deltas, deep-merged over the tracked file FIELD BY FIELD by
+  `llm.config` (`llm.local_overrides` + `llm._deep_merge`), so an entry naming
+  only `model` keeps that profile's tracked `fallbacks`/`options`. Malformed
+  or missing overlay ⇒ `{}` and the tracked config alone still runs, matching
+  every other config read here. Two limits on what the generator may do: it
+  only ever picks from a profile's OWN candidates (`model` + `fallbacks`, in
+  preference order), so it can't choose a model nobody vetted for that tier;
+  and it only writes when the tracked choice does NOT fit
+  (`llm.can_run_model`, i.e. VRAM + 80% RAM) — on the machine models.yaml was
+  tuned for it writes nothing, leaving the deliberate choices a naive size
+  check would get wrong (`quality_high` prefers the 30b MoE over the same-size
+  32b dense model for a ~6x speed difference). It runs BEFORE the model pull
+  so `manifest` → `update-models.sh` downloads what the host can actually run.
+  Judged against `llm.base_config()` (the pre-overlay view), never the merged
+  one — otherwise an override already on disk becomes the baseline and a host
+  that later grows can never be restored to the tracked model. Scope is the
+  `model` field only: `fallbacks` are already fit-filtered at run time by
+  `resolve_model`, and `num_ctx` carries per-model VRAM reasoning that
+  `local_max_chars` derives the source budget from, so it's a bigger decision
+  than a silent setup step should make.
 - `config/models.yaml` — model profiles, per-agent profile map, `hitl` gate
   knobs, `genre`/`moodboard`/`fidelity`/`critique` blocks, `image`/`video`
   blocks (backend/model), runtime knobs. Validated at every CLI invocation
@@ -107,8 +138,12 @@
   backing some of those rules do what the prompts describe, plus a static
   check that the steer-vs-neutral provider-policy split actually holds in
   the code. Run via `make test`.
-- Entry points via `Makefile`: `setup`, `demo`, `run`, `models`, `update`,
-  `update-all`, `install-cron`, `test`. Run pipeline as `python -m reel.cli`.
+- Entry points via `Makefile`: `setup` (venv + deps + hardware-matched model
+  pull; `SKIP_MODELS=1` for venv only), `hardware-config`, `setup-models`,
+  `demo`, `run`, `models`, `update`, `update-all`, `install-cron`, `test`.
+  `setup-models` delegates to the same `scripts/update-models.sh` the cadence
+  job uses (`--no-test`) rather than keeping a second pull loop. Run pipeline
+  as `python -m reel.cli`.
 
 ## Hardware reality (binding constraint)
 Host `dev-host`, WSL2/Ubuntu 24.04. **NVIDIA GeForce RTX 2070 Super, 8 GB

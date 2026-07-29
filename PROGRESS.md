@@ -52,7 +52,7 @@
 - **`tests/test_prompt_rules.py` is a real, committed, fully offline suite**
   (`make test`, no LLM/API calls, <1s) validating every agent prompt's
   conventions (sandwiching, DO-NOT lists, schema adherence) and the
-  deterministic functions backing some of those rules — 471 tests as of the
+  deterministic functions backing some of those rules — 477 tests as of the
   latest session (across the whole `tests/` suite, not just this one file).
 - **Still shelved:** a formal end-to-end `tests/` suite stubbing every paid
   API for a full `pipeline.run()` drive-through — drafted once, then
@@ -77,6 +77,55 @@
   phase.
 
 ## Session log
+- 2026-07-28 — `make setup` now pulls the Ollama models too, not just the venv
+  (`SKIP_MODELS=1` opts out; `make setup-models` still runs that half alone).
+  It delegates to `scripts/update-models.sh --no-test` — the same script
+  `make update` uses — rather than keeping the weaker parallel pull loop that
+  was in the Makefile, so setup inherits the daemon start, Ollama version gate,
+  hardware-fit filtering, and per-model failure tolerance for free. A missing
+  `ollama` binary prints the official-installer one-liner (with the snap
+  caveat) and skips instead of failing, since installing it needs sudo.
+  Fixed a real bug this surfaced: `manifest.models()` walked every profile
+  including the HOSTED `frontier` tier, so both `make setup-models` and
+  `scripts/update-models.sh` had been feeding `gemini-3.6-flash` — a Gemini
+  model name, not an Ollama tag — straight to `ollama pull`. `--runnable-only`
+  didn't catch it either: `can_run_model` returns True for an unrecognized tag
+  by design ("never silently drop a model we have no data on"). Now filtered on
+  `provider != "ollama"`; nothing is lost, since a hosted profile's
+  `fallback_profile` is itself a profile in the same loop.
+  `tests/test_manifest.py` (6 tests, 5 confirmed to fail without the fix,
+  including one guarding the real config/models.yaml so a future hosted profile
+  can't leak in); 477 total.
+- 2026-07-28 (later) — `make setup` now also CONFIGURES which model each
+  profile uses, from detected hardware, before pulling anything
+  (`reel/hardware_config.py`, `make hardware-config`, `python -m
+  reel.hardware_config` to preview). `llm.resolve_model` already adapts at run
+  time, but only among models already PULLED — too late to help the step that
+  decides what to pull, which is why `config/models.yaml`'s 8 GB-VRAM tuning
+  (`quality_high: qwen3:30b`, a 19 GB download) reached every host verbatim.
+  Deltas go to a GITIGNORED `config/models.local.yaml`, deep-merged field by
+  field over the tracked file by `llm.config` — models.yaml is hand-tuned and
+  heavily commented against one machine, so rewriting it in place would
+  destroy that commentary and leave every clone dirty. Two deliberate limits:
+  it only picks from a profile's own `model`+`fallbacks` ladder (never invents
+  a tag), and it only writes when the tracked choice does NOT fit — on this
+  host it writes nothing, so the deliberate choices a naive size check gets
+  wrong (30b MoE over the same-size 32b dense, ~6x faster) stand. Scope is the
+  `model` field only, per instruction: `fallbacks` are already fit-filtered at
+  run time by `resolve_model`, and `num_ctx` carries per-model VRAM reasoning
+  that `local_max_chars` derives the source budget from.
+  Two real bugs found by running it rather than by reading it: (1) my first
+  version judged against the MERGED config, so an override already on disk
+  became the baseline and a host that later grew could never be restored — now
+  judged against new `llm.base_config()`, with `get_profile(name, cfg=None)`
+  taking the pre-overlay view; (2) inserting the overlay code above `config()`
+  silently stole its `@lru_cache(maxsize=1)` decorator, which the test suite
+  caught as an unhashable-dict TypeError. Verified end to end against the real
+  config: simulating a no-GPU/8 GB host cuts the pull list from 4 models
+  (~35 GB) to 2 (~7.6 GB) with `options`/`fallbacks` preserved, and re-running
+  on this host removes the overlay again.
+  `tests/test_hardware_config.py` (20 tests, incl. the upgrade-path
+  regression); 497 total.
 - 2026-07-25 (later 8) — Removed `duration_budget.suggest_scene_target`, the
   last and largest cap on scene count. It turned `--target-duration` into a
   literal range ("roughly 2-4 scenes" at the 45s default) interpolated into

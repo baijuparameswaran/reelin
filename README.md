@@ -37,14 +37,33 @@ developed in slow, steady iterations.
 
 ```bash
 git clone <this-repo-url> reel && cd reel
-make setup          # creates .venv/, installs requirements.txt (PyYAML, pypdf, google-genai)
-make setup-models   # pulls the preferred local models (config/models.yaml) via `ollama pull`
+make setup          # creates .venv/, installs requirements.txt, then pulls the local models
+source .venv/bin/activate
 make models         # verify: shows which installed model each profile ('fast'/'quality'/…) resolves to
 ```
 
 `make setup` only touches `.venv/` and installs from `requirements.txt` — it
 never writes a lockfile or a second dependency manifest; that's the single
 source of truth for what the environment needs.
+
+It then matches each profile's model to your GPU/RAM and pulls the result.
+`config/models.yaml` is tuned for one specific machine (8 GB VRAM, 24 GB RAM),
+so on a smaller box `make setup` writes the deltas to a gitignored
+`config/models.local.yaml` — e.g. `quality_high` drops off the 19 GB
+`qwen3:30b` — and pulls that instead. It only ever picks from a profile's own
+declared fallbacks, and on a host the tracked config already fits it writes
+nothing. Run it alone with `make hardware-config` (add nothing to see the plan:
+`python -m reel.hardware_config`), and delete the file to go back to the
+tracked defaults.
+
+The pull itself is a multi-GB download — `make setup-models` runs just that
+part, `SKIP_MODELS=1 make setup` skips it. It's skipped with a hint if `ollama`
+isn't installed yet, since installing Ollama needs sudo and stays your call:
+
+```bash
+curl -fsSL https://ollama.com/install.sh | sh   # NOT the snap — it can't reach the GPU
+make setup-models
+```
 
 ### 3. Optional: Gemini for image + video generation
 

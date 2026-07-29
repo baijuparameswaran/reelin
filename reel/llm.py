@@ -27,6 +27,9 @@ from pathlib import Path
 import yaml
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "models.yaml"
+# Per-host overlay, gitignored, written by `reel.hardware_config` (make setup).
+# Deep-merged over CONFIG_PATH by `config()` — see `local_overrides`.
+LOCAL_CONFIG_PATH = CONFIG_PATH.with_name("models.local.yaml")
 
 # Legacy flat cap. Retained as the safe floor returned for an unknown or
 # malformed profile, and as the value an undeclared `num_ctx` derives back to
@@ -213,9 +216,66 @@ class Profile:
     fallback_profile: str = "quality_high"
 
 
+def _deep_merge(base: dict, overlay: dict) -> dict:
+    """`overlay` layered over `base`, recursing into nested mappings.
+
+    Field-level, not block-level, so an overlay naming just
+    `profiles.quality_high.model` keeps that profile's tracked `fallbacks`,
+    `options`, and comments-in-spirit rather than replacing the whole entry.
+    """
+    out = dict(base)
+    for key, value in overlay.items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = _deep_merge(out[key], value)
+        else:
+            out[key] = value
+    return out
+
+
+def local_overrides() -> dict:
+    """The gitignored per-HOST overlay (`config/models.local.yaml`), or `{}`.
+
+    `config/models.yaml` is tracked, hand-tuned, and heavily commented against
+    ONE machine's hardware (see ARCHITECTURE.md's "Hardware reality"), so it's
+    the wrong place for a different host's model choices — rewriting it would
+    destroy the commentary and leave every clone with a dirty worktree.
+    `reel.hardware_config` writes this file instead.
+
+    Never raises: a malformed or unreadable overlay yields `{}`, so the tracked
+    config alone still runs the pipeline. Matches how every other config read in
+    this module degrades.
+    """
+    try:
+        if not LOCAL_CONFIG_PATH.exists():
+            return {}
+        data = yaml.safe_load(LOCAL_CONFIG_PATH.read_text())
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+@lru_cache(maxsize=1)
+def base_config() -> dict:
+    """The TRACKED config alone, with no per-host overlay applied.
+
+    Everything that runs the pipeline wants `config()` instead. This exists for
+    `reel.hardware_config`, which decides whether a host needs an override at
+    all: judged against the merged config, a previously-written override would
+    become the new baseline and always look like it already fits — so a host
+    that grew (or a downgrade written from a bad reading) could never be
+    restored to the tracked model.
+    """
+    return yaml.safe_load(CONFIG_PATH.read_text())
+
+
 @lru_cache(maxsize=1)
 def config() -> dict:
-    return yaml.safe_load(CONFIG_PATH.read_text())
+    # Cached for the process, so the per-host overlay is read exactly once,
+    # alongside the tracked file. Anything that changes either path at runtime
+    # (tests, `hardware_config.apply`) must call `config.cache_clear()`.
+    cfg = base_config()
+    overrides = local_overrides()
+    return _deep_merge(cfg, overrides) if overrides else cfg
 
 
 def host() -> str:
@@ -525,8 +585,13 @@ def installed_models() -> tuple[str, ...]:
         return tuple()
 
 
-def get_profile(name: str) -> Profile:
-    profiles = config()["profiles"]
+def get_profile(name: str, cfg: dict | None = None) -> Profile:
+    """The named profile, read from `cfg` (defaults to the merged `config()`).
+
+    `cfg` exists so `hardware_config` can read profiles out of `base_config()`
+    — the pre-overlay view it has to judge against.
+    """
+    profiles = (config() if cfg is None else cfg)["profiles"]
     if name not in profiles:
         raise KeyError(f"Unknown profile {name!r}; available: {list(profiles)}")
     p = profiles[name]
