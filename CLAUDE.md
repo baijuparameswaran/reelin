@@ -37,6 +37,10 @@ judge neutrally). A human-in-the-loop gate reviews/iterates each stage.
   in `reel/agents/`: what it takes, what it produces, whether it's steered/
   graded/scoped-revisable/prompt-sandwiched. Read this to understand *what
   a specific agent does*.
+- **[GETTING_STARTED.md](GETTING_STARTED.md)** — the user-facing setup/first-run
+  path (prereqs, `make setup`, first run, troubleshooting); **[README.md](README.md)**
+  is the user-facing feature reference. Keep both current when a change alters
+  how someone installs or runs the project.
 - **[PROGRESS.md](PROGRESS.md)** — Current state (what's true right now) and
   the append-only Session log (newest entry at the top). Read this to
   understand *what's happened and what's next*.

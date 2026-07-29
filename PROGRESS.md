@@ -126,6 +126,18 @@
   on this host removes the overlay again.
   `tests/test_hardware_config.py` (20 tests, incl. the upgrade-path
   regression); 497 total.
+- 2026-07-28 (later 2) — Split the setup path out of README.md into
+  **GETTING_STARTED.md**: prerequisites, install, the optional Gemini key,
+  first run (gate keys, resume, what lands in `output/`), where to go next, and
+  a troubleshooting section covering the failure modes that actually happen
+  here (missing `.venv`, the snap-Ollama CPU fallback, the streamed-generation
+  inactivity timeout, a model that won't fit, no images without a key, no
+  `movie.mp4` without ffmpeg). README's five numbered setup subsections
+  collapse to a pointer plus a four-line quickstart, so it reads as what it
+  had become — a feature reference — instead of burying "how do I run this"
+  under prerequisites. Every step ends with a way to verify it worked. Also
+  pointed CLAUDE.md at both user-facing docs so they're maintained alongside
+  ARCHITECTURE/AGENTS/PROGRESS. No code change.
 - 2026-07-25 (later 8) — Removed `duration_budget.suggest_scene_target`, the
   last and largest cap on scene count. It turned `--target-duration` into a
   literal range ("roughly 2-4 scenes" at the 45s default) interpolated into

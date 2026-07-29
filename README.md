@@ -7,101 +7,34 @@ web-series episode — navigating the phases of adaptation, some in parallel.
 Built to run on **locally-hosted open LLMs** (via [Ollama](https://ollama.com)),
 developed in slow, steady iterations.
 
-## Setup — from a new, clean environment
+## Getting started
 
-### 1. Prerequisites
-
-- **Python 3.10+** (any recent CPython; no other packaging tooling is used —
-  `requirements.txt` / `requirements-image.txt` + a plain `venv` is the whole
-  story, see below).
-- **[Ollama](https://ollama.com)** — runs every text/LLM agent locally.
-  - **If you have an NVIDIA GPU, install via the official installer script,
-    not your distro's `snap`/`apt` package.** The Ubuntu snap build uses strict
-    confinement that blocks `/dev/nvidia*`, so it silently falls back to
-    100%-CPU inference with no error:
-    ```bash
-    curl -fsSL https://ollama.com/install.sh | sh
-    ```
-  - After pulling a model (next section), confirm the GPU is actually being
-    used: `ollama ps` — look for a non-zero "Size VRAM" against the loaded
-    model. All-CPU still works, just much slower (a few tok/s vs. tens+ on GPU).
-- **`ffmpeg`** on `PATH` — optional but recommended. Needed for stitching
-  rendered clips into `output/video/movie.mp4` and for subtitle/shot-label
-  overlays; without it those two steps are skipped with a warning, everything
-  else is unaffected. `apt install ffmpeg` / `brew install ffmpeg` / etc.
-- **A Gemini API key** — optional, only for character-image + Veo video
-  rendering (see below). The text pipeline (ingest → … → screenplay/storyboard)
-  runs completely without one.
-
-### 2. Install
+**→ [GETTING_STARTED.md](GETTING_STARTED.md)** is the step-by-step path from a
+fresh clone to a finished run: prerequisites, install, first run, and
+troubleshooting. Start there. The rest of this README is the feature reference
+— what every stage, flag, and config block actually does.
 
 ```bash
 git clone <this-repo-url> reel && cd reel
-make setup          # creates .venv/, installs requirements.txt, then pulls the local models
-source .venv/bin/activate
-make models         # verify: shows which installed model each profile ('fast'/'quality'/…) resolves to
+make setup            # venv + deps + the local models matched to your hardware
+make demo             # bundled sample story, one scene, review gate on
+make run SRC=path/to/story.txt SCENES=all
 ```
 
-`make setup` only touches `.venv/` and installs from `requirements.txt` — it
-never writes a lockfile or a second dependency manifest; that's the single
-source of truth for what the environment needs.
-
-It then matches each profile's model to your GPU/RAM and pulls the result.
-`config/models.yaml` is tuned for one specific machine (8 GB VRAM, 24 GB RAM),
-so on a smaller box `make setup` writes the deltas to a gitignored
-`config/models.local.yaml` — e.g. `quality_high` drops off the 19 GB
-`qwen3:30b` — and pulls that instead. It only ever picks from a profile's own
-declared fallbacks, and on a host the tracked config already fits it writes
-nothing. Run it alone with `make hardware-config` (add nothing to see the plan:
-`python -m reel.hardware_config`), and delete the file to go back to the
-tracked defaults.
-
-The pull itself is a multi-GB download — `make setup-models` runs just that
-part, `SKIP_MODELS=1 make setup` skips it. It's skipped with a hint if `ollama`
-isn't installed yet, since installing Ollama needs sudo and stays your call:
-
-```bash
-curl -fsSL https://ollama.com/install.sh | sh   # NOT the snap — it can't reach the GPU
-make setup-models
-```
-
-### 3. Optional: Gemini for image + video generation
-
-Everything else in the pipeline runs on local open models; **only** character
-portraits and Veo video clips use Gemini, and only if a key is present:
-
-```bash
-make secrets CMD=set   # paste your key once; stored chmod-600 at ~/.config/reel/gemini_key
-make secrets           # CMD defaults to 'status' — check whether a key is set
-```
-
-(Or set the env var directly: `export GEMINIAPIKEY=…` — also accepts
-`GEMINI_API_KEY` / `GOOGLE_API_KEY`.) Without a key, the casting/video stages
-no-op with a clear hint and the rest of the run is unaffected.
-
-### 4. Optional: local (non-Gemini) image generation
-
-Only needed if you set `image.backend: diffusers` in `config/models.yaml`
-instead of the default `gemini` backend:
-
-```bash
-make setup-image    # installs diffusers/torch/etc. (needs a GPU to be practical)
-```
-
-### 5. Run
-
-```bash
-make demo                # bundled sample story, 1 scene, fast profile
-make demo SCENES=all     # every scene the sample story has
-make demo RESUME=1       # continue a paused/failed run from its last stage
-make run SRC=path/to/story.txt SCENES=3
-```
+Prerequisites in brief: **Python 3.10+**, **[Ollama](https://ollama.com)**
+(install via the official script, not the snap — it can't reach an NVIDIA GPU),
+optionally **`ffmpeg`** for stitching clips into one movie, and optionally a
+**Gemini API key** (`make secrets CMD=set`) for character images and Veo video.
+The whole text pipeline runs without a key.
 
 The pipeline is **model-agnostic**: agents request a *profile* (`fast` /
 `quality` / …), never a model name — if the preferred model isn't pulled, it
 falls back to whatever's installed (see `config/models.yaml`). On a
 single-GPU/CPU-only host, `--profile fast` (one small model, no reloads
 between agents) is much faster than the mixed default.
+
+For local (non-Gemini) image generation — only needed if you set
+`image.backend: diffusers` — `make setup-image` installs diffusers/torch/etc.
 
 ### Testing
 
@@ -151,11 +84,17 @@ so an update can't silently break the agents, and logs to
 - `num_ctx` and which models each profile targets are tuned per-profile in
   `config/models.yaml` for the RAM/VRAM available; see that file's comments
   before changing them for a very different host.
+- Those values target **one** machine (8 GB VRAM / 24 GB RAM), so `make setup`
+  runs `make hardware-config` first and writes any deltas your host needs to a
+  gitignored `config/models.local.yaml`, merged field by field over the tracked
+  file. It only picks from a profile's own declared fallbacks, and writes
+  nothing on a host the tracked config already fits. Preview its decisions with
+  `python -m reel.hardware_config`; delete the file to return to the defaults.
 
-See `CLAUDE.md` (entry point) — or directly `ARCHITECTURE.md` for this
-project's specific dev host and conventions, `AGENTS.md` for a per-agent
-reference, and `PROGRESS.md` for current status and session-to-session
-history.
+See [GETTING_STARTED.md](GETTING_STARTED.md) to set up and run, and `CLAUDE.md`
+(entry point) for internals — or directly `ARCHITECTURE.md` for this project's
+specific dev host and conventions, `AGENTS.md` for a per-agent reference, and
+`PROGRESS.md` for current status and session-to-session history.
 
 ## Iteration 1 — "screenplay material"
 
@@ -200,7 +139,7 @@ and [Story fidelity](#story-fidelity-consistency-scoring).
 | **moodboard** | production designer | film-wide visual-tone bible (color story, palette, lighting mood, textures, atmosphere, influences, render-ready tiles); **steers all downstream stages** |
 | **characters** | script analyst | every character — humans **and** animals/birds/creatures — each defined individually (kind, role, want, arc, appearance, voice, mannerisms); undetailed background masses collapse to one `group` |
 | **scenes** | screenwriter | numbered scene list (sluglines, summaries, purpose, and a `location` — the plain name of the physical setting, identical across every scene set in the same place) |
-| **casting** | casting director | two layers per character — an **actor** (own role-independent look) and the **character** (that actor aged/costumed into the role); also casts each distinct scene `location` (no actor layer — the space itself). Both are rendered to an image via Gemini (see [Character image generation](#character-image-generation-gemini)) and used as the video identity reference |
+| **casting** | casting director | two layers per character — an **actor** (own role-independent look) and the **character** (that actor aged/costumed into the role); also casts each distinct scene `location` (no actor layer — the space itself). Both are rendered to an image via Gemini (see [Character image generation](#character--location-image-generation-gemini)) and used as the video identity reference |
 | **soundscape** | sound / score | per-scene ambient bed, audio cues, silence, emotional function |
 | **visuals** | art production | per-scene color palette, lighting, filters, key props |
 | **cinematography** | director of photography | per-scene shot list (type, angle, movement, lens, framing) |
