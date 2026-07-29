@@ -77,6 +77,23 @@
   phase.
 
 ## Session log
+- 2026-07-28 (later 3) — Relaxed `test_frontier_profile`'s hosted-tier
+  assertion from `hosted == {"scenes"}` to `hosted <= {"scenes"}`, per direct
+  instruction that "using frontier model must be optional — assumption may not
+  be asserted". Opting a stage onto the hosted tier is a config choice, not a
+  design invariant, so requiring it made a legitimate all-local config (every
+  stage on `fast`) fail the suite — and since `make demo`/`make run` depend on
+  `make test`, it blocked the pipeline run itself, which is how it surfaced.
+  The property worth testing survives intact: hosting costs money and adds a
+  network dependency, so it must never spread beyond the one stage local
+  context length capped outright. Verified both arms green (497 pass with
+  `scenes: frontier` AND with everything on `fast`) and that the test still
+  catches a real violation (injecting `casting: frontier` fails by name).
+  Separately, the all-`fast` experiment that surfaced this was moved out of
+  the tracked `config/models.yaml` and into the gitignored
+  `config/models.local.yaml` overlay — which is what that overlay is for, and
+  `hardware_config.apply` carries a hand-added `agent_profiles` block through
+  untouched since it only ever rewrites `profiles.<name>.model`.
 - 2026-07-28 — `make setup` now pulls the Ollama models too, not just the venv
   (`SKIP_MODELS=1` opts out; `make setup-models` still runs that half alone).
   It delegates to `scripts/update-models.sh --no-test` — the same script
